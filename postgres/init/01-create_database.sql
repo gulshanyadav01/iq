@@ -1,0 +1,2 @@
+CREATE DATABASE insure_iq;
+CREATE DATABASE auth;

@@ -1,0 +1,79 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+/* ── Base font scale ──────────────────────────────────────────── */
+html {
+  font-size: 13px;
+}
+
+/* ── Noise texture overlay ────────────────────────────────────── */
+/* Applied via .noise class on layout wrappers */
+.noise::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: var(--noise-opacity, 0.025);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  background-size: 128px 128px;
+}
+
+.dark .noise::before,
+.dark.noise::before {
+  --noise-opacity: 0.04;
+}
+
+/* ── Glass utility classes ────────────────────────────────────── */
+.glass {
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.dark .glass {
+  background: rgba(15, 15, 20, 0.55);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.glass-subtle {
+  background: rgba(255, 255, 255, 0.35);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.dark .glass-subtle {
+  background: rgba(15, 15, 20, 0.35);
+  border-color: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Global form inputs ───────────────────────────────────────── */
+@layer base {
+  input[type="text"],
+  input[type="email"],
+  input[type="password"],
+  input[type="number"],
+  input[type="search"],
+  input[type="tel"],
+  input[type="url"] {
+    @apply border border-gray-300 dark:border-gray-600 px-2.5 py-1.5 rounded-lg
+           focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-transparent
+           bg-white/70 dark:bg-white/5 text-gray-900 dark:text-gray-100;
+  }
+
+  textarea {
+    @apply border border-gray-300 dark:border-gray-600 px-2.5 py-1.5 rounded-lg
+           focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-transparent
+           bg-white/70 dark:bg-white/5 text-gray-900 dark:text-gray-100;
+  }
+}
+
+/* ── Reduced motion ───────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

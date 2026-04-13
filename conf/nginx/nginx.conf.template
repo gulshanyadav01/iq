@@ -1,0 +1,63 @@
+server {
+    listen 80;
+    server_name *.rhobots.ai;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name ${SERVER_NAME};
+
+    ssl_certificate     /etc/letsencrypt/live/rhobots.ai/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/rhobots.ai/privkey.pem;
+
+    # Allow larger request bodies (for file uploads, large payloads, etc.)
+    client_max_body_size 500M;
+
+    # --------------------
+    # AUTH SERVICE
+    # --------------------
+    location /auth/ {
+        proxy_pass http://auth:10000/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # --------------------
+    # OPERATOR API STATIC FILES
+    # --------------------
+    location /service-api/static/ {
+        alias /app/static/;
+        access_log off;
+        expires 30d;
+    }
+
+    # --------------------
+    # OPERATOR API
+    # --------------------
+    location /service-api/ {
+        proxy_pass http://backend:8000/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Increased timeouts for long-running API operations (e.g., task execution)
+        proxy_connect_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+    }
+
+    # --------------------
+    # OPERATOR UI
+    # --------------------
+    location / {
+        proxy_pass http://web:3000/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

@@ -1,0 +1,97 @@
+{
+  "name": "insure_iq",
+  "version": "1.0.0",
+  "author": "tech@rhobots.ai",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": "24"
+  },
+  "scripts": {
+    "preinstall": "npx only-allow pnpm",
+    "dev:up": "docker compose -f ./docker-compose.dev.yml up",
+    "dev:down": "docker compose -f ./docker-compose.dev.yml down",
+    "dev:prune": "docker compose -f ./docker-compose.dev.yml down -v",
+    "prod:up": "docker compose up -d",
+    "prod:down": "docker compose down",
+    "prod:prune": "docker compose down -v",
+    "db:reset": "docker compose -f ./docker-compose.dev.yml up -d postgres && docker compose exec postgres bash -c \"/scripts/reset-databases.sh\"",
+    "nuke": "bash ./scripts/nuke.sh",
+    "init": "bash ./scripts/init-db-user.sh",
+    "dev": "pnpm i && pnpm run dev:up --pull always",
+    "start": "pnpm i && pnpm run prod:up --pull always",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@release-it/bumper": "^7.0.5",
+    "braces": "3.0.3",
+    "dotenv-cli": "^7.4.2",
+    "husky": "^9.0.11",
+    "prettier": "^3.5.3",
+    "release-it": "^19.0.3",
+    "turbo": "^2.5.4"
+  },
+  "release-it": {
+    "git": {
+      "commitMessage": "chore: release v${version}",
+      "tagName": "v${version}",
+      "commitArgs": [
+        "--no-verify"
+      ],
+      "pushArgs": [
+        "--no-verify"
+      ]
+    },
+    "plugins": {
+      "@release-it/bumper": {
+        "out": [
+          {
+            "file": "./web/src/constants/VERSION.ts",
+            "type": "application/typescript"
+          },
+          {
+            "file": "./worker/src/constants/VERSION.ts",
+            "type": "application/typescript"
+          },
+          {
+            "file": "./web/package.json"
+          },
+          {
+            "file": "./worker/package.json"
+          }
+        ]
+      }
+    },
+    "github": {
+      "release": true,
+      "web": true,
+      "autoGenerate": true,
+      "releaseName": "v${version}",
+      "comments": {
+        "submit": true,
+        "issue": ":rocket: _This issue has been resolved in v${version}. See [${releaseName}](${releaseUrl}) for release notes._",
+        "pr": ":rocket: _This pull request is included in v${version}. See [${releaseName}](${releaseUrl}) for release notes._"
+      }
+    }
+  },
+  "packageManager": "pnpm@10.15.0+sha512.486ebc259d3e999a4e8691ce03b5cac4a71cbeca39372a9b762cb500cfdf0873e2cb16abe3d951b1ee2cf012503f027b98b6584e4df22524e0c7450d9ec7aa7b",
+  "pnpm": {
+    "overrides": {
+      "nanoid": "^3.3.8",
+      "katex": "^0.16.21",
+      "tar-fs": "^2.1.2",
+      "rollup@^4.0.0": "^4.22.4"
+    },
+    "onlyBuiltDependencies": [
+      "@parcel/watcher",
+      "@tailwindcss/oxide",
+      "esbuild",
+      "sharp",
+      "unrs-resolver",
+      "vue-demi"
+    ]
+  },
+  "dependencies": {
+    "serve": "14.2.4"
+  }
+}

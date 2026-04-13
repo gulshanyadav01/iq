@@ -1,0 +1,216 @@
+services:
+  backend:
+    build:
+      dockerfile: ./backend/Dockerfile
+      context: .
+    image: insure-iq-backend:latest
+    volumes:
+      - ./backend:/app
+    command: ["dev"]
+    depends_on: &backend-depends-on
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment: &backend-env
+      DEBUG:  ${DEBUG:-true}
+      APP_ENV: ${APP_ENV:-DEV}
+      SECRET_KEY: ${SECRET_KEY:-mysecretkey}
+      WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:-mywebhooksecretkey}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*,}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://localhost:3000,}
+      HOST_NAME: ${HOST_NAME:-http://localhost:8000}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://auth:10000}
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_NAME: ${DB_NAME:-insure_iq}
+      AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-http://minio:9000}
+      AWS_S3_PUBLIC_ENDPOINT_URL: ${AWS_S3_PUBLIC_ENDPOINT_URL:-http://localhost:9900}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minio}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-miniosecret}
+      AWS_STORAGE_BUCKET_NAME: ${AWS_STORAGE_BUCKET_NAME:-insure-iq}
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-django-db}
+      CELERY_CACHE_BACKEND: ${CELERY_CACHE_BACKEND:-django-cache}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  celery:
+    image: insure-iq-backend:latest
+    volumes:
+      - ./backend:/app
+    command: ["celery"]
+    environment:
+      <<: *backend-env
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+
+  celery_file_processing:
+    image: insure-iq-backend:latest
+    volumes:
+      - ./backend:/app
+    command: ["celery-file-processing"]
+    environment:
+      <<: *backend-env
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+
+  beat:
+    image: insure-iq-backend:latest
+    volumes:
+      - ./backend:/app
+    command: ["beat"]
+    environment:
+      <<: *backend-env
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+
+  web:
+    image: insure-iq-web:latest
+    build:
+      dockerfile: ./web/Dockerfile.dev
+      context: .
+      args:
+        - NODE_ENV=${NODE_ENV:-development}
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - NUXT_PUBLIC_AUTH_BASE_URL=${NUXT_PUBLIC_AUTH_BASE_URL:-http://localhost:8080/auth/api/auth}
+      - NUXT_PUBLIC_APP_BASE_URL=${NUXT_PUBLIC_APP_BASE_URL:-http://localhost:8080}
+      - NUXT_PUBLIC_API_SCHEME=${NUXT_PUBLIC_API_SCHEME:-http}
+      - NUXT_PUBLIC_API_BASE_URL=${NUXT_PUBLIC_API_BASE_URL:-localhost:8080/service-api}
+      - NUXT_PUBLIC_ENABLED_SOCIAL_PROVIDERS=${NUXT_PUBLIC_ENABLED_SOCIAL_PROVIDERS:-}
+    volumes:
+      - ./web:/app/web
+      - /app/web/node_modules
+      - /app/web/.nuxt
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    restart: always
+
+  auth:
+    image: rhobotsai/auth:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: [ "start" ]
+    ports:
+      - "10000:10000"
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: ${PORT:-10000}
+      BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-myauthsecret}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:10000}
+      TRUSTED_ORIGINS: ${TRUSTED_ORIGINS:-http://localhost:3000,http://localhost:20001,http://localhost:8080}
+      DATABASE_STRING: ${DATABASE_STRING:-postgres://postgres:postgres@postgres:5432/auth}
+      REQUIRE_EMAIL_VERIFICATION: ${REQUIRE_EMAIL_VERIFICATION:-false}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-http://minio:9000}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minio}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-miniosecret}
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      AWS_STORAGE_BUCKET_NAME: ${AWS_STORAGE_BUCKET_NAME:-insure-iq}
+      AWS_SENDER_EMAIL: ${AWS_SENDER_EMAIL:-}
+      WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:-mywebhooksecretkey}
+      WEBHOOK_EP: ${WEBHOOK_EP:-http://backend:8000/api/auth/webhook/}
+    restart: always
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:10000/api/auth/ok" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  proxy:
+    image: nginx:alpine
+    ports:
+      - "${PROXY_PORT:-8080}:8080"
+    volumes:
+      - ./conf/nginx-dev/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - web
+      - backend
+      - auth
+    restart: always
+
+  minio:
+    image: minio/minio
+    command: minio server --address ':9000' --console-address ':9001' /data
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    ports:
+      - "9900:9000"
+      - "9901:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 1s
+
+  minio_init:
+    image: minio/minio
+    depends_on:
+      - minio
+    restart: "no"
+    entrypoint: >
+      /bin/sh -c "
+        until (mc alias set myminio http://minio:9000 minio miniosecret 2>/dev/null) do echo '...' && sleep 1; done;
+        mc mb --ignore-existing myminio/insure-iq;
+        mc anonymous set download myminio/insure-iq;
+        exit 0;
+      "
+
+  redis:
+    image: redis:7
+    restart: always
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-17}
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d
+      - ./postgres/scripts:/scripts
+volumes:
+  postgres_data:
+    driver: local
+  minio_data:
+    driver: local
