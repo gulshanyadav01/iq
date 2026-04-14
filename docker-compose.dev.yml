@@ -34,6 +34,8 @@ services:
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-django-db}
       CELERY_CACHE_BACKEND: ${CELERY_CACHE_BACKEND:-django-cache}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      MINERVA_API_URL: ${MINERVA_API_URL:-https://rhobots.pbpartners.com/api/mineru/file_parse}
     restart: always
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
@@ -53,11 +55,11 @@ services:
         condition: service_healthy
     restart: always
 
-  celery_file_processing:
+  celery_policy_extract:
     image: insure-iq-backend:latest
     volumes:
       - ./backend:/app
-    command: ["celery-file-processing"]
+    command: ["celery-policy-extract"]
     environment:
       <<: *backend-env
     depends_on:

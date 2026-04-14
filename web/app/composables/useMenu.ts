@@ -54,6 +54,7 @@ export const useMenu = () => {
       {
         id: 'bots',
         label: 'AI Bots',
+        isVisible: false,
         items: [
           {
             id: 'crews',
@@ -81,6 +82,7 @@ export const useMenu = () => {
       {
         id: 'development',
         label: 'Development',
+        isVisible: false,
         items: [
           {
             id: 'ui-reference',
