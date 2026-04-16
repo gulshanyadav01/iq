@@ -821,12 +821,30 @@ function formatCommissionValue(outcome: any): string {
 
 function formatConditions(conditions: any): string {
   if (!conditions) return 'All'
+  const labelMap: Record<string, string> = {
+    channel: 'channel',
+    vehicle_type: 'vehicle',
+    coverage_type: 'coverage',
+    state: 'state',
+    customer_type: 'customer',
+  }
   const parts: string[] = []
-  if (conditions.channel?.length) parts.push(`channel: ${conditions.channel.join(', ')}`)
-  if (conditions.vehicle_type?.length) parts.push(`vehicle: ${conditions.vehicle_type.join(', ')}`)
-  if (conditions.coverage_type?.length) parts.push(`coverage: ${conditions.coverage_type.join(', ')}`)
-  if (conditions.state?.length) parts.push(`state: ${conditions.state.join(', ')}`)
-  if (conditions.customer_type?.length) parts.push(`customer: ${conditions.customer_type.join(', ')}`)
+  for (const [key, value] of Object.entries(conditions)) {
+    if (!value) continue
+    const label = labelMap[key] || key.replace(/_/g, ' ')
+    if (Array.isArray(value) && value.length) {
+      parts.push(`${label}: ${value.join(', ')}`)
+    } else if (typeof value === 'string' && value) {
+      parts.push(`${label}: ${value}`)
+    } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      // nested object — render key=val pairs
+      const sub = Object.entries(value as Record<string, unknown>)
+        .filter(([, v]) => v !== null && v !== undefined)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(', ')
+      if (sub) parts.push(`${label}: ${sub}`)
+    }
+  }
   return parts.join(' · ') || 'All'
 }
 
