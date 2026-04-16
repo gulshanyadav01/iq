@@ -72,6 +72,9 @@ services:
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       EXCEL_AI_CLASSIFICATION_ENABLED: ${EXCEL_AI_CLASSIFICATION_ENABLED:-true}
       USE_MULTI_PASS_EXTRACTION: ${USE_MULTI_PASS_EXTRACTION:-true}
+      MINERVA_API_URL: ${MINERVA_API_URL:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: always
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
@@ -84,6 +87,8 @@ services:
     command: ["celery"]
     environment:
       <<: *backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: always
 
   beat:
@@ -91,6 +96,8 @@ services:
     command: ["beat"]
     environment:
       <<: *backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: always
 
   web:
@@ -105,6 +112,7 @@ services:
         - NUXT_PUBLIC_API_SCHEME=${NUXT_PUBLIC_API_SCHEME:-http}
         - NUXT_PUBLIC_API_BASE_URL=${NUXT_PUBLIC_API_BASE_URL:-localhost:8000}
         - NUXT_PUBLIC_ENABLED_SOCIAL_PROVIDERS=${NUXT_PUBLIC_ENABLED_SOCIAL_PROVIDERS:-}
+        - NUXT_APP_BASE_URL=${NUXT_APP_BASE_URL:-/}
     ports:
       - "${APP_PORT}:3000"
     depends_on:
