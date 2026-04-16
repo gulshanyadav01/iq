@@ -65,6 +65,9 @@ services:
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-django-db}
       CELERY_CACHE_BACKEND: ${CELERY_CACHE_BACKEND:-django-cache}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      MINERVA_API_URL: ${MINERVA_API_URL:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: always
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
@@ -77,6 +80,8 @@ services:
     command: ["celery"]
     environment:
       <<: *backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: always
 
   beat:
@@ -84,6 +89,8 @@ services:
     command: ["beat"]
     environment:
       <<: *backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: always
 
   web:

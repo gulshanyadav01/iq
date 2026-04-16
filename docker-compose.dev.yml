@@ -36,6 +36,8 @@ services:
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       MINERVA_API_URL: ${MINERVA_API_URL:-https://rhobots.pbpartners.com/api/mineru/file_parse}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: always
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
@@ -50,6 +52,8 @@ services:
     command: ["celery"]
     environment:
       <<: *backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       backend:
         condition: service_healthy
@@ -62,6 +66,8 @@ services:
     command: ["celery-policy-extract"]
     environment:
       <<: *backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       backend:
         condition: service_healthy
@@ -74,6 +80,8 @@ services:
     command: ["beat"]
     environment:
       <<: *backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       backend:
         condition: service_healthy
