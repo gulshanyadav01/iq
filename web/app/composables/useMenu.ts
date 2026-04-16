@@ -9,7 +9,8 @@ import {
   FileText,
   Bot,
   Zap,
-  Upload
+  Upload,
+  FileStack
 } from 'lucide-vue-next'
 
 export const useMenu = () => {
@@ -46,6 +47,14 @@ export const useMenu = () => {
             label: 'Policy Extract',
             path: '/uploads',
             icon: Upload,
+            requiresAuth: true,
+            roles: ['admin', 'user']
+          },
+          {
+            id: 'commission-intake',
+            label: 'Commission Intake',
+            path: '/commission-intake',
+            icon: FileStack,
             requiresAuth: true,
             roles: ['admin', 'user']
           }

@@ -36,6 +36,13 @@ services:
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       MINERVA_API_URL: ${MINERVA_API_URL:-https://rhobots.pbpartners.com/api/mineru/file_parse}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      EXCEL_AI_CLASSIFICATION_ENABLED: ${EXCEL_AI_CLASSIFICATION_ENABLED:-true}
+      USE_MULTI_PASS_EXTRACTION: ${USE_MULTI_PASS_EXTRACTION:-true}
     restart: always
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
@@ -60,6 +67,18 @@ services:
     volumes:
       - ./backend:/app
     command: ["celery-policy-extract"]
+    environment:
+      <<: *backend-env
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+
+  celery_commission_intake:
+    image: insure-iq-backend:latest
+    volumes:
+      - ./backend:/app
+    command: ["celery-commission-intake"]
     environment:
       <<: *backend-env
     depends_on:

@@ -65,6 +65,13 @@ services:
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-django-db}
       CELERY_CACHE_BACKEND: ${CELERY_CACHE_BACKEND:-django-cache}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      EXCEL_AI_CLASSIFICATION_ENABLED: ${EXCEL_AI_CLASSIFICATION_ENABLED:-true}
+      USE_MULTI_PASS_EXTRACTION: ${USE_MULTI_PASS_EXTRACTION:-true}
     restart: always
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]

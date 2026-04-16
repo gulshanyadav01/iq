@@ -88,6 +88,7 @@ INSTALLED_APPS = [
     'accounts',
     'core',
     'policy_extract',
+    'commission_intake',
     'system'
 ]
 

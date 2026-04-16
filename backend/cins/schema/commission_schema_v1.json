@@ -1,0 +1,498 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://policybazaar.com/schemas/commission_schema_v1.json",
+  "title": "Commission Intelligence Canonical Schema (CICS)",
+  "description": "Standardized schema for normalizing heterogeneous insurance commission data into a machine-readable, auditable format",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "document_metadata",
+    "provider",
+    "commission_period",
+    "products"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Version of the CICS schema being used"
+    },
+    "document_metadata": {
+      "type": "object",
+      "required": ["document_id", "extracted_at", "extractor"],
+      "properties": {
+        "document_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "description": "Unique identifier for this normalized document"
+        },
+        "source_type": {
+          "type": "string",
+          "enum": ["email", "pdf", "excel", "api", "manual"],
+          "description": "Type of source document"
+        },
+        "source_file": {
+          "type": "string",
+          "description": "Original filename or identifier"
+        },
+        "extracted_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of extraction"
+        },
+        "extractor": {
+          "type": "string",
+          "description": "Identifier of extraction system or person (e.g., 'gpt-4', 'manual-user123')"
+        },
+        "notes": {
+          "type": "string",
+          "description": "Additional context or extraction notes"
+        }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "required": ["provider_id", "provider_name"],
+      "properties": {
+        "provider_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "description": "Unique identifier for the insurance provider"
+        },
+        "provider_name": {
+          "type": "string",
+          "description": "Full name of the insurance provider"
+        },
+        "contact_email": {
+          "type": "string",
+          "format": "email",
+          "description": "Primary contact email for commission queries"
+        },
+        "contact_phone": {
+          "type": "string",
+          "description": "Primary contact phone number"
+        }
+      }
+    },
+    "commission_period": {
+      "type": "object",
+      "required": ["effective_from"],
+      "properties": {
+        "effective_from": {
+          "type": "string",
+          "format": "date",
+          "description": "Start date of commission period (YYYY-MM-DD)"
+        },
+        "effective_to": {
+          "type": "string",
+          "format": "date",
+          "description": "End date of commission period (YYYY-MM-DD), null if ongoing"
+        },
+        "period_label": {
+          "type": "string",
+          "description": "Human-readable period label (e.g., 'Q1 2024', 'Jan 2024')"
+        }
+      }
+    },
+    "products": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/Product"
+      },
+      "description": "List of insurance products with their commission rules"
+    },
+    "change_reference": {
+      "type": "object",
+      "properties": {
+        "previous_document_id": {
+          "type": "string",
+          "description": "Document ID of previous period's commission structure"
+        },
+        "previous_period": {
+          "type": "string",
+          "format": "date",
+          "description": "Effective date of previous period"
+        },
+        "is_inherited": {
+          "type": "boolean",
+          "description": "True if this document inherits from previous period (e.g., 'same as last month')"
+        },
+        "inheritance_notes": {
+          "type": "string",
+          "description": "Details about inheritance or changes from previous period"
+        }
+      },
+      "description": "Reference to previous period for tracking changes and inheritance"
+    },
+    "source_traces": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SourceTrace"
+      },
+      "description": "Array of source traceability records linking extracted data to original source"
+    },
+    "validation": {
+      "type": "object",
+      "properties": {
+        "overall_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Overall confidence score for the entire extraction (0-1)"
+        },
+        "requires_manual_review": {
+          "type": "boolean",
+          "description": "Flag indicating if manual review is recommended"
+        },
+        "validation_notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of validation warnings or issues"
+        }
+      },
+      "description": "Validation and confidence tracking"
+    }
+  },
+  "$defs": {
+    "Product": {
+      "type": "object",
+      "required": ["product_code", "product_name", "commission_rules"],
+      "properties": {
+        "product_code": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "description": "Unique code for this product (e.g., 'MOTOR_COMPREHENSIVE', 'HEALTH_INDIVIDUAL')"
+        },
+        "product_name": {
+          "type": "string",
+          "description": "Human-readable product name"
+        },
+        "product_category": {
+          "type": "string",
+          "enum": ["motor", "health", "life", "travel", "home", "other"],
+          "description": "High-level product category"
+        },
+        "sub_category": {
+          "type": "string",
+          "description": "Sub-category or product type (e.g., 'two-wheeler', 'four-wheeler', 'individual-health')"
+        },
+        "commission_rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/CommissionRule"
+          },
+          "description": "Ordered list of commission rules (evaluated by priority)"
+        }
+      }
+    },
+    "CommissionRule": {
+      "type": "object",
+      "required": ["rule_id", "priority", "outcome"],
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "description": "Unique identifier for this rule within the product"
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Rule evaluation priority (1 = highest priority)"
+        },
+        "conditions": {
+          "$ref": "#/$defs/RuleConditions",
+          "description": "Conditions that must be met for this rule to apply"
+        },
+        "outcome": {
+          "$ref": "#/$defs/CommissionOutcome",
+          "description": "Commission outcome when conditions are met"
+        },
+        "valid_from": {
+          "type": "string",
+          "format": "date",
+          "description": "Optional start date for rule validity (within commission period)"
+        },
+        "valid_to": {
+          "type": "string",
+          "format": "date",
+          "description": "Optional end date for rule validity (within commission period)"
+        },
+        "rule_description": {
+          "type": "string",
+          "description": "Human-readable description of this rule"
+        }
+      }
+    },
+    "RuleConditions": {
+      "type": "object",
+      "description": "Multi-dimensional conditions for rule matching (all conditions are ANDed together)",
+      "properties": {
+        "premium_amount": {
+          "$ref": "#/$defs/NumericRange",
+          "description": "Premium amount range"
+        },
+        "policy_term": {
+          "$ref": "#/$defs/NumericRange",
+          "description": "Policy term in months or years"
+        },
+        "channel": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["online", "offline", "partner", "direct", "broker"]
+          },
+          "description": "Sales channel(s)"
+        },
+        "customer_type": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["new", "renewal", "portability"]
+          },
+          "description": "Customer type(s)"
+        },
+        "payment_frequency": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["yearly", "half-yearly", "quarterly", "monthly"]
+          },
+          "description": "Payment frequency"
+        },
+        "vehicle_type": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["two-wheeler", "four-wheeler", "gcv", "pcv"]
+          },
+          "description": "Vehicle type for motor insurance"
+        },
+        "coverage_type": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["comprehensive", "third-party", "od-only", "package"]
+          },
+          "description": "Coverage type"
+        },
+        "ncb_percentage": {
+          "$ref": "#/$defs/NumericRange",
+          "description": "No Claim Bonus percentage range"
+        },
+        "custom_conditions": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Escape hatch for provider-specific or complex conditions"
+        }
+      }
+    },
+    "NumericRange": {
+      "type": "object",
+      "properties": {
+        "min": {
+          "type": "number",
+          "description": "Minimum value (inclusive)"
+        },
+        "max": {
+          "type": "number",
+          "description": "Maximum value (inclusive)"
+        },
+        "unit": {
+          "type": "string",
+          "description": "Unit of measurement (e.g., 'INR', 'months', 'years', 'percent')"
+        }
+      }
+    },
+    "CommissionOutcome": {
+      "type": "object",
+      "required": ["commission_type"],
+      "properties": {
+        "commission_type": {
+          "type": "string",
+          "enum": ["percentage", "flat", "tiered", "hybrid"],
+          "description": "Type of commission calculation"
+        },
+        "percentage_value": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Commission percentage (for percentage type)"
+        },
+        "flat_value": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Flat commission amount (for flat type)"
+        },
+        "flat_currency": {
+          "type": "string",
+          "default": "INR",
+          "description": "Currency for flat commission"
+        },
+        "tiers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CommissionTier"
+          },
+          "description": "Tiered commission structure (for tiered/hybrid types)"
+        },
+        "bonuses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Bonus"
+          },
+          "description": "Additional bonuses applicable"
+        },
+        "deductions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Deduction"
+          },
+          "description": "Deductions applicable"
+        },
+        "gst_applicable": {
+          "type": "boolean",
+          "description": "Whether GST applies to this commission"
+        },
+        "gst_percentage": {
+          "type": "number",
+          "minimum": 0,
+          "description": "GST percentage if applicable"
+        },
+        "calculation_notes": {
+          "type": "string",
+          "description": "Additional calculation instructions or notes"
+        }
+      }
+    },
+    "CommissionTier": {
+      "type": "object",
+      "required": ["threshold", "value"],
+      "properties": {
+        "threshold": {
+          "$ref": "#/$defs/NumericRange",
+          "description": "Threshold range for this tier"
+        },
+        "value": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Commission value for this tier (percentage or flat)"
+        },
+        "value_type": {
+          "type": "string",
+          "enum": ["percentage", "flat"],
+          "description": "Type of value (percentage or flat amount)"
+        }
+      }
+    },
+    "Bonus": {
+      "type": "object",
+      "required": ["bonus_type", "value"],
+      "properties": {
+        "bonus_type": {
+          "type": "string",
+          "description": "Type of bonus (e.g., 'volume-bonus', 'target-achievement', 'early-payment')"
+        },
+        "value": {
+          "type": "number",
+          "description": "Bonus value (percentage or flat)"
+        },
+        "value_type": {
+          "type": "string",
+          "enum": ["percentage", "flat"],
+          "description": "Type of value"
+        },
+        "conditions": {
+          "type": "string",
+          "description": "Conditions for bonus eligibility"
+        }
+      }
+    },
+    "Deduction": {
+      "type": "object",
+      "required": ["deduction_type", "value"],
+      "properties": {
+        "deduction_type": {
+          "type": "string",
+          "description": "Type of deduction (e.g., 'processing-fee', 'cancellation-penalty')"
+        },
+        "value": {
+          "type": "number",
+          "description": "Deduction value (percentage or flat)"
+        },
+        "value_type": {
+          "type": "string",
+          "enum": ["percentage", "flat"],
+          "description": "Type of value"
+        },
+        "conditions": {
+          "type": "string",
+          "description": "Conditions for deduction application"
+        }
+      }
+    },
+    "SourceTrace": {
+      "type": "object",
+      "required": ["trace_id", "entity_type", "entity_id"],
+      "properties": {
+        "trace_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "description": "Unique identifier for this trace"
+        },
+        "entity_type": {
+          "type": "string",
+          "enum": ["product", "rule", "condition", "outcome", "provider", "period"],
+          "description": "Type of entity being traced"
+        },
+        "entity_id": {
+          "type": "string",
+          "description": "ID of the entity being traced (e.g., product_code, rule_id)"
+        },
+        "source_location": {
+          "type": "object",
+          "properties": {
+            "page": {
+              "type": "integer",
+              "description": "Page number in PDF"
+            },
+            "section": {
+              "type": "string",
+              "description": "Section or heading in document"
+            },
+            "table": {
+              "type": "string",
+              "description": "Table name or identifier"
+            },
+            "row": {
+              "type": "integer",
+              "description": "Row number in table/spreadsheet"
+            },
+            "column": {
+              "type": "string",
+              "description": "Column identifier in table/spreadsheet"
+            }
+          },
+          "description": "Location in source document"
+        },
+        "quoted_text": {
+          "type": "string",
+          "description": "Exact text excerpt from source document"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Confidence score for this specific extraction (0-1)"
+        },
+        "extraction_notes": {
+          "type": "string",
+          "description": "Notes about ambiguities or interpretation decisions"
+        }
+      }
+    }
+  }
+}
