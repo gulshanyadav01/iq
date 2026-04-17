@@ -84,6 +84,25 @@ v-else-if="item.onClick" class="w-full flex items-center gap-2 px-2 py-1.5 round
         </div>
       </nav>
 
+      <!-- Powered by Rhobots badge -->
+      <div class="flex-shrink-0 px-3 pb-3">
+        <a href="https://rhobots.ai" target="_blank" rel="noopener noreferrer" class="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200
+                    bg-gradient-to-br from-gray-100 via-white to-primary-50
+                    dark:from-white/[0.06] dark:via-white/[0.03] dark:to-primary-500/[0.08]
+                    border border-gray-200/80 dark:border-white/[0.08]
+                    hover:from-gray-200/80 hover:via-white hover:to-primary-100/80
+                    dark:hover:from-white/[0.09] dark:hover:via-white/[0.05] dark:hover:to-primary-500/[0.13]
+                    hover:border-gray-300/80 dark:hover:border-white/[0.13]
+                    hover:shadow-sm">
+          <img src="/images/icon-light.svg" alt="Rhobots" class="h-7 w-7 flex-shrink-0 dark:hidden">
+          <img src="/images/icon-dark.svg" alt="Rhobots" class="h-7 w-7 flex-shrink-0 hidden dark:block">
+          <div class="flex flex-col">
+            <span class="text-[9px] uppercase tracking-[0.12em] text-gray-400 dark:text-gray-500 font-medium leading-tight">Powered by</span>
+            <span class="text-[11px] font-bold tracking-tight text-gray-700 dark:text-gray-200 leading-tight">Rhobots</span>
+          </div>
+        </a>
+      </div>
+
       <!-- Profile footer -->
       <div v-if="isLoggedIn" class="p-3 border-t border-gray-200/60 dark:border-white/[0.06]">
         <LayoutProfileMenu :is-dark="isDark" @update:is-dark="$emit('update:isDark', $event)" @close="handleClose" />
