@@ -45,7 +45,7 @@ export const useMenu = () => {
           {
             id: 'policy-extract',
             label: 'Policy Extract',
-            path: '/uploads',
+            path: '/policy-extract',
             icon: Upload,
             requiresAuth: true,
             roles: ['admin', 'user']

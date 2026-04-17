@@ -19,6 +19,37 @@
         </button>
       </div>
 
+      <!-- Metric Cards -->
+      <div v-if="!loading" class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div class="glass rounded-2xl p-5 space-y-1">
+          <p class="text-[10px] uppercase tracking-widest text-gray-400 dark:text-gray-500">Total</p>
+          <p class="text-2xl font-semibold text-gray-900 dark:text-white">{{ metrics.total }}</p>
+          <p class="text-xs text-gray-400">all time</p>
+        </div>
+        <div class="glass rounded-2xl p-5 space-y-1">
+          <p class="text-[10px] uppercase tracking-widest text-green-500">Completed</p>
+          <p class="text-2xl font-semibold text-green-600 dark:text-green-400">{{ metrics.completed }}</p>
+          <p class="text-xs text-gray-400">fully extracted</p>
+        </div>
+        <div class="glass rounded-2xl p-5 space-y-1">
+          <p class="text-[10px] uppercase tracking-widest text-red-500">Failed</p>
+          <p class="text-2xl font-semibold text-red-600 dark:text-red-400">{{ metrics.failed }}</p>
+          <p class="text-xs text-gray-400">need attention</p>
+        </div>
+        <div class="glass rounded-2xl p-5 space-y-1">
+          <p class="text-[10px] uppercase tracking-widest text-blue-500">In Progress</p>
+          <p class="text-2xl font-semibold text-blue-600 dark:text-blue-400">{{ metrics.inProgress }}</p>
+          <p class="text-xs text-gray-400">processing now</p>
+        </div>
+      </div>
+      <div v-else class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div v-for="i in 4" :key="i" class="glass rounded-2xl p-5 space-y-2 animate-pulse">
+          <div class="h-2 bg-gray-200 dark:bg-gray-700 rounded w-16" />
+          <div class="h-7 bg-gray-200 dark:bg-gray-700 rounded w-10" />
+          <div class="h-2 bg-gray-200 dark:bg-gray-700 rounded w-24" />
+        </div>
+      </div>
+
       <!-- Loading State -->
       <div v-if="loading" class="glass rounded-2xl p-8">
         <div class="flex items-center justify-center gap-2 text-sm text-gray-600 dark:text-gray-400">
@@ -259,7 +290,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 
 interface CommissionDocument {
@@ -290,6 +321,13 @@ const { getBaseUrl } = useBaseUrl()
 const documents = ref<CommissionDocument[]>([])
 const loading = ref(false)
 const error = ref(false)
+
+const metrics = computed(() => ({
+  total: documents.value.length,
+  completed: documents.value.filter(d => d.status === 'completed').length,
+  failed: documents.value.filter(d => d.status === 'failed').length,
+  inProgress: documents.value.filter(d => isInFlight(d.status)).length,
+}))
 
 const isModalOpen = ref(false)
 const selectedFile = ref<File | null>(null)
