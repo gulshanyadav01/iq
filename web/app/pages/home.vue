@@ -3,7 +3,7 @@
     <div class="max-w-6xl mx-auto space-y-8">
       <!-- Header -->
       <div>
-        <h1 class="text-xl font-semibold tracking-tight text-gray-900 dark:text-white">Dashboard</h1>
+        <h1 class="text-xl font-semibold tracking-tight text-gray-900 dark:text-white">InsurIQ</h1>
         <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Choose a module to get started</p>
       </div>
 

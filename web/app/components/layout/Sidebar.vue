@@ -4,7 +4,8 @@
     :class="isSidebarOpen ? 'translate-x-0' : '-translate-x-full'"
   >
     <!-- Floating glass panel -->
-    <div class="m-3 h-[calc(100%-1.5rem)] rounded-2xl flex flex-col overflow-hidden
+    <div
+class="m-3 h-[calc(100%-1.5rem)] rounded-2xl flex flex-col overflow-hidden
                 bg-white/70 dark:bg-gray-950/70
                 backdrop-blur-xl
                 border border-gray-200/60 dark:border-white/[0.07]
@@ -15,8 +16,8 @@
         <div class="flex items-center justify-between h-12">
           <NuxtLink to="/home" class="flex items-center">
             <div class="p-1.5 m-2 rounded-lg border border-gray-200/60 dark:border-white/10 bg-white/60 dark:bg-white/5 transition-colors duration-200">
-              <img src="/images/icon-light.svg" alt="Logo" class="h-5 dark:hidden" />
-              <img src="/images/icon-dark.svg" alt="Logo" class="h-5 hidden dark:block" />
+              <img src="/images/icon-light.svg" alt="Logo" class="h-5 dark:hidden" >
+              <img src="/images/icon-dark.svg" alt="Logo" class="h-5 hidden dark:block" >
             </div>
           </NuxtLink>
           <button
@@ -40,16 +41,17 @@
             <div class="space-y-0.5">
               <template v-for="item in section.items" :key="item.id">
                 <!-- Divider -->
-                <div v-if="item.divider" class="my-2 border-t border-gray-200/60 dark:border-white/[0.06]"></div>
+                <div v-if="item.divider" class="my-2 border-t border-gray-200/60 dark:border-white/[0.06]"/>
 
                 <!-- Regular Menu Item -->
-                <NuxtLink v-else-if="item.path && !item.isExternal" :to="item.path"
+                <NuxtLink
+v-else-if="item.path && !item.isExternal" :to="item.path"
                   class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors duration-200"
                   :class="isActiveMenuItem(item)
                     ? 'bg-primary-500/10 text-primary-700 dark:text-primary-300 border-l-2 border-primary-500'
                     : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/60 dark:hover:bg-white/[0.04] hover:text-gray-900 dark:hover:text-gray-200'"
                   @click="handleClose">
-                  <component v-if="item.icon" :is="item.icon" class="h-4 w-4 flex-shrink-0" />
+                  <component :is="item.icon" v-if="item.icon" class="h-4 w-4 flex-shrink-0" />
                   <span>{{ item.label }}</span>
                   <span v-if="item.badge" class="ml-auto px-1.5 py-0.5 text-[10px] rounded-full bg-primary-100 dark:bg-primary-900/40 text-primary-700 dark:text-primary-300">
                     {{ item.badge }}
@@ -57,18 +59,20 @@
                 </NuxtLink>
 
                 <!-- External Link -->
-                <a v-else-if="item.path && item.isExternal" :href="item.path" target="_blank" rel="noopener noreferrer"
+                <a
+v-else-if="item.path && item.isExternal" :href="item.path" target="_blank" rel="noopener noreferrer"
                   class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors duration-200 text-gray-600 dark:text-gray-400 hover:bg-gray-100/60 dark:hover:bg-white/[0.04] hover:text-gray-900 dark:hover:text-gray-200"
                   @click="handleClose">
-                  <component v-if="item.icon" :is="item.icon" class="h-4 w-4 flex-shrink-0" />
+                  <component :is="item.icon" v-if="item.icon" class="h-4 w-4 flex-shrink-0" />
                   <span>{{ item.label }}</span>
                   <ExternalLink class="h-3 w-3 ml-auto opacity-50" />
                 </a>
 
                 <!-- Clickable Item (no path) -->
-                <button v-else-if="item.onClick" @click="() => { item.onClick?.(); handleClose(); }"
-                  class="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors duration-200 text-gray-600 dark:text-gray-400 hover:bg-gray-100/60 dark:hover:bg-white/[0.04] hover:text-gray-900 dark:hover:text-gray-200">
-                  <component v-if="item.icon" :is="item.icon" class="h-4 w-4 flex-shrink-0" />
+                <button
+v-else-if="item.onClick" class="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors duration-200 text-gray-600 dark:text-gray-400 hover:bg-gray-100/60 dark:hover:bg-white/[0.04] hover:text-gray-900 dark:hover:text-gray-200"
+                  @click="() => { item.onClick?.(); handleClose(); }">
+                  <component :is="item.icon" v-if="item.icon" class="h-4 w-4 flex-shrink-0" />
                   <span>{{ item.label }}</span>
                   <span v-if="item.badge" class="ml-auto px-1.5 py-0.5 text-[10px] rounded-full bg-primary-100 dark:bg-primary-900/40 text-primary-700 dark:text-primary-300">
                     {{ item.badge }}
@@ -96,7 +100,7 @@ import { computed } from 'vue'
 import { useUserStore } from '~/stores/user'
 import { useMenu } from '~/composables/useMenu'
 
-const props = defineProps<{
+defineProps<{
   isSidebarOpen: boolean
   isDark: boolean
   isWhiteLabeled?: boolean
