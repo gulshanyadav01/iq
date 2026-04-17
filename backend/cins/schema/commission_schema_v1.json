@@ -186,6 +186,61 @@
             "$ref": "#/$defs/CommissionRule"
           },
           "description": "Ordered list of commission rules (evaluated by priority)"
+        },
+        "deal_type": {
+          "type": "string",
+          "enum": ["market-deal", "market-bonus-deal", "special-deal", "special-bonus-deal", "declined-deal", "basic-deal"],
+          "description": "Deal type"
+        },
+        "deal_business_type": {
+          "type": "string",
+          "enum": ["net", "ape", "tp", "od"],
+          "description": "Deal business type"
+        },
+        "portfolio_business": {
+          "type": "string",
+          "enum": ["market-deal", "special-deal", "declined-deal", "partner-specific-special-deal", "registration-deal"],
+          "description": "Portfolio business"
+        },
+        "approval_type": {
+          "type": "string",
+          "enum": ["deal", "booking", "manual-override"],
+          "description": "Approval type"
+        },
+        "file_type": {
+          "type": "string",
+          "enum": ["irda-statement", "rewards-statement", "enhancement-statement", "orc-statement"],
+          "description": "File type"
+        },
+        "zone": {
+          "type": "string",
+          "enum": ["north", "south", "east", "west"],
+          "description": "Zone"
+        },
+        "product_mode": {
+          "type": "string",
+          "enum": ["online", "offline"],
+          "description": "Product mode"
+        },
+        "bu_parameters": {
+          "type": "string",
+          "enum": ["motor"],
+          "description": "BU parameters"
+        },
+        "decline_deal": {
+          "type": "string",
+          "enum": ["decline"],
+          "description": "Decline deal"
+        },
+        "product_subproduct": {
+          "type": "string",
+          "enum": ["car", "two-wheeler", "commercial-gcv", "commercial-pcv", "commercial-buses", "commercial-miscd"],
+          "description": "Product-subproduct"
+        },
+        "vehicle_type": {
+          "type": "string",
+          "enum": ["car-taxi", "two-wheeler", "gcv", "pcv", "buses", "misc-d"],
+          "description": "Vehicle type"
         }
       }
     },
@@ -229,64 +284,164 @@
     },
     "RuleConditions": {
       "type": "object",
-      "description": "Multi-dimensional conditions for rule matching (all conditions are ANDed together)",
+      "description": "Domain-specific conditions for insurance commission rule matching (all conditions ANDed)",
       "properties": {
-        "premium_amount": {
-          "$ref": "#/$defs/NumericRange",
-          "description": "Premium amount range"
-        },
-        "policy_term": {
-          "$ref": "#/$defs/NumericRange",
-          "description": "Policy term in months or years"
-        },
-        "channel": {
+        "vehicle_sub_class": {
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["online", "offline", "partner", "direct", "broker"]
+            "enum": ["private-car", "taxi", "scooter", "moped", "bike", "e-rickshaw", "auto-rickshaw", "pick-up-delivery-van", "truck", "tractor", "tipper", "heavy-truck-semi-trailer", "dumper", "tanker", "trailer", "refrigerated-van", "bulker", "school-bus", "passenger-bus", "agricultural-tractor", "backhoe-loader", "crane", "ambulance", "loader", "tractor-loader", "harvester", "excavators", "garbage-van", "motor-grader", "transit-mixer", "fork-lift-trucks", "generator-van", "drilling-rigs", "compressors", "other-carts", "plane-loaders-and-other", "road-rollers", "road-sweeper", "staff-bus", "car-carrier", "greater-than-six-seater", "kaali-peeli-taxi", "not-available", "e-bike", "flat-bed-trailer", "kisan-suvidha", "container", "towing-van", "bulldozer", "compactor", "gas-tanker", "jetting-machine", "fire-vehicles"]
           },
-          "description": "Sales channel(s)"
+          "description": "Vehicle sub-class(es)"
         },
-        "customer_type": {
+        "policy_type": {
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["new", "renewal", "portability"]
+            "enum": ["third-party", "comprehensive", "saod"]
           },
-          "description": "Customer type(s)"
+          "description": "Policy type(s)"
         },
-        "payment_frequency": {
+        "state": {
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["yearly", "half-yearly", "quarterly", "monthly"]
+            "enum": ["andaman-and-nicobar", "andhra-pradesh", "arunachal-pradesh", "assam", "bihar", "chandigarh", "chattisgarh", "delhi-ncr", "goa", "gujarat", "haryana", "jammu-and-kashmir", "himachal-pradesh", "karnataka", "jharkhand", "kerala", "lakshadweep", "madhya-pradesh", "mizoram", "maharashtra", "meghalaya", "manipur", "nagaland", "orissa", "pondicherry", "rajasthan", "punjab", "sikkim", "tamil-nadu", "telangana", "tripura", "west-bengal", "uttar-pradesh", "ladakh", "uttarakhand"]
           },
-          "description": "Payment frequency"
+          "description": "Indian state(s) where rule applies"
         },
-        "vehicle_type": {
+        "rto": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "RTO code(s)"
+        },
+        "number_of_wheels": {
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["two-wheeler", "four-wheeler", "gcv", "pcv"]
+            "enum": ["3w", "4w-and-above"]
           },
-          "description": "Vehicle type for motor insurance"
+          "description": "Number of wheels"
         },
-        "coverage_type": {
+        "gvw_start_range": {
+          "type": "integer",
+          "description": "Start of Gross Vehicle Weight range"
+        },
+        "gvw_end_range": {
+          "type": "integer",
+          "description": "End of Gross Vehicle Weight range"
+        },
+        "cc_start_range": {
+          "type": "integer",
+          "description": "Start of engine CC range"
+        },
+        "cc_end_range": {
+          "type": "integer",
+          "description": "End of engine CC range"
+        },
+        "seating_capacity_start_range": {
+          "type": "integer",
+          "description": "Start of seating capacity range"
+        },
+        "seating_capacity_end_range": {
+          "type": "integer",
+          "description": "End of seating capacity range"
+        },
+        "school_bus_type": {
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["comprehensive", "third-party", "od-only", "package"]
+            "enum": ["on-individual-name", "on-school-name", "on-company-name", "on-contract-transporter"]
           },
-          "description": "Coverage type"
+          "description": "School bus type(s)"
         },
-        "ncb_percentage": {
-          "$ref": "#/$defs/NumericRange",
-          "description": "No Claim Bonus percentage range"
+        "booking_mode": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["online", "offline"]
+          },
+          "description": "Booking mode(s)"
         },
-        "custom_conditions": {
-          "type": "object",
-          "additionalProperties": true,
-          "description": "Escape hatch for provider-specific or complex conditions"
+        "zero_dep": {
+          "type": "string",
+          "enum": ["yes", "no"],
+          "description": "Zero depreciation flag"
+        },
+        "ncb": {
+          "type": "boolean",
+          "description": "No Claim Bonus flag"
+        },
+        "cpa": {
+          "type": "string",
+          "enum": ["with-cpa", "without-cpa"],
+          "description": "CPA type"
+        },
+        "fuel_type": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["petrol", "diesel", "cng", "lpg", "electric"]
+          },
+          "description": "Fuel type(s)"
+        },
+        "vehicle_age": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 35,
+          "description": "Vehicle age in years"
+        },
+        "vehicle_make": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Vehicle make(s), free-text"
+        },
+        "vehicle_model": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Vehicle model(s), free-text"
+        },
+        "vehicle_carrier": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["public", "private", "commercial"]
+          },
+          "description": "Vehicle carrier type(s)"
+        },
+        "business_type": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["new", "renewal", "rollover", "port"]
+          },
+          "description": "Business type(s)"
+        },
+        "od_term": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10,
+          "description": "OD term in years"
+        },
+        "tp_term": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10,
+          "description": "TP term in years"
+        },
+        "deal_parameter": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["od", "net", "regular-tp", "tp-with-vehicle-age", "flat-amount", "ape"]
+          },
+          "description": "Deal parameter(s)"
         }
       }
     },

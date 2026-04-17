@@ -295,36 +295,116 @@ class SchemaValidator:
 
     def _validate_enums(self):
         """Validate enum field values"""
-        enum_validators = {
-            "document_metadata.source_type": ["email", "pdf", "excel", "api", "manual"],
-            "product_category": ["motor", "health", "life", "travel", "home", "other"],
+        # Top-level enum validators
+        source_type_values = ["email", "pdf", "excel", "api", "manual"]
+        product_category_values = ["motor", "health", "life", "travel", "home", "other"]
+
+        # Rule condition enum validators
+        condition_enums = {
+            "policy_type": ["third-party", "comprehensive", "saod"],
+            "booking_mode": ["online", "offline"],
+            "fuel_type": ["petrol", "diesel", "cng", "lpg", "electric"],
+            "business_type": ["new", "renewal", "rollover", "port"],
+            "number_of_wheels": ["3w", "4w-and-above"],
+            "vehicle_carrier": ["public", "private", "commercial"],
+            "school_bus_type": ["on-individual-name", "on-school-name", "on-company-name", "on-contract-transporter"],
+            "deal_parameter": ["od", "net", "regular-tp", "tp-with-vehicle-age", "flat-amount", "ape"],
+        }
+        condition_single_enums = {
+            "zero_dep": ["yes", "no"],
+            "cpa": ["with-cpa", "without-cpa"],
+        }
+
+        # Product-level metadata enum validators
+        product_meta_enums = {
+            "deal_type": ["market-deal", "market-bonus-deal", "special-deal", "special-bonus-deal", "declined-deal", "basic-deal"],
+            "deal_business_type": ["net", "ape", "tp", "od"],
+            "portfolio_business": ["market-deal", "special-deal", "declined-deal", "partner-specific-special-deal", "registration-deal"],
+            "approval_type": ["deal", "booking", "manual-override"],
+            "file_type": ["irda-statement", "rewards-statement", "enhancement-statement", "orc-statement"],
+            "zone": ["north", "south", "east", "west"],
+            "product_mode": ["online", "offline"],
+            "bu_parameters": ["motor"],
+            "decline_deal": ["decline"],
+            "product_subproduct": ["car", "two-wheeler", "commercial-gcv", "commercial-pcv", "commercial-buses", "commercial-miscd"],
+            "vehicle_type": ["car-taxi", "two-wheeler", "gcv", "pcv", "buses", "misc-d"],
         }
 
         # Validate source_type
         if "document_metadata" in self.current_doc:
             source_type = self.current_doc["document_metadata"].get("source_type")
-            if source_type and source_type not in enum_validators["document_metadata.source_type"]:
+            if source_type and source_type not in source_type_values:
                 self.issues.append(ValidationIssue(
                     severity=Severity.HIGH,
                     message=f"Invalid source_type: {source_type}",
                     field_path="document_metadata.source_type",
                     category="Enum Values",
-                    suggestion=f"Valid values: {', '.join(enum_validators['document_metadata.source_type'])}"
+                    suggestion=f"Valid values: {', '.join(source_type_values)}"
                 ))
 
-        # Validate product_category
-        if "products" in self.current_doc:
-            for i, product in enumerate(self.current_doc["products"]):
-                if "product_category" in product:
-                    category = product["product_category"]
-                    if category not in enum_validators["product_category"]:
+        if "products" not in self.current_doc:
+            return
+
+        for i, product in enumerate(self.current_doc["products"]):
+            # Validate product_category
+            if "product_category" in product:
+                category = product["product_category"]
+                if category not in product_category_values:
+                    self.issues.append(ValidationIssue(
+                        severity=Severity.MEDIUM,
+                        message=f"Invalid product_category: {category}",
+                        field_path=f"products[{i}].product_category",
+                        category="Enum Values",
+                        suggestion=f"Valid values: {', '.join(product_category_values)}"
+                    ))
+
+            # Validate product-level metadata enums
+            for field_name, valid_values in product_meta_enums.items():
+                if field_name in product:
+                    value = product[field_name]
+                    if value and value not in valid_values:
                         self.issues.append(ValidationIssue(
                             severity=Severity.MEDIUM,
-                            message=f"Invalid product_category: {category}",
-                            field_path=f"products[{i}].product_category",
+                            message=f"Invalid {field_name}: {value}",
+                            field_path=f"products[{i}].{field_name}",
                             category="Enum Values",
-                            suggestion=f"Valid values: {', '.join(enum_validators['product_category'])}"
+                            suggestion=f"Valid values: {', '.join(valid_values)}"
                         ))
+
+            # Validate rule condition enums
+            if "commission_rules" not in product:
+                continue
+
+            for j, rule in enumerate(product["commission_rules"]):
+                conditions = rule.get("conditions") or {}
+
+                # Validate list enum fields
+                for field_name, valid_values in condition_enums.items():
+                    if field_name in conditions:
+                        values = conditions[field_name]
+                        if isinstance(values, list):
+                            for val in values:
+                                if val not in valid_values:
+                                    self.issues.append(ValidationIssue(
+                                        severity=Severity.MEDIUM,
+                                        message=f"Invalid {field_name} value: {val}",
+                                        field_path=f"products[{i}].commission_rules[{j}].conditions.{field_name}",
+                                        category="Enum Values",
+                                        suggestion=f"Valid values: {', '.join(valid_values)}"
+                                    ))
+
+                # Validate single enum fields
+                for field_name, valid_values in condition_single_enums.items():
+                    if field_name in conditions:
+                        val = conditions[field_name]
+                        if val and val not in valid_values:
+                            self.issues.append(ValidationIssue(
+                                severity=Severity.MEDIUM,
+                                message=f"Invalid {field_name}: {val}",
+                                field_path=f"products[{i}].commission_rules[{j}].conditions.{field_name}",
+                                category="Enum Values",
+                                suggestion=f"Valid values: {', '.join(valid_values)}"
+                            ))
 
     def _validate_formats(self):
         """Validate field formats (dates, IDs, emails, etc.)"""
@@ -512,6 +592,49 @@ class SchemaValidator:
                                 field_path=f"products[{i}].commission_rules[{j}].priority",
                                 category="Business Logic"
                             ))
+
+                    # Validate condition range fields
+                    conditions = rule.get("conditions") or {}
+                    range_pairs = [
+                        ("gvw_start_range", "gvw_end_range", "GVW"),
+                        ("cc_start_range", "cc_end_range", "CC"),
+                        ("seating_capacity_start_range", "seating_capacity_end_range", "Seating Capacity"),
+                    ]
+                    for start_key, end_key, label in range_pairs:
+                        start_val = conditions.get(start_key)
+                        end_val = conditions.get(end_key)
+                        if start_val is not None and end_val is not None:
+                            if isinstance(start_val, (int, float)) and isinstance(end_val, (int, float)):
+                                if start_val > end_val:
+                                    self.issues.append(ValidationIssue(
+                                        severity=Severity.HIGH,
+                                        message=f"{label} start ({start_val}) > end ({end_val})",
+                                        field_path=f"products[{i}].commission_rules[{j}].conditions.{start_key}",
+                                        category="Business Logic"
+                                    ))
+
+                    # Validate vehicle_age range
+                    vehicle_age = conditions.get("vehicle_age")
+                    if vehicle_age is not None and isinstance(vehicle_age, int):
+                        if vehicle_age < 0 or vehicle_age > 35:
+                            self.issues.append(ValidationIssue(
+                                severity=Severity.MEDIUM,
+                                message=f"Vehicle age {vehicle_age} out of expected range (0-35)",
+                                field_path=f"products[{i}].commission_rules[{j}].conditions.vehicle_age",
+                                category="Business Logic"
+                            ))
+
+                    # Validate od_term / tp_term range
+                    for term_key in ["od_term", "tp_term"]:
+                        term_val = conditions.get(term_key)
+                        if term_val is not None and isinstance(term_val, int):
+                            if term_val < 0 or term_val > 10:
+                                self.issues.append(ValidationIssue(
+                                    severity=Severity.MEDIUM,
+                                    message=f"{term_key} value {term_val} out of expected range (0-10)",
+                                    field_path=f"products[{i}].commission_rules[{j}].conditions.{term_key}",
+                                    category="Business Logic"
+                                ))
 
         # Check for duplicate priorities within products
         if "products" in self.current_doc:

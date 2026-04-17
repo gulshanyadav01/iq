@@ -156,8 +156,44 @@ A product exists ONLY if:
 Variants inside same grid:
 → ONE product.
 
-Use product name exactly as written.
-Do not normalize.
+#### `product_name` — Canonical Motor Product Name
+
+For motor insurance products, always set `product_name` to exactly one of:
+
+* `"Private Car"` — car, PVT CAR, 4W, four-wheeler, taxi, pvt
+* `"Two Wheeler"` — TW, 2W, bike, scooter, motorcycle, moped
+* `"Commercial Vehicle"` — GCV, GCCV, PCV, PCCV, MSV, bus, tractor, misc D, CV, agri tractor
+
+For non-motor products (health, life, travel, fire, marine) use the name as written in the document.
+
+**Vehicle makes are NOT products.** If separate tables exist per make (Hero, TVS, Suzuki, Yamaha, Honda, Bajaj, RE, etc.), merge them into ONE product (`"Two Wheeler"` or `"Private Car"`) and capture the make as `conditions["vehicle_make"]` on each rule. Same applies to models. A make/model grid = one product with make as a condition dimension.
+
+---
+
+### `coverage_type_text` — Policy Type from Context
+
+Extract policy type from table headers, product section names, and grid column labels.
+
+Standard values: `"comprehensive"`, `"third party"`, `"tp"`, `"saod"`, `"od only"`
+
+Do NOT leave blank if policy type is encoded in the section name:
+* `"TW SATP Scooter"` → `coverage_type_text = "third party"`
+* `"Pvt Comp"` → `coverage_type_text = "comprehensive"`
+* `"SAOD Grid"` → `coverage_type_text = "saod"`
+
+---
+
+### `conditions["vehicle_sub_class"]` — Vehicle Sub-Class from Context
+
+Populate `conditions["vehicle_sub_class"]` when the section, product name, or grid explicitly identifies a vehicle sub-class.
+
+Examples:
+* Section `"School Bus Commission"` → `"school bus"`
+* Product `"TW SATP Scooter"` → `"scooter"`
+* Product `"PCV Comp Staff Bus"` → `"staff bus"`
+* Product `"Agri Tractor Comp."` → `"agricultural tractor"`
+
+Only populate if sub-class is explicitly stated or unambiguously implied. Do not guess.
 
 ---
 

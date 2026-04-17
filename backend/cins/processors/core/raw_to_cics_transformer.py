@@ -15,7 +15,6 @@ import re
 import hashlib
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple, Any
-from pathlib import Path
 
 from cins.schema.raw_extraction import RawExtraction, RawCommissionEntry, RawMasterDataEntry
 from cins.schema.cics_model import (
@@ -39,7 +38,8 @@ from cins.schema.cics_model import (
 
 
 # Mapping tables for normalizing free-text to enum values
-CHANNEL_MAPPINGS = {
+
+BOOKING_MODE_MAPPINGS = {
     "online": "online",
     "digital": "online",
     "web": "online",
@@ -47,13 +47,13 @@ CHANNEL_MAPPINGS = {
     "offline": "offline",
     "branch": "offline",
     "agent": "offline",
-    "partner": "partner",
-    "misp": "partner",  # Motor Insurance Service Provider
-    "broker": "broker",
-    "direct": "direct",
+    "partner": "offline",
+    "misp": "offline",
+    "broker": "offline",
+    "direct": "offline",
 }
 
-CUSTOMER_TYPE_MAPPINGS = {
+BUSINESS_TYPE_MAPPINGS = {
     "new": "new",
     "new customer": "new",
     "new customers": "new",
@@ -63,51 +63,219 @@ CUSTOMER_TYPE_MAPPINGS = {
     "renewals": "renewal",
     "renew": "renewal",
     "existing": "renewal",
-    "portability": "portability",
-    "port": "portability",
     "rollover": "rollover",
+    "portability": "port",
+    "port": "port",
 }
 
-VEHICLE_TYPE_MAPPINGS = {
-    "two-wheeler": "two-wheeler",
-    "two wheeler": "two-wheeler",
-    "2w": "two-wheeler",
-    "2-wheeler": "two-wheeler",
-    "bike": "two-wheeler",
-    "scooter": "two-wheeler",
-    "motorcycle": "two-wheeler",
-    "four-wheeler": "four-wheeler",
-    "four wheeler": "four-wheeler",
-    "4w": "four-wheeler",
-    "4-wheeler": "four-wheeler",
-    "car": "four-wheeler",
-    "pvt car": "four-wheeler",
-    "private car": "four-wheeler",
-    "gcv": "gcv",
-    "goods carrying": "gcv",
-    "goods vehicle": "gcv",
-    "pcv": "pcv",
-    "passenger carrying": "pcv",
-    "passenger vehicle": "pcv",
-    "bus": "bus",
-    "staff bus": "staff-bus",
-    "commercial": "commercial",
-    "cv": "commercial",
-}
-
-COVERAGE_TYPE_MAPPINGS = {
+POLICY_TYPE_MAPPINGS = {
     "comprehensive": "comprehensive",
     "comp": "comprehensive",
     "full": "comprehensive",
-    "package": "package",
+    "package": "comprehensive",
     "third-party": "third-party",
     "third party": "third-party",
     "tp": "third-party",
     "tp only": "third-party",
-    "od-only": "od-only",
-    "od only": "od-only",
-    "own damage": "od-only",
+    "saod": "saod",
+    "sa od": "saod",
+    "stand alone od": "saod",
+    "standalone od": "saod",
+    "od-only": "saod",
+    "od only": "saod",
+    "own damage": "saod",
 }
+
+VEHICLE_SUB_CLASS_MAPPINGS = {
+    "private car": "private-car",
+    "private-car": "private-car",
+    "pvt car": "private-car",
+    "car": "private-car",
+    "taxi": "taxi",
+    "kaali peeli taxi": "kaali-peeli-taxi",
+    "kaali-peeli-taxi": "kaali-peeli-taxi",
+    "scooter": "scooter",
+    "moped": "moped",
+    "bike": "bike",
+    "motorcycle": "bike",
+    "e-bike": "e-bike",
+    "e bike": "e-bike",
+    "e rickshaw": "e-rickshaw",
+    "e-rickshaw": "e-rickshaw",
+    "auto rickshaw": "auto-rickshaw",
+    "auto-rickshaw": "auto-rickshaw",
+    "pick up/delivery van": "pick-up-delivery-van",
+    "pick-up-delivery-van": "pick-up-delivery-van",
+    "pickup van": "pick-up-delivery-van",
+    "delivery van": "pick-up-delivery-van",
+    "truck": "truck",
+    "tractor": "tractor",
+    "tipper": "tipper",
+    "heavy truck/semi trailer": "heavy-truck-semi-trailer",
+    "heavy-truck-semi-trailer": "heavy-truck-semi-trailer",
+    "heavy truck": "heavy-truck-semi-trailer",
+    "semi trailer": "heavy-truck-semi-trailer",
+    "dumper": "dumper",
+    "tanker": "tanker",
+    "gas tanker": "gas-tanker",
+    "gas-tanker": "gas-tanker",
+    "trailer": "trailer",
+    "flat bed trailer": "flat-bed-trailer",
+    "flat-bed-trailer": "flat-bed-trailer",
+    "refrigerated van": "refrigerated-van",
+    "refrigerated-van": "refrigerated-van",
+    "bulker": "bulker",
+    "school bus": "school-bus",
+    "school-bus": "school-bus",
+    "passenger bus": "passenger-bus",
+    "passenger-bus": "passenger-bus",
+    "staff bus": "staff-bus",
+    "staff-bus": "staff-bus",
+    "agricultural tractor": "agricultural-tractor",
+    "agricultural-tractor": "agricultural-tractor",
+    "backhoe loader": "backhoe-loader",
+    "backhoe-loader": "backhoe-loader",
+    "crane": "crane",
+    "ambulance": "ambulance",
+    "loader": "loader",
+    "tractor loader": "tractor-loader",
+    "tractor-loader": "tractor-loader",
+    "harvester": "harvester",
+    "excavators": "excavators",
+    "excavator": "excavators",
+    "garbage van": "garbage-van",
+    "garbage-van": "garbage-van",
+    "motor grader": "motor-grader",
+    "motor-grader": "motor-grader",
+    "transit mixer": "transit-mixer",
+    "transit-mixer": "transit-mixer",
+    "fork lift trucks": "fork-lift-trucks",
+    "fork-lift-trucks": "fork-lift-trucks",
+    "forklift": "fork-lift-trucks",
+    "generator van": "generator-van",
+    "generator-van": "generator-van",
+    "drilling rigs": "drilling-rigs",
+    "drilling-rigs": "drilling-rigs",
+    "compressors": "compressors",
+    "compressor": "compressors",
+    "other carts": "other-carts",
+    "other-carts": "other-carts",
+    "plane loaders and other": "plane-loaders-and-other",
+    "plane-loaders-and-other": "plane-loaders-and-other",
+    "road rollers": "road-rollers",
+    "road-rollers": "road-rollers",
+    "road roller": "road-rollers",
+    "road sweeper": "road-sweeper",
+    "road-sweeper": "road-sweeper",
+    "car carrier": "car-carrier",
+    "car-carrier": "car-carrier",
+    "greater than six seater": "greater-than-six-seater",
+    "greater-than-six-seater": "greater-than-six-seater",
+    "not available": "not-available",
+    "not-available": "not-available",
+    "kisan suvidha": "kisan-suvidha",
+    "kisan-suvidha": "kisan-suvidha",
+    "container": "container",
+    "towing van": "towing-van",
+    "towing-van": "towing-van",
+    "bulldozer": "bulldozer",
+    "compactor": "compactor",
+    "jetting machine": "jetting-machine",
+    "jetting-machine": "jetting-machine",
+    "fire vehicles": "fire-vehicles",
+    "fire-vehicles": "fire-vehicles",
+}
+
+FUEL_TYPE_MAPPINGS = {
+    "petrol": "petrol",
+    "diesel": "diesel",
+    "cng": "cng",
+    "lpg": "lpg",
+    "electric": "electric",
+    "ev": "electric",
+    # "Non Petrol" is a group label meaning Diesel + CNG + LPG — expanded at normalisation time
+    "non petrol": "non-petrol",
+    "non-petrol": "non-petrol",
+}
+
+NUMBER_OF_WHEELS_MAPPINGS = {
+    "3w": "3w",
+    "three wheeler": "3w",
+    "three-wheeler": "3w",
+    "3 wheeler": "3w",
+    "4w": "4w-and-above",
+    "4w & above": "4w-and-above",
+    "4w and above": "4w-and-above",
+    "4w-and-above": "4w-and-above",
+    "four wheeler": "4w-and-above",
+    "four-wheeler": "4w-and-above",
+}
+
+VEHICLE_CARRIER_MAPPINGS = {
+    "public": "public",
+    "private": "private",
+    "commercial": "commercial",
+}
+
+SCHOOL_BUS_TYPE_MAPPINGS = {
+    "on individual name": "on-individual-name",
+    "on-individual-name": "on-individual-name",
+    "individual": "on-individual-name",
+    "on school name": "on-school-name",
+    "on-school-name": "on-school-name",
+    "school": "on-school-name",
+    "on company name": "on-company-name",
+    "on-company-name": "on-company-name",
+    "company": "on-company-name",
+    "on contract (transporter)": "on-contract-transporter",
+    "on contract transporter": "on-contract-transporter",
+    "on-contract-transporter": "on-contract-transporter",
+    "contract": "on-contract-transporter",
+    "transporter": "on-contract-transporter",
+}
+
+DEAL_PARAMETER_MAPPINGS = {
+    "od": "od",
+    "net": "net",
+    "regular tp": "regular-tp",
+    "regular-tp": "regular-tp",
+    "tp with vehicle age": "tp-with-vehicle-age",
+    "tp-with-vehicle-age": "tp-with-vehicle-age",
+    "flat amount": "flat-amount",
+    "flat-amount": "flat-amount",
+    "ape": "ape",
+}
+
+# Maps raw product key substrings → canonical product name shown in output
+# Longer/more-specific patterns first so they take priority
+PRODUCT_NAME_MAPPINGS = [
+    # Commercial Vehicle variants
+    ("staff bus", "Commercial Vehicle"),
+    ("school bus", "Commercial Vehicle"),
+    ("passenger bus", "Commercial Vehicle"),
+    ("mini bus", "Commercial Vehicle"),
+    ("bus", "Commercial Vehicle"),
+    ("gcv", "Commercial Vehicle"),
+    ("goods carrying", "Commercial Vehicle"),
+    ("pcv", "Commercial Vehicle"),
+    ("passenger carrying", "Commercial Vehicle"),
+    ("commercial vehicle", "Commercial Vehicle"),
+    ("misc d", "Commercial Vehicle"),
+    ("miscd", "Commercial Vehicle"),
+    # Private Car variants
+    ("four wheeler", "Private Car"),
+    ("private car", "Private Car"),
+    ("4w", "Private Car"),
+    ("car", "Private Car"),
+    ("taxi", "Private Car"),
+    # Two Wheeler variants
+    ("two wheeler", "Two Wheeler"),
+    ("2w", "Two Wheeler"),
+    ("bike", "Two Wheeler"),
+    ("scooter", "Two Wheeler"),
+    ("motorcycle", "Two Wheeler"),
+    ("moped", "Two Wheeler"),
+]
 
 PRODUCT_CATEGORY_MAPPINGS = {
     "motor": "motor",
@@ -119,6 +287,7 @@ PRODUCT_CATEGORY_MAPPINGS = {
     "pcv": "motor",
     "car": "motor",
     "bike": "motor",
+    "commercial vehicle": "motor",
     "health": "health",
     "mediclaim": "health",
     "life": "life",
@@ -129,104 +298,127 @@ PRODUCT_CATEGORY_MAPPINGS = {
     "marine": "other",
 }
 
-# Valid Indian state codes
-VALID_STATE_CODES = {
-    "AN",
-    "AP",
-    "AR",
-    "AS",
-    "BR",
-    "CH",
-    "CG",
-    "DD",
-    "DL",
-    "GA",
-    "GJ",
-    "HR",
-    "HP",
-    "JH",
-    "JK",
-    "KA",
-    "KL",
-    "LA",
-    "LD",
-    "MP",
-    "MH",
-    "MN",
-    "ML",
-    "MZ",
-    "NL",
-    "OD",
-    "PB",
-    "PY",
-    "RJ",
-    "SK",
-    "TN",
-    "TS",
-    "TR",
-    "UK",
-    "UP",
-    "WB",
+# Valid Indian state names (canonical lowercase-hyphenated)
+VALID_STATE_NAMES = {
+    "andaman-and-nicobar",
+    "andhra-pradesh",
+    "arunachal-pradesh",
+    "assam",
+    "bihar",
+    "chandigarh",
+    "chattisgarh",
+    "delhi-ncr",
+    "goa",
+    "gujarat",
+    "haryana",
+    "jammu-and-kashmir",
+    "himachal-pradesh",
+    "karnataka",
+    "jharkhand",
+    "kerala",
+    "lakshadweep",
+    "madhya-pradesh",
+    "mizoram",
+    "maharashtra",
+    "meghalaya",
+    "manipur",
+    "nagaland",
+    "orissa",
+    "pondicherry",
+    "rajasthan",
+    "punjab",
+    "sikkim",
+    "tamil-nadu",
+    "telangana",
+    "tripura",
+    "west-bengal",
+    "uttar-pradesh",
+    "ladakh",
+    "uttarakhand",
 }
 
+# Maps various state name/abbreviation forms to canonical names
 STATE_NAME_MAPPINGS = {
-    "andaman and nicobar": "AN",
-    "andaman & nicobar": "AN",
-    "andhra pradesh": "AP",
-    "arunachal pradesh": "AR",
-    "assam": "AS",
-    "bihar": "BR",
-    "chandigarh": "CH",
-    "chhattisgarh": "CG",
-    "dadra and nagar haveli": "DN",
-    "daman and diu": "DD",
-    "delhi": "DL",
-    "goa": "GA",
-    "gujarat": "GJ",
-    "haryana": "HR",
-    "himachal pradesh": "HP",
-    "jammu and kashmir": "JK",
-    "jammu & kashmir": "JK",
-    "jharkhand": "JH",
-    "karnataka": "KA",
-    "kerala": "KL",
-    "ladakh": "LA",
-    "lakshadweep": "LD",
-    "madhya pradesh": "MP",
-    "maharashtra": "MH",
-    "manipur": "MN",
-    "meghalaya": "ML",
-    "mizoram": "MZ",
-    "nagaland": "NL",
-    "odisha": "OD",
-    "orissa": "OD",
-    "puducherry": "PY",
-    "pondicherry": "PY",
-    "punjab": "PB",
-    "rajasthan": "RJ",
-    "sikkim": "SK",
-    "tamil nadu": "TN",
-    "telangana": "TS",
-    "tripura": "TR",
-    "uttar pradesh": "UP",
-    "uttarakhand": "UK",
-    "west bengal": "WB",
-    "up": "UP",
-    "hp": "HP",
-    "wb": "WB",
-    "tn": "TN",
-    "mp": "MP",
-    "ap": "AP",
-    "ts": "TS",
-    "mh": "MH",
-    "gj": "GJ",
-    "rj": "RJ",
-    "ka": "KA",
-    "kl": "KL",
-    "hr": "HR",
-    "br": "BR",
-    "jk": "JK",
-    "dl": "DL",
+    "andaman and nicobar": "andaman-and-nicobar",
+    "andaman & nicobar": "andaman-and-nicobar",
+    "a&n": "andaman-and-nicobar",
+    "andhra pradesh": "andhra-pradesh",
+    "arunachal pradesh": "arunachal-pradesh",
+    "assam": "assam",
+    "bihar": "bihar",
+    "chandigarh": "chandigarh",
+    "chhattisgarh": "chattisgarh",
+    "chattisgarh": "chattisgarh",
+    "delhi": "delhi-ncr",
+    "delhi ncr": "delhi-ncr",
+    "goa": "goa",
+    "gujarat": "gujarat",
+    "haryana": "haryana",
+    "himachal pradesh": "himachal-pradesh",
+    "jammu and kashmir": "jammu-and-kashmir",
+    "jammu & kashmir": "jammu-and-kashmir",
+    "jharkhand": "jharkhand",
+    "karnataka": "karnataka",
+    "kerala": "kerala",
+    "ladakh": "ladakh",
+    "lakshadweep": "lakshadweep",
+    "madhya pradesh": "madhya-pradesh",
+    "maharashtra": "maharashtra",
+    "manipur": "manipur",
+    "meghalaya": "meghalaya",
+    "mizoram": "mizoram",
+    "nagaland": "nagaland",
+    "odisha": "orissa",
+    "orissa": "orissa",
+    "puducherry": "pondicherry",
+    "pondicherry": "pondicherry",
+    "punjab": "punjab",
+    "rajasthan": "rajasthan",
+    "sikkim": "sikkim",
+    "tamil nadu": "tamil-nadu",
+    "telangana": "telangana",
+    "tripura": "tripura",
+    "uttar pradesh": "uttar-pradesh",
+    "uttarakhand": "uttarakhand",
+    "west bengal": "west-bengal",
+    # 2-letter abbreviations
+    "an": "andaman-and-nicobar",
+    "ap": "andhra-pradesh",
+    "ar": "arunachal-pradesh",
+    "as": "assam",
+    "br": "bihar",
+    "ch": "chandigarh",
+    "cg": "chattisgarh",
+    "dl": "delhi-ncr",
+    "ga": "goa",
+    "gj": "gujarat",
+    "hr": "haryana",
+    "hp": "himachal-pradesh",
+    "jk": "jammu-and-kashmir",
+    "jh": "jharkhand",
+    "ka": "karnataka",
+    "kl": "kerala",
+    "la": "ladakh",
+    "ld": "lakshadweep",
+    "mp": "madhya-pradesh",
+    "mh": "maharashtra",
+    "mn": "manipur",
+    "ml": "meghalaya",
+    "mz": "mizoram",
+    "nl": "nagaland",
+    "od": "orissa",
+    "py": "pondicherry",
+    "pb": "punjab",
+    "rj": "rajasthan",
+    "sk": "sikkim",
+    "tn": "tamil-nadu",
+    "ts": "telangana",
+    "tr": "tripura",
+    "up": "uttar-pradesh",
+    "uk": "uttarakhand",
+    "wb": "west-bengal",
+    # Common short forms
+    "dd": "delhi-ncr",
 }
 
 
@@ -432,6 +624,10 @@ class RawToCICSTransformer:
         # Compute priorities based on specificity
         priorities = self._compute_priorities(entries)
 
+        # Extract condition hints encoded in the product key (e.g. "TW SATP Scooter")
+        key_policy_type = self._extract_policy_type_from_key(product_key)
+        key_sub_class = self._extract_sub_class_from_key(product_key)
+
         # Transform each entry to a rule
         rules = []
         for i, entry in enumerate(entries):
@@ -439,6 +635,12 @@ class RawToCICSTransformer:
             rule = self._transform_rule(
                 entry, product_code, i, priority, master_data, raw
             )
+            # Backfill product-key hints only when conditions lack the field
+            if rule.conditions:
+                if key_policy_type and not rule.conditions.policy_type:
+                    rule.conditions.policy_type = key_policy_type
+                if key_sub_class and not rule.conditions.vehicle_sub_class:
+                    rule.conditions.vehicle_sub_class = key_sub_class
             rules.append(rule)
 
         # Determine sub-category
@@ -448,13 +650,77 @@ class RawToCICSTransformer:
             if first_entry.product_type:
                 sub_category = first_entry.product_type.lower()
 
+        # Detect product-level metadata from product key and entries
+        product_subproduct = self._detect_product_subproduct(product_key, entries)
+        vehicle_type = self._detect_vehicle_type(product_key, entries)
+        product_name = self._normalize_product_name(product_key, entries)
+
         return Product(
             product_code=product_code,
-            product_name=product_key,
+            product_name=product_name,
             product_category=product_category,
             sub_category=sub_category,
             commission_rules=rules,
+            product_subproduct=product_subproduct,
+            vehicle_type=vehicle_type,
         )
+
+    def _normalize_product_name(
+        self, product_key: str, entries: List[RawCommissionEntry]
+    ) -> str:
+        """Normalize raw product key to a canonical product name.
+
+        Prefers the canonical name extracted by the LLM in Pass 3 (stored in
+        entry.product_name when it differs from the raw key). Falls back to
+        static PRODUCT_NAME_MAPPINGS substring matching.
+        """
+        _canonical = {"Private Car", "Two Wheeler", "Commercial Vehicle"}
+        for entry in entries:
+            if entry.product_name and entry.product_name in _canonical:
+                return entry.product_name
+        key_lower = product_key.lower()
+        for pattern, canonical in PRODUCT_NAME_MAPPINGS:
+            if pattern in key_lower:
+                return canonical
+        return product_key
+
+    def _extract_policy_type_from_key(self, product_key: str) -> Optional[List[str]]:
+        """Extract policy type hint encoded in a product key (e.g. 'SATP', 'Comp', 'SAOD')."""
+        key_lower = product_key.lower()
+        # Order matters — check most specific first
+        hints = [
+            ("satp", "third-party"),
+            ("saod", "saod"),
+            ("comp", "comprehensive"),
+            (" tp ", "third-party"),
+            ("/tp", "third-party"),
+            ("third party", "third-party"),
+            ("third-party", "third-party"),
+        ]
+        for pattern, policy in hints:
+            if pattern in key_lower:
+                return [policy]
+        return None
+
+    def _extract_sub_class_from_key(self, product_key: str) -> Optional[List[str]]:
+        """Extract vehicle sub-class hint encoded in a product key (e.g. 'Scooter', 'School Bus')."""
+        key_lower = product_key.lower()
+        # Longer patterns first to avoid partial matches
+        hints = [
+            ("school bus", "school-bus"),
+            ("staff bus", "staff-bus"),
+            ("passenger bus", "passenger-bus"),
+            ("mini bus", "mini-bus"),
+            ("agri tractor", "agricultural-tractor"),
+            ("agricultural tractor", "agricultural-tractor"),
+            ("scooter", "scooter"),
+            ("e-rickshaw", "e-rickshaw"),
+            ("e rickshaw", "e-rickshaw"),
+        ]
+        for pattern, sub_class in hints:
+            if pattern in key_lower:
+                return [sub_class]
+        return None
 
     def _detect_product_category(
         self, product_key: str, entries: List[RawCommissionEntry]
@@ -474,6 +740,71 @@ class RawToCICSTransformer:
                     if pattern in type_lower:
                         return category
 
+        return None
+
+    def _detect_product_subproduct(
+        self, product_key: str, entries: List[RawCommissionEntry]
+    ) -> Optional[str]:
+        """Detect product-subproduct from product key."""
+        key_lower = product_key.lower()
+        # Longer/more-specific patterns first
+        mappings = [
+            ("two wheeler", "two-wheeler"),
+            ("2w", "two-wheeler"),
+            ("goods carrying", "commercial-gcv"),
+            ("gcv", "commercial-gcv"),
+            ("gccv", "commercial-gcv"),
+            ("passenger carrying", "commercial-pcv"),
+            ("pcv", "commercial-pcv"),
+            ("pccv", "commercial-pcv"),
+            ("staff bus", "commercial-buses"),
+            ("school bus", "commercial-buses"),
+            ("passenger bus", "commercial-buses"),
+            ("mini bus", "commercial-buses"),
+            ("bus", "commercial-buses"),
+            ("misc d", "commercial-miscd"),
+            ("miscd", "commercial-miscd"),
+            ("msv", "commercial-miscd"),
+            ("tractor", "commercial-miscd"),
+            ("tipper", "commercial-miscd"),
+            ("truck", "commercial-miscd"),
+            ("car", "car"),
+        ]
+        for pattern, value in mappings:
+            if pattern in key_lower:
+                return value
+        # Fallback: check entries product_name for canonical names
+        for entry in entries:
+            if entry.product_name == "Two Wheeler":
+                return "two-wheeler"
+            if entry.product_name == "Commercial Vehicle":
+                return None  # need subproduct context — can't determine without more info
+            if entry.product_name == "Private Car":
+                return "car"
+        return None
+
+    def _detect_vehicle_type(
+        self, product_key: str, entries: List[RawCommissionEntry]
+    ) -> Optional[str]:
+        """Detect vehicle type from product key."""
+        key_lower = product_key.lower()
+        mappings = {
+            "car": "car-taxi",
+            "taxi": "car-taxi",
+            "two wheeler": "two-wheeler",
+            "2w": "two-wheeler",
+            "bike": "two-wheeler",
+            "scooter": "two-wheeler",
+            "gcv": "gcv",
+            "goods carrying": "gcv",
+            "pcv": "pcv",
+            "passenger carrying": "pcv",
+            "bus": "buses",
+            "misc": "misc-d",
+        }
+        for pattern, value in mappings.items():
+            if pattern in key_lower:
+                return value
         return None
 
     def _transform_rule(
@@ -519,6 +850,8 @@ class RawToCICSTransformer:
             parts.append(self._slugify(entry.customer_type_text)[:3].upper())
         if entry.channel_text:
             parts.append(self._slugify(entry.channel_text)[:3].upper())
+        if entry.coverage_type_text:
+            parts.append(self._slugify(entry.coverage_type_text)[:3].upper())
 
         # Ensure uniqueness with index
         parts.append(f"R{index + 1}")
@@ -529,13 +862,31 @@ class RawToCICSTransformer:
         """Check if conditions object has any non-null values."""
         return any(
             [
-                conditions.channel,
-                conditions.customer_type,
-                conditions.vehicle_type,
-                conditions.coverage_type,
+                conditions.vehicle_sub_class,
+                conditions.policy_type,
                 conditions.state,
-                conditions.state_exclude,
-                conditions.custom_conditions,
+                conditions.rto,
+                conditions.number_of_wheels,
+                conditions.gvw_start_range is not None,
+                conditions.gvw_end_range is not None,
+                conditions.cc_start_range is not None,
+                conditions.cc_end_range is not None,
+                conditions.seating_capacity_start_range is not None,
+                conditions.seating_capacity_end_range is not None,
+                conditions.school_bus_type,
+                conditions.booking_mode,
+                conditions.zero_dep is not None,
+                conditions.ncb is not None,
+                conditions.cpa is not None,
+                conditions.fuel_type,
+                conditions.vehicle_age is not None,
+                conditions.vehicle_make,
+                conditions.vehicle_model,
+                conditions.vehicle_carrier,
+                conditions.business_type,
+                conditions.od_term is not None,
+                conditions.tp_term is not None,
+                conditions.deal_parameter,
             ]
         )
 
@@ -548,290 +899,328 @@ class RawToCICSTransformer:
         raw: RawExtraction,
     ) -> RuleConditions:
         """Transform entry conditions to RuleConditions."""
-        channel = self._normalize_channel(entry.channel_text)
-        customer_type = self._normalize_customer_type(entry.customer_type_text)
-        vehicle_type = self._normalize_vehicle_type(
-            getattr(raw, "global_vehicle_type_text", None)
+        # Normalize top-level text fields
+        booking_mode = self._normalize_list_field(
+            entry.channel_text, BOOKING_MODE_MAPPINGS, "booking_mode"
         )
-        coverage_type = self._normalize_coverage_type(entry.coverage_type_text)
+        business_type = self._normalize_list_field(
+            entry.customer_type_text, BUSINESS_TYPE_MAPPINGS, "business_type"
+        )
+        policy_type = self._normalize_list_field(
+            entry.coverage_type_text, POLICY_TYPE_MAPPINGS, "policy_type"
+        )
+
+        # Normalize vehicle sub-class from global_vehicle_type_text
+        vehicle_sub_class = self._normalize_list_field(
+            getattr(raw, "global_vehicle_type_text", None),
+            VEHICLE_SUB_CLASS_MAPPINGS,
+            "vehicle_sub_class",
+        )
+
+        # Normalize states
         location_text = entry.state_text or getattr(raw, "global_state_text", None)
-        state, state_exclude = self._expand_state_conditions(location_text, master_data)
+        state = self._expand_state_names(location_text, master_data)
 
-        custom_conditions = self._parse_custom_conditions(
-            entry.other_conditions or getattr(raw, "global_other_conditions", None),
-            getattr(raw, "global_seating_capacity_text", None),
+        # Extract RTO codes from location_text
+        rto = None
+        if location_text:
+            rto_codes = re.findall(r"\b[A-Z]{2}-\d{1,3}\b", location_text.upper())
+            if rto_codes:
+                rto = list(set(rto_codes))
+
+        # Extract domain-specific fields from entry.conditions dict
+        entry_conditions = getattr(entry, "conditions", None) or {}
+
+        # Fuel type — expand "non-petrol" group to its component fuels
+        fuel_type = self._normalize_list_field(
+            entry_conditions.get("fuel_type"), FUEL_TYPE_MAPPINGS, "fuel_type"
+        )
+        if fuel_type and "non-petrol" in fuel_type:
+            fuel_type = sorted(set(fuel_type) - {"non-petrol"} | {"diesel", "cng", "lpg"})
+
+        # Number of wheels
+        number_of_wheels = self._normalize_list_field(
+            entry_conditions.get("number_of_wheels"),
+            NUMBER_OF_WHEELS_MAPPINGS,
+            "number_of_wheels",
         )
 
-        # Extract RTOs from location_text if present (e.g. "UP-16")
-        if location_text:
-            rto_codes = re.findall(r"\b[A-Z]{2}-\d{2}\b", location_text.upper())
-            if rto_codes:
-                if custom_conditions is None:
-                    custom_conditions = {}
-                existing_rtos = custom_conditions.get("rto", [])
-                if isinstance(existing_rtos, list):
-                    custom_conditions["rto"] = list(set(existing_rtos + rto_codes))
-                else:
-                    custom_conditions["rto"] = rto_codes
+        # Vehicle carrier
+        vehicle_carrier = self._normalize_list_field(
+            entry_conditions.get("vehicle_carrier"),
+            VEHICLE_CARRIER_MAPPINGS,
+            "vehicle_carrier",
+        )
 
-        # If location_text was provided but no states were extracted, preserve it in custom_conditions
-        if location_text and not state and not state_exclude:
-            if custom_conditions is None:
-                custom_conditions = {}
-            if "location" not in custom_conditions:
-                custom_conditions["location"] = location_text
+        # School bus type
+        school_bus_type = self._normalize_list_field(
+            entry_conditions.get("school_bus_type"),
+            SCHOOL_BUS_TYPE_MAPPINGS,
+            "school_bus_type",
+        )
 
-        # Merge structured conditions dict from extraction (fuel_type, ncb, preferred, etc.)
-        entry_conditions = getattr(entry, "conditions", None) or {}
-        if entry_conditions:
-            if custom_conditions is None:
-                custom_conditions = {}
+        # Deal parameter
+        deal_parameter = self._normalize_list_field(
+            entry_conditions.get("deal_parameter"),
+            DEAL_PARAMETER_MAPPINGS,
+            "deal_parameter",
+        )
 
-            # PROACTIVE MAPPING: Check if any condition value exists in master data
-            # e.g. if preferred="Preferred", check master data for "Preferred" mapping
-            if master_data:
-                for cond_key, cond_val in list(entry_conditions.items()):
-                    if not cond_val or not isinstance(cond_val, str):
-                        continue
+        # Vehicle sub-class from conditions dict (may override global)
+        cond_vehicle_sub_class = self._normalize_list_field(
+            entry_conditions.get("vehicle_sub_class"),
+            VEHICLE_SUB_CLASS_MAPPINGS,
+            "vehicle_sub_class",
+        )
+        if cond_vehicle_sub_class:
+            vehicle_sub_class = cond_vehicle_sub_class
 
-                    for m in master_data:
-                        if m.key and m.key.lower() == cond_val.lower():
-                            # Found a mapping for this condition value!
-                            if m.values:
-                                # Expand values into custom_conditions for more context
-                                mapping_key = f"{cond_key}_expanded"
-                                if mapping_key not in custom_conditions:
-                                    custom_conditions[mapping_key] = m.values
+        # NCB (boolean)
+        ncb = self._parse_bool_field(entry_conditions.get("ncb"))
 
-                                # If the mapping contains state codes, add them to rule state
-                                codes, _ = self._expand_state_conditions(m.values, None)
-                                if codes:
-                                    if state is None:
-                                        state = []
-                                    state = list(set(state + codes))
+        # CPA
+        cpa = self._normalize_single_field(
+            entry_conditions.get("cpa"),
+            {"with cpa": "with-cpa", "with-cpa": "with-cpa", "without cpa": "without-cpa", "without-cpa": "without-cpa", "yes": "with-cpa", "no": "without-cpa"},
+            "cpa",
+        )
 
-            # entry.conditions values win over raw_condition fallback
-            custom_conditions.update(entry_conditions)
+        # Zero dep
+        zero_dep = self._normalize_single_field(
+            entry_conditions.get("zero_dep"),
+            {"yes": "yes", "no": "no", "true": "yes", "false": "no"},
+            "zero_dep",
+        )
+
+        # Vehicle make/model (free-text arrays)
+        vehicle_make = self._parse_text_list(entry_conditions.get("vehicle_make"))
+        vehicle_model = self._parse_text_list(entry_conditions.get("vehicle_model"))
+
+        # RTO from conditions dict
+        cond_rto = self._parse_text_list(entry_conditions.get("rto"))
+        if cond_rto:
+            rto = list(set((rto or []) + cond_rto))
+
+        # Integer range fields
+        gvw_start, gvw_end = self._parse_range_field(entry_conditions.get("gvw"))
+        cc_start, cc_end = self._parse_range_field(entry_conditions.get("cc"))
+        seat_start, seat_end = self._parse_range_field(
+            entry_conditions.get("seating_capacity")
+            or getattr(raw, "global_seating_capacity_text", None)
+        )
+
+        # Vehicle age
+        vehicle_age = self._parse_int_field(entry_conditions.get("vehicle_age"))
+
+        # OD term / TP term
+        od_term = self._parse_int_field(entry_conditions.get("od_term"))
+        tp_term = self._parse_int_field(entry_conditions.get("tp_term"))
 
         return RuleConditions(
-            channel=channel,
-            customer_type=customer_type,
-            vehicle_type=vehicle_type,
-            coverage_type=coverage_type,
+            vehicle_sub_class=vehicle_sub_class,
+            policy_type=policy_type,
             state=state,
-            state_exclude=state_exclude,
-            custom_conditions=custom_conditions,
+            rto=rto,
+            number_of_wheels=number_of_wheels,
+            gvw_start_range=gvw_start,
+            gvw_end_range=gvw_end,
+            cc_start_range=cc_start,
+            cc_end_range=cc_end,
+            seating_capacity_start_range=seat_start,
+            seating_capacity_end_range=seat_end,
+            school_bus_type=school_bus_type,
+            booking_mode=booking_mode,
+            zero_dep=zero_dep,
+            ncb=ncb,
+            cpa=cpa,
+            fuel_type=fuel_type,
+            vehicle_age=vehicle_age,
+            vehicle_make=vehicle_make,
+            vehicle_model=vehicle_model,
+            vehicle_carrier=vehicle_carrier,
+            business_type=business_type,
+            od_term=od_term,
+            tp_term=tp_term,
+            deal_parameter=deal_parameter,
         )
 
-    def _normalize_channel(self, text: Optional[str]) -> Optional[List[str]]:
-        """Normalize channel text to enum values."""
+    # ==================== NORMALIZATION HELPERS ====================
+
+    def _normalize_list_field(
+        self, text: Optional[str], mappings: Dict[str, str], field_name: str
+    ) -> Optional[List[str]]:
+        """Normalize a free-text value to a list of enum values using mappings."""
         if not text:
             return None
 
         normalized = []
-        text_lower = text.lower()
+        text_lower = text.lower().strip()
 
-        for key, value in CHANNEL_MAPPINGS.items():
-            if key in text_lower and value not in normalized:
+        # Sort by key length descending so longer keys match first (e.g., "new customer" before "new")
+        sorted_keys = sorted(mappings.keys(), key=len, reverse=True)
+        for key in sorted_keys:
+            value = mappings[key]
+            # Use word-boundary matching for short keys to avoid substring false positives
+            if len(key) <= 5:
+                pattern = rf"(?:^|[\s,;/\-])({re.escape(key)})(?=$|[\s,;/\-])"
+            else:
+                pattern = re.escape(key)
+            if re.search(pattern, text_lower) and value not in normalized:
                 normalized.append(value)
 
         if not normalized:
-            self.warnings.append(f"Unknown channel: {text}")
+            self.warnings.append(f"Unknown {field_name}: {text}")
             return None
 
         return normalized
 
-    def _normalize_customer_type(self, text: Optional[str]) -> Optional[List[str]]:
-        """Normalize customer type text."""
+    def _normalize_single_field(
+        self, text: Optional[str], mappings: Dict[str, str], field_name: str
+    ) -> Optional[str]:
+        """Normalize a free-text value to a single enum value."""
         if not text:
             return None
 
-        normalized = []
-        text_lower = text.lower()
+        text_lower = text.lower().strip()
 
-        for key, value in CUSTOMER_TYPE_MAPPINGS.items():
-            if key in text_lower and value not in normalized:
-                normalized.append(value)
-
-        if not normalized:
-            # Keep as-is if no mapping found
-            return [text]
-
-        return normalized
-
-    def _normalize_vehicle_type(self, text: Optional[str]) -> Optional[List[str]]:
-        """Normalize vehicle type text."""
-        if not text:
-            return None
-
-        normalized = []
-        text_lower = text.lower()
-
-        for key, value in VEHICLE_TYPE_MAPPINGS.items():
-            if key in text_lower and value not in normalized:
-                normalized.append(value)
-
-        if not normalized:
-            return [text.lower()]
-
-        return normalized
-
-    def _normalize_coverage_type(self, text: Optional[str]) -> Optional[List[str]]:
-        """Normalize coverage type text."""
-        if not text:
-            return None
-
-        text_lower = text.lower()
-
-        for key, value in COVERAGE_TYPE_MAPPINGS.items():
+        for key, value in mappings.items():
             if key in text_lower:
-                return [value]
+                return value
 
-        self.warnings.append(f"Unknown coverage type: {text}")
+        self.warnings.append(f"Unknown {field_name}: {text}")
         return None
 
-    def _expand_state_conditions(
+    def _parse_bool_field(self, text: Optional[str]) -> Optional[bool]:
+        """Parse a text value to a boolean."""
+        if text is None:
+            return None
+        if isinstance(text, bool):
+            return text
+
+        text_lower = str(text).lower().strip()
+        if text_lower in ("yes", "true", "1", "y"):
+            return True
+        if text_lower in ("no", "false", "0", "n"):
+            return False
+
+        return None
+
+    def _parse_int_field(self, text: Optional[str]) -> Optional[int]:
+        """Parse a text value to an integer."""
+        if text is None:
+            return None
+        if isinstance(text, (int, float)):
+            return int(text)
+
+        match = re.search(r"(\d+)", str(text))
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _parse_text_list(self, text: Optional[str]) -> Optional[List[str]]:
+        """Parse a comma-separated text or list value into a string list."""
+        if not text:
+            return None
+        if isinstance(text, list):
+            return text if text else None
+
+        items = [item.strip() for item in str(text).split(",") if item.strip()]
+        return items if items else None
+
+    def _parse_range_field(
+        self, text: Optional[str]
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """Parse a range text into start/end integers."""
+        if text is None:
+            return None, None
+        if isinstance(text, dict):
+            return text.get("min"), text.get("max")
+
+        text_str = str(text).strip()
+
+        # Pattern: "1-2500" or "1 - 2500" or "1 to 2500"
+        range_match = re.search(
+            r"(\d+)\s*[-–to]+\s*(\d+)", text_str, re.IGNORECASE
+        )
+        if range_match:
+            return int(range_match.group(1)), int(range_match.group(2))
+
+        # Pattern: "> 12" or ">= 12" or "above 12"
+        above_match = re.search(
+            r"(?:>|>=|above|greater than|more than)\s*(\d+)", text_str, re.IGNORECASE
+        )
+        if above_match:
+            return int(above_match.group(1)), None
+
+        # Pattern: "< 12" or "<= 12"
+        below_match = re.search(r"(?:<|<=|below|less than)\s*(\d+)", text_str, re.IGNORECASE)
+        if below_match:
+            return None, int(below_match.group(1))
+
+        # Single number
+        single_match = re.match(r"^\d+$", text_str)
+        if single_match:
+            val = int(text_str)
+            return val, val
+
+        return None, None
+
+    def _expand_state_names(
         self, state_text: Optional[str], master_data: Optional[List[RawMasterDataEntry]]
-    ) -> Tuple[Optional[List[str]], Optional[List[str]]]:
+    ) -> Optional[List[str]]:
         """
-        Expand state text to state codes and handle exclusions.
-        Proactively looks up master data for category mappings (e.g., "NCR", "Preferred").
+        Expand state text to canonical lowercase-hyphenated state names.
+        Handles exclusion patterns by expanding to the complement set.
         """
         if not state_text:
-            # Fallback: Check for global state mappings in master data
             if master_data:
                 for m in master_data:
                     if m.entry_type == "state_mapping" and m.values:
-                        return self._expand_state_conditions(m.values, None)
-            return None, None
+                        return self._expand_state_names(m.values, None)
+            return None
 
         text = state_text.lower()
-        discovered_codes = []
-        state_exclude = None
+        discovered_names = []
 
-        # 1. Handle Exclusions ("All states except...")
+        # Handle exclusions ("All states except...")
         if "except" in text or "excluding" in text or "other than" in text:
-            # Try to capture everything after exclusion keywords
             exclude_pattern = (
                 r"(?:except|excluding|other than)\s+([^,;]+(?:[,;][^,;]+)*)"
             )
             match = re.search(exclude_pattern, state_text, re.IGNORECASE)
             if match:
                 exclude_text = match.group(1)
-                codes, _ = self._expand_state_conditions(exclude_text, master_data)
-                if codes:
-                    return None, codes
+                excluded_names = self._expand_state_names(exclude_text, None)
+                if excluded_names:
+                    return sorted(VALID_STATE_NAMES - set(excluded_names))
 
-        # 2. Proactive Master Data Expansion
+        # Proactive master data expansion
         if master_data:
-            # Check for tokens that might be categories (e.g., "NCR", "Rest of Gujarat")
             upper_text = state_text.upper()
-
             for m in master_data:
                 if not m.key:
                     continue
-
                 key_upper = m.key.upper()
-                # Check if key is in state_text as a whole word
                 if re.search(rf"\b{re.escape(key_upper)}\b", upper_text):
                     if m.values:
-                        codes, _ = self._expand_state_conditions(m.values, master_data)
-                        if codes:
-                            discovered_codes.extend(codes)
+                        names = self._expand_state_names(m.values, None)
+                        if names:
+                            discovered_names.extend(names)
 
-                # Reverse check: if state_text matches a value in master data
-                if m.values and upper_text == m.values.upper():
-                    if key_upper in VALID_STATE_CODES:
-                        discovered_codes.append(key_upper)
-
-        # 3. Standard State Name/Code Mapping
-        # Use more flexible word boundaries to handle common separators like _ or -
-        for name, code in STATE_NAME_MAPPINGS.items():
+        # Standard state name/abbreviation mapping
+        for name, canonical in STATE_NAME_MAPPINGS.items():
             if len(name) <= 3:
-                # For short names/abbrs, use flexible word boundaries that include underscore
                 pattern = rf"(?:^|[\s,_\-\/]){re.escape(name)}(?=$|[\s,_\-\/])"
             else:
                 pattern = rf"{re.escape(name)}"
 
             if re.search(pattern, text, re.IGNORECASE):
-                discovered_codes.append(code)
+                discovered_names.append(canonical)
 
-        # 4. Direct State Code Extraction (2-letter uppercase)
-        raw_codes = re.findall(r"\b[A-Z]{2}\b", state_text.upper())
-        for code in raw_codes:
-            if code in VALID_STATE_CODES:
-                discovered_codes.append(code)
+        if discovered_names:
+            return sorted(set(discovered_names))
 
-        if discovered_codes:
-            return list(set(discovered_codes)), state_exclude
-
-        return None, state_exclude
-
-    def _parse_custom_conditions(
-        self, other_text: Optional[str], seating_text: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
-        """Parse other conditions into custom_conditions dict."""
-        if not other_text and not seating_text:
-            return None
-
-        conditions = {}
-
-        # 1. Process explicit seating_capacity_text if present
-        if seating_text:
-            text_lower = seating_text.lower()
-            # Handle "capacity > 12", "carrying capacity of 12", "seating 12+1", "12+1"
-            capacity_match = re.search(
-                r"(?:capacity|seating|carrying)?\s*(?:of|is)?\s*(?:>|>=|above|greater than|more than|at least)?\s*(\d+)",
-                text_lower,
-            )
-            if capacity_match:
-                conditions["seating_capacity"] = {"min": int(capacity_match.group(1))}
-            else:
-                conditions["seating_capacity"] = seating_text
-
-        # 2. Process other_conditions text
-        if other_text:
-            text_lower = other_text.lower()
-
-            # Parse seating/carrying capacity if not already found
-            if "seating_capacity" not in conditions:
-                # More robust pattern for natural language
-                # "carrying capacity of the buses is more than 12"
-                # "seating capacity > 12"
-                capacity_pattern = r"(?:seating|carrying|seating)\s*(?:capacity)?\s*(?:of the buses)?\s*(?:is)?\s*(?:>|>=|above|greater than|more than)?\s*(\d+)"
-                match = re.search(capacity_pattern, text_lower)
-                if match:
-                    conditions["seating_capacity"] = {"min": int(match.group(1))}
-
-            # Parse vehicle weight
-            weight_pattern = r"(?:weight|gvw)\s*(?:>|>=|above|greater than)?\s*(\d+(?:\.\d+)?)\s*(?:t|ton)"
-            match = re.search(weight_pattern, text_lower)
-            if match:
-                conditions["vehicle_weight"] = f"> {match.group(1)}T"
-
-            # Parse registration type
-            if "corporate" in text_lower or "company" in text_lower:
-                conditions["registration"] = "corporate"
-            elif "individual" in text_lower or "personal" in text_lower:
-                conditions["registration"] = "individual"
-
-            # Parse permit type
-            permit_types = ["staff bus", "tourist", "contract", "stage carriage"]
-            for permit in permit_types:
-                if permit in text_lower:
-                    conditions["permit_type"] = permit.replace(" ", "-")
-                    break
-
-        # If we couldn't parse structured conditions, store the raw text
-        if not conditions:
-            parts = []
-            if seating_text:
-                parts.append(f"Seating: {seating_text}")
-            if other_text:
-                parts.append(other_text)
-            conditions["raw_condition"] = "; ".join(parts)
-
-        return conditions if conditions else None
+        return None
 
     # ==================== OUTCOMES ====================
 
@@ -966,6 +1355,10 @@ class RawToCICSTransformer:
             "percentage_value": None,
             "calculation_notes": f"UNPARSED: {value} - REQUIRES MANUAL REVIEW",
         }
+
+    def _normalize_amount_text(self, text: str) -> str:
+        """Strip currency prefixes and normalise amount text for regex parsing."""
+        return re.sub(r"(?i)rs\.?\s*|inr\s*|₹\s*", "", text).strip()
 
     def _parse_tiers(self, value_text: str) -> Optional[List[CommissionTier]]:
         """Parse tiered commission structure."""

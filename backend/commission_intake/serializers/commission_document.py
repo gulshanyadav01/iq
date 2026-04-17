@@ -106,6 +106,12 @@ class ProcessingModeRequestSerializer(serializers.Serializer):
     )
 
 
+class RerunPassRequestSerializer(serializers.Serializer):
+    pass_number = serializers.ChoiceField(choices=[1, 2, 3])
+    sheet_name = serializers.CharField(required=False, default="", allow_blank=True)
+    attachment_name = serializers.CharField(required=False, default="", allow_blank=True)
+
+
 class CommissionDocumentSerializer(serializers.ModelSerializer):
     cics_result = CICSResultSerializer(read_only=True)
     validation_result = ValidationResultSerializer(read_only=True)

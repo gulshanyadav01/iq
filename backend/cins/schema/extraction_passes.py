@@ -407,18 +407,18 @@ class RuleEntry(BaseModel):
     customer_type_text: str = Field(
         "",
         description=(
-            "Customer classification as stated. Standard: 'new', 'renewal', 'new customers'. "
+            "Business type as stated. Standard: 'new', 'renewal', 'rollover', 'port'. "
             "Do NOT put 'Preferred'/'Non Preferred' here — those are grid column groups, "
             'use conditions dict: {"preferred": "Preferred"} or {"preferred": "Non Preferred"}.'
         ),
     )
     channel_text: str = Field(
         "",
-        description="(e.g., 'online', 'offline', 'digital', 'branch')",
+        description="Booking mode as stated (e.g., 'online', 'offline')",
     )
     coverage_type_text: str = Field(
         "",
-        description="(e.g., 'comprehensive', 'TP', 'OD only')",
+        description="Policy type as stated (e.g., 'comprehensive', 'TP', 'SAOD', 'third party')",
     )
     state_text: str = Field(
         "",
@@ -428,11 +428,13 @@ class RuleEntry(BaseModel):
         default_factory=dict,
         description=(
             "Key-value pairs for any grid dimension conditions that have no dedicated field. "
-            "Use for: fuel_type, ncb, preferred, age_band, sum_insured_slab, gvw, etc. "
+            "Use for: fuel_type, ncb, cpa, zero_dep, vehicle_sub_class, vehicle_carrier, "
+            "number_of_wheels, school_bus_type, gvw, cc, seating_capacity, vehicle_age, "
+            "vehicle_make, vehicle_model, od_term, tp_term, deal_parameter, rto, etc. "
             "Keys should be snake_case. Values should be the exact label from the grid header. "
-            "Do NOT put here: state (use state_text), channel (use channel_text), "
-            "coverage type (use coverage_type_text), new/renewal (use customer_type_text). "
-            'Examples: {"fuel_type": "Non Petrol", "ncb": "NCB#", "preferred": "Non Preferred"}'
+            "Do NOT put here: state (use state_text), booking mode (use channel_text), "
+            "policy type (use coverage_type_text), business type (use customer_type_text). "
+            'Examples: {"fuel_type": "Non Petrol", "ncb": "Yes", "vehicle_sub_class": "Private Car"}'
         ),
     )
     other_conditions: str = Field(

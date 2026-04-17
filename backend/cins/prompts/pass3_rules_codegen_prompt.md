@@ -47,9 +47,9 @@ rule_text          (str, required) - human-readable description of the rule
 commission_value   (str, required) - "12%", "32.5%", "0%" — always as percentage string
 product_name       (str) - product name from document
 product_type       (str) - "GCV", "PCCV", "MSV", "motor", "4W", "2W", etc.
-customer_type_text (str) - "new", "renewal", ""
+customer_type_text (str) - "new", "renewal", "rollover", "port", ""
 channel_text       (str) - "online", "offline", ""
-coverage_type_text (str) - "comprehensive", "TP", "ACT", "package", "PACK", ""
+coverage_type_text (str) - "comprehensive", "TP", "SAOD", "third party", ""
 state_text         (str) - state name or code as found in document
 conditions         (dict) - key-value for grid dimensions without dedicated field
 other_conditions   (str) - free-text conditions that don't fit key-value structure

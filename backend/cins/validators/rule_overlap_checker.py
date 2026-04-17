@@ -150,50 +150,50 @@ class RuleOverlapChecker:
                 product_code=product_code,
                 rule1_id=rule1_id,
                 rule2_id=rule2_id,
-                description=f"Both rules have no conditions (default/catch-all rules)",
+                description="Both rules have no conditions (default/catch-all rules)",
                 suggestion="Only one default rule per product recommended. Ensure different priorities if intentional.",
                 overlapping_dimensions=["all"]
             ))
             return
 
-        # Check customer_type overlap
-        if "customer_type" in conditions1 and "customer_type" in conditions2:
-            if self._sets_overlap(conditions1["customer_type"], conditions2["customer_type"]):
-                overlapping_dims.append("customer_type")
-            else:
-                has_overlap = False
+        # List fields checked via set overlap
+        list_fields = [
+            "vehicle_sub_class", "policy_type", "state", "rto",
+            "number_of_wheels", "school_bus_type", "booking_mode",
+            "fuel_type", "vehicle_make", "vehicle_model",
+            "vehicle_carrier", "business_type", "deal_parameter",
+        ]
+        for field in list_fields:
+            if field in conditions1 and field in conditions2:
+                if self._sets_overlap(conditions1[field], conditions2[field]):
+                    overlapping_dims.append(field)
+                else:
+                    has_overlap = False
 
-        # Check channel overlap
-        if "channel" in conditions1 and "channel" in conditions2:
-            if self._sets_overlap(conditions1["channel"], conditions2["channel"]):
-                overlapping_dims.append("channel")
-            else:
-                has_overlap = False
+        # Single-value fields checked via equality
+        single_fields = ["zero_dep", "cpa", "ncb", "vehicle_age", "od_term", "tp_term"]
+        for field in single_fields:
+            if field in conditions1 and field in conditions2:
+                if conditions1[field] == conditions2[field]:
+                    overlapping_dims.append(field)
+                else:
+                    has_overlap = False
 
-        # Check vehicle_type overlap
-        if "vehicle_type" in conditions1 and "vehicle_type" in conditions2:
-            if self._sets_overlap(conditions1["vehicle_type"], conditions2["vehicle_type"]):
-                overlapping_dims.append("vehicle_type")
-            else:
-                has_overlap = False
-
-        # Check coverage_type overlap
-        if "coverage_type" in conditions1 and "coverage_type" in conditions2:
-            if self._sets_overlap(conditions1["coverage_type"], conditions2["coverage_type"]):
-                overlapping_dims.append("coverage_type")
-            else:
-                has_overlap = False
-
-        # If one rule has a condition the other doesn't, they might still overlap
-        # (the one without is more general)
-        all_condition_keys = set(conditions1.keys()) | set(conditions2.keys())
-        for key in all_condition_keys:
-            if key in conditions1 and key not in conditions2:
-                # Rule2 is more general in this dimension
-                pass
-            elif key in conditions2 and key not in conditions1:
-                # Rule1 is more general in this dimension
-                pass
+        # Range fields checked via range overlap
+        range_pairs = [
+            ("gvw_start_range", "gvw_end_range", "gvw"),
+            ("cc_start_range", "cc_end_range", "cc"),
+            ("seating_capacity_start_range", "seating_capacity_end_range", "seating_capacity"),
+        ]
+        for start_key, end_key, label in range_pairs:
+            if (start_key in conditions1 or end_key in conditions1) and \
+               (start_key in conditions2 or end_key in conditions2):
+                range1 = {"min": conditions1.get(start_key), "max": conditions1.get(end_key)}
+                range2 = {"min": conditions2.get(start_key), "max": conditions2.get(end_key)}
+                if self._ranges_overlap(range1, range2):
+                    overlapping_dims.append(label)
+                else:
+                    has_overlap = False
 
         # If we found overlaps in all checked dimensions
         if has_overlap and overlapping_dims:

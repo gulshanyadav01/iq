@@ -35,8 +35,8 @@ Extract all commission rules, provider details, and validity periods found in th
   - `state_text` → ONLY state codes/names: "TN, MP", "all states except TN"
     - **WRONG**: "TN & MP where grid applies and effective from June 2025..."
     - **CORRECT**: "TN, MP"
-  - `coverage_type_text` → ONLY coverage type: "comprehensive", "TP", "OD only"
-  - `channel_text` → ONLY channel: "online", "offline", "digital"
+  - `coverage_type_text` → ONLY coverage/policy type: "comprehensive", "TP", "SAOD", "third party"
+  - `channel_text` → ONLY booking mode: "online", "offline"
 - **Dates belong ONLY in date fields**: `valid_from_text`, `valid_to_text`, `start_date`, `end_date`
   - Do NOT put dates, effective periods, or temporal info in condition fields
 - **NEVER repeat the same text**: Each piece of information should appear in ONE field only

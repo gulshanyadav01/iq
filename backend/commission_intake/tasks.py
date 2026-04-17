@@ -526,3 +526,235 @@ def build_processing_chain(document_id: str, mode: str = "full"):
 def enqueue_processing_chain(document_id: str, mode: str = "full") -> None:
     """Enqueue a processing chain according to mode (full, index_only, extract_only)."""
     build_processing_chain(document_id, mode).apply_async(queue=COMMISSION_INTAKE_QUEUE)
+
+
+# ---------------------------------------------------------------------------
+# Rerun: specific pass for a specific sheet
+# ---------------------------------------------------------------------------
+
+
+@shared_task(queue=COMMISSION_INTAKE_QUEUE)
+def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attachment_name: str):
+    """
+    Re-run a single extraction pass (1, 2, or 3) for a specific sheet.
+    Reads indexed content from DB, rebuilds the same per-pass content strings
+    that the pipeline builds in _process_sheets, and updates the ExtractionPass row.
+    Does NOT rerun transform or validation.
+    """
+    import shutil
+    import tempfile
+    import time as _time
+    from pathlib import Path
+
+    from commission_intake.models import CommissionDocument, IndexedContent, ExtractionPass
+    from cins.processors.llm_services.factory import get_llm_service
+    from cins.processors.core.llm_extract import (
+        _extract_pass1_metadata,
+        _extract_pass2_master_data,
+        _extract_pass2_via_codegen,
+        _extract_pass3_products_and_rules,
+        _extract_pass3_via_codegen,
+        _should_use_codegen_for_pass2,
+        _should_use_codegen_for_pass3,
+    )
+    from cins.schema.extraction_passes import MetadataExtraction, MasterDataExtraction
+
+    doc = None
+    try:
+        doc = CommissionDocument.objects.get(id=document_id)
+        indexed = IndexedContent.objects.get(document=doc)
+
+        # Mark the targeted pass as running
+        ExtractionPass.objects.filter(
+            document=doc,
+            pass_number=pass_number,
+            sheet_name=sheet_name,
+            attachment_name=attachment_name,
+        ).update(status=ExtractionPass.Status.RUNNING, error="")
+
+        # ── Replicate pipeline._process_sheets content-building logic ──────────
+        sheet_contents = indexed.sheet_contents or {}
+        sheet_metadata = indexed.sheet_metadata or {}
+        classifications = sheet_metadata.get("classifications", {})
+
+        # Identify master sheets (same logic as IndexedDocument.get_master_sheets)
+        master_sheets = [
+            s for s, meta in classifications.items()
+            if (meta.get("classification") or meta.get("sheet_type")) == "master_data"
+        ]
+
+        master_context = ""
+        for ms in master_sheets:
+            content = sheet_contents.get(ms, "")
+            if content:
+                master_context += f"\n\n## Master Data Reference: {ms}\n\n{content}"
+
+        sheet_content = sheet_contents.get(sheet_name, "")
+
+        # Build per-pass content strings (mirrors pipeline._process_sheets lines 640-660)
+        pass1_content = ""
+        if indexed.source_type == "email" and indexed.primary_content:
+            pass1_content = indexed.primary_content + "\n\n"
+        pass1_content += master_context
+
+        pass2_content = master_context
+        pass3_content = f"## Commission Data Sheet: {sheet_name}\n\n{sheet_content}"
+
+        # prepare_extraction_request just wraps content in "Extract commission data from…"
+        def _wrap(content: str) -> str:
+            return f"Extract commission data from this document:\n\n{content}"
+
+        pass1_prompt = _wrap(pass1_content)
+        pass2_prompt = _wrap(pass2_content)
+        pass3_prompt = _wrap(pass3_content)
+
+        service = get_llm_service(**({"model": doc.llm_model} if doc.llm_model else {}))
+
+        start = _time.monotonic()
+
+        if pass_number == 1:
+            result_obj = _extract_pass1_metadata(pass1_prompt, service)
+            result_dict = result_obj.model_dump()
+        elif pass_number == 2:
+            pass1_row = ExtractionPass.objects.filter(
+                document=doc, pass_number=1,
+                sheet_name=sheet_name, attachment_name=attachment_name,
+            ).first()
+            metadata_obj = MetadataExtraction.model_validate(pass1_row.result) if pass1_row and pass1_row.result else MetadataExtraction()
+            if _should_use_codegen_for_pass2(pass2_prompt):
+                result_obj = _extract_pass2_via_codegen(pass2_prompt, service, metadata_obj)
+            else:
+                result_obj = _extract_pass2_master_data(pass2_prompt, service, metadata_obj)
+            result_dict = result_obj.model_dump()
+        else:  # pass 3
+            pass1_row = ExtractionPass.objects.filter(
+                document=doc, pass_number=1,
+                sheet_name=sheet_name, attachment_name=attachment_name,
+            ).first()
+            pass2_row = ExtractionPass.objects.filter(
+                document=doc, pass_number=2,
+                sheet_name=sheet_name, attachment_name=attachment_name,
+            ).first()
+            metadata_obj = MetadataExtraction.model_validate(pass1_row.result) if pass1_row and pass1_row.result else MetadataExtraction()
+            master_data_obj = MasterDataExtraction.model_validate(pass2_row.result) if pass2_row and pass2_row.result else MasterDataExtraction()
+            if _should_use_codegen_for_pass3(pass3_prompt):
+                result_obj = _extract_pass3_via_codegen(pass3_prompt, service, metadata_obj, master_data_obj)
+            else:
+                result_obj = _extract_pass3_products_and_rules(pass3_prompt, service, metadata_obj, master_data_obj)
+            result_dict = result_obj.model_dump()
+
+        duration = _time.monotonic() - start
+
+        ExtractionPass.objects.update_or_create(
+            document=doc,
+            pass_number=pass_number,
+            sheet_name=sheet_name,
+            attachment_name=attachment_name,
+            defaults={
+                "status": ExtractionPass.Status.COMPLETED,
+                "result": result_dict,
+                "llm_model_used": service.model,
+                "duration_seconds": round(duration, 2),
+                "error": "",
+            },
+        )
+
+        return document_id
+
+    except Exception as exc:
+        logger.exception(f"Rerun pass {pass_number} failed for document {document_id}: {exc}")
+        if doc:
+            ExtractionPass.objects.filter(
+                document=doc,
+                pass_number=pass_number,
+                sheet_name=sheet_name,
+                attachment_name=attachment_name,
+            ).update(status=ExtractionPass.Status.FAILED, error=str(exc))
+        raise Ignore()
+
+
+# ---------------------------------------------------------------------------
+# Rerun: raw→CICS transform from existing pass results
+# ---------------------------------------------------------------------------
+
+
+@shared_task(queue=COMMISSION_INTAKE_QUEUE)
+def rerun_transform(document_id: str):
+    """
+    Rebuild the CICSResult by merging existing ExtractionPass rows and re-running
+    the RawToCICSTransformer.  Does NOT re-run any LLM passes.
+    Followed by validation automatically.
+    """
+    import shutil
+    import tempfile
+
+    from commission_intake.models import CommissionDocument, ExtractionPass, CICSResult, ValidationResult
+    from cins.schema.extraction_passes import MetadataExtraction, MasterDataExtraction, RulesExtraction
+    from cins.schema.raw_extraction import RawExtraction
+    from cins.processors.core.raw_to_cics_transformer import RawToCICSTransformer
+
+    try:
+        doc = CommissionDocument.objects.get(id=document_id)
+
+        # Gather all completed pass results grouped by sheet
+        passes = list(
+            ExtractionPass.objects.filter(document=doc, status=ExtractionPass.Status.COMPLETED)
+            .order_by("sheet_name", "attachment_name", "pass_number")
+        )
+
+        if not passes:
+            raise ValueError("No completed extraction passes found — run extraction first.")
+
+        # Group by (sheet_name, attachment_name)
+        from collections import defaultdict
+        sheet_passes: dict = defaultdict(dict)
+        for p in passes:
+            key = (p.sheet_name, p.attachment_name)
+            sheet_passes[key][p.pass_number] = p.result
+
+        # Merge all sheets into a single RawExtraction (use first sheet as base, extend commission_entries)
+        merged_raw = None
+        for key, pass_results in sheet_passes.items():
+            p1 = MetadataExtraction.model_validate(pass_results.get(1) or {})
+            p2 = MasterDataExtraction.model_validate(pass_results.get(2) or {})
+            p3 = RulesExtraction.model_validate(pass_results.get(3) or {})
+            raw = RawExtraction.from_passes(p1, p2, p3)
+            if merged_raw is None:
+                merged_raw = raw
+            else:
+                merged_raw.commission_entries = (merged_raw.commission_entries or []) + (raw.commission_entries or [])
+                merged_raw.master_data = (merged_raw.master_data or []) + (raw.master_data or [])
+
+        if merged_raw is None:
+            raise ValueError("Failed to build RawExtraction from passes.")
+
+        transformer = RawToCICSTransformer()
+        cics_doc, transform_warnings, transform_errors = transformer.transform(merged_raw)
+        cics_json = cics_doc.model_dump(exclude_none=True)
+
+        CICSResult.objects.update_or_create(
+            document=doc,
+            defaults={
+                "cics_doc": cics_json,
+                "raw_extraction": None,
+                "warnings": transform_warnings or [],
+                "errors": transform_errors or [],
+                "duration_seconds": 0.0,
+                "sheet_results": [],
+            },
+        )
+
+        provider_name = cics_json.get("provider", {}).get("provider_name", "")
+        if provider_name:
+            doc.provider = provider_name
+            doc.save(update_fields=["provider", "updated_at"])
+
+        # Clear stale validation so the UI knows it needs re-running
+        ValidationResult.objects.filter(document=doc).delete()
+
+        return document_id
+
+    except Exception as exc:
+        logger.exception(f"Transform failed for document {document_id}: {exc}")
+        _fail_document(document_id, str(exc))
+        raise Ignore()

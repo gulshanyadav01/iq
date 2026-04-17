@@ -21,25 +21,45 @@ class NumericRange(BaseModel):
 
 
 class RuleConditions(BaseModel):
-    """Multi-dimensional conditions for rule matching (all conditions are ANDed together)"""
-    channel: Optional[List[Literal["online", "offline", "partner", "direct", "broker"]]] = Field(None, description="Sales channel(s)")
-    customer_type: Optional[List[str]] = Field(None, description="Customer type(s)")
-    vehicle_type: Optional[List[str]] = Field(None, description="Vehicle type for motor insurance (flexible to handle various formats)")
-    coverage_type: Optional[List[Literal["comprehensive", "third-party", "od-only", "package"]]] = Field(None, description="Coverage type")
-    state: Optional[List[str]] = Field(None, description="State(s) where this rule applies")
-    state_exclude: Optional[List[str]] = Field(None, description="State(s) to exclude from this rule (use when rule applies to all states except specific ones)")
-    custom_conditions: Optional[Dict[str, Any]] = Field(None, description="Escape hatch for provider-specific or complex conditions")
+    """Domain-specific conditions for insurance commission rule matching (all conditions ANDed)"""
+    vehicle_sub_class: Optional[List[str]] = Field(None, description="Vehicle sub-class(es) e.g. private-car, taxi, scooter, bike")
+    policy_type: Optional[List[str]] = Field(None, description="Policy type(s): third-party, comprehensive, saod")
+    state: Optional[List[str]] = Field(None, description="Indian state(s) in lowercase-hyphenated format e.g. andhra-pradesh")
+    rto: Optional[List[str]] = Field(None, description="RTO code(s) e.g. UP-16, MH-01")
+    number_of_wheels: Optional[List[str]] = Field(None, description="Number of wheels: 3w, 4w-and-above")
+    gvw_start_range: Optional[int] = Field(None, description="Start of Gross Vehicle Weight range")
+    gvw_end_range: Optional[int] = Field(None, description="End of Gross Vehicle Weight range")
+    cc_start_range: Optional[int] = Field(None, description="Start of engine CC range")
+    cc_end_range: Optional[int] = Field(None, description="End of engine CC range")
+    seating_capacity_start_range: Optional[int] = Field(None, description="Start of seating capacity range")
+    seating_capacity_end_range: Optional[int] = Field(None, description="End of seating capacity range")
+    school_bus_type: Optional[List[str]] = Field(None, description="School bus type(s): on-individual-name, on-school-name, on-company-name, on-contract-transporter")
+    booking_mode: Optional[List[str]] = Field(None, description="Booking mode(s): online, offline")
+    zero_dep: Optional[str] = Field(None, description="Zero depreciation: yes, no")
+    ncb: Optional[bool] = Field(None, description="No Claim Bonus flag")
+    cpa: Optional[str] = Field(None, description="CPA type: with-cpa, without-cpa")
+    fuel_type: Optional[List[str]] = Field(None, description="Fuel type(s): petrol, diesel, cng, lpg, electric")
+    vehicle_age: Optional[int] = Field(None, description="Vehicle age in years (0-35)")
+    vehicle_make: Optional[List[str]] = Field(None, description="Vehicle make(s), free-text")
+    vehicle_model: Optional[List[str]] = Field(None, description="Vehicle model(s), free-text")
+    vehicle_carrier: Optional[List[str]] = Field(None, description="Vehicle carrier type(s): public, private, commercial")
+    business_type: Optional[List[str]] = Field(None, description="Business type(s): new, renewal, rollover, port")
+    od_term: Optional[int] = Field(None, description="OD term in years (0-10)")
+    tp_term: Optional[int] = Field(None, description="TP term in years (0-10)")
+    deal_parameter: Optional[List[str]] = Field(None, description="Deal parameter(s): od, net, regular-tp, tp-with-vehicle-age, flat-amount, ape")
 
-    @field_validator('channel', 'customer_type', 'vehicle_type', 'coverage_type', 'state', 'state_exclude', mode='before')
+    @field_validator(
+        'vehicle_sub_class', 'policy_type', 'state', 'rto', 'number_of_wheels',
+        'school_bus_type', 'booking_mode', 'fuel_type', 'vehicle_make',
+        'vehicle_model', 'vehicle_carrier', 'business_type', 'deal_parameter',
+        mode='before',
+    )
     @classmethod
     def convert_str_to_list(cls, v):
         """Convert single string values to lists"""
         if isinstance(v, str):
             return [v]
         return v
-
-    class Config:
-        extra = "allow"  # Allow additional fields for flexibility
 
 
 class CommissionTier(BaseModel):
@@ -98,6 +118,18 @@ class Product(BaseModel):
     product_category: Optional[Literal["motor", "health", "life", "travel", "home", "other"]] = Field(None, description="High-level product category")
     sub_category: Optional[str] = Field(None, description="Sub-category or product type")
     commission_rules: List[CommissionRule] = Field(..., min_length=1, description="Ordered list of commission rules (evaluated by priority)")
+    # Deal-level metadata fields
+    deal_type: Optional[str] = Field(None, description="Deal type: market-deal, market-bonus-deal, special-deal, special-bonus-deal, declined-deal, basic-deal")
+    deal_business_type: Optional[str] = Field(None, description="Deal business type: net, ape, tp, od")
+    portfolio_business: Optional[str] = Field(None, description="Portfolio business: market-deal, special-deal, declined-deal, partner-specific-special-deal, registration-deal")
+    approval_type: Optional[str] = Field(None, description="Approval type: deal, booking, manual-override")
+    file_type: Optional[str] = Field(None, description="File type: irda-statement, rewards-statement, enhancement-statement, orc-statement")
+    zone: Optional[str] = Field(None, description="Zone: north, south, east, west")
+    product_mode: Optional[str] = Field(None, description="Product mode: online, offline")
+    bu_parameters: Optional[str] = Field(None, description="BU parameters: motor")
+    decline_deal: Optional[str] = Field(None, description="Decline deal: decline")
+    product_subproduct: Optional[str] = Field(None, description="Product-subproduct: car, two-wheeler, commercial-gcv, commercial-pcv, commercial-buses, commercial-miscd")
+    vehicle_type: Optional[str] = Field(None, description="Vehicle type: car-taxi, two-wheeler, gcv, pcv, buses, misc-d")
 
 
 class SourceLocation(BaseModel):

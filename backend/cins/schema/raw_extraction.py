@@ -43,36 +43,50 @@ class RawCommissionEntry(BaseModel):
     # Product identification
     product_name: str = Field(
         '',
-        description="Product name if specified (e.g., 'Four Wheeler Comprehensive', 'Two Wheeler TP')",
+        description=(
+            "Canonical product name. Motor products must use exactly one of: "
+            "'Private Car', 'Two Wheeler', or 'Commercial Vehicle'. "
+            "Non-motor products (health, life, travel, fire, marine): name as written in document."
+        ),
     )
     product_type: str = Field(
         '',
-        description="Product type/category as stated (e.g., 'motor', 'health', 'life', '4W', '2W', 'GCV')",
+        description="Product type/category (e.g., 'motor', 'health', 'life', 'GCV', 'PCV'). For motor, subtype if known.",
     )
 
     # Condition fields as free-text (no enums, no nested objects)
     customer_type_text: str = Field(
         '',
-        description="Customer type as stated (e.g., 'new', 'renewal', 'new customers', 'first time')",
+        description=(
+            "Business type as stated. Standard values: 'new', 'renewal', 'rollover', 'port'. "
+            "Do NOT put 'Preferred'/'Non Preferred' here — those are grid column groups; "
+            "use conditions dict instead: {\"preferred\": \"Preferred\"}."
+        ),
     )
     channel_text: str = Field(
         '',
-        description="Channel as stated (e.g., 'online', 'offline', 'digital', 'branch', 'partner')",
+        description="Booking mode as stated (e.g., 'online', 'offline')",
     )
     coverage_type_text: str = Field(
         '',
-        description="Coverage type as stated (e.g., 'comprehensive', 'TP', 'third party', 'OD only', 'package')",
+        description="Policy type as stated (e.g., 'comprehensive', 'TP', 'SAOD', 'third party')",
     )
     state_text: str = Field(
         '',
-        description="States/regions as stated (e.g., 'BR, CG', 'all states except TN', 'doable states', 'Maharashtra')",
+        description="States/regions as stated (e.g., 'BR, CG', 'all states except TN', 'Maharashtra')",
     )
     # Structured key-value conditions for grid dimensions without a dedicated field
     conditions: Dict[str, str] = Field(
         default_factory=dict,
         description=(
-            "Key-value pairs for grid dimension conditions that have no dedicated field. "
-            "Examples: {\"fuel_type\": \"Non Petrol\", \"ncb\": \"NCB#\", \"preferred\": \"Non Preferred\"}"
+            "Key-value pairs for any grid dimension conditions that have no dedicated field. "
+            "Use for: fuel_type, ncb, cpa, zero_dep, vehicle_sub_class, vehicle_carrier, "
+            "number_of_wheels, school_bus_type, gvw, cc, seating_capacity, vehicle_age, "
+            "vehicle_make, vehicle_model, od_term, tp_term, deal_parameter, rto, etc. "
+            "Keys should be snake_case. Values should be the exact label from the grid header. "
+            "Do NOT put here: state (use state_text), booking mode (use channel_text), "
+            "policy type (use coverage_type_text), business type (use customer_type_text). "
+            "Examples: {\"fuel_type\": \"Non Petrol\", \"ncb\": \"Yes\", \"vehicle_sub_class\": \"Private Car\"}"
         ),
     )
     # Custom/other conditions as free-text catch-all
@@ -81,7 +95,8 @@ class RawCommissionEntry(BaseModel):
         description=(
             "Free-text conditions with no dedicated field AND no clean key-value structure "
             "(e.g., 'tourist permit only', 'corporate-registered vehicles'). "
-            "Do NOT put footnote definitions here. Do NOT use when conditions dict applies."
+            "Do NOT use for dimensions that fit as key-value pairs — use conditions dict instead. "
+            "Do NOT put footnote definitions here."
         ),
     )
 
@@ -195,7 +210,7 @@ class RawExtraction(BaseModel):
     )
     global_vehicle_type_text: str = Field(
         '',
-        description="Vehicle type that applies to all rules (e.g., 'Staff Bus', 'GCV')",
+        description="Comma-separated vehicle type(s) that apply to all rules (e.g., 'Staff Bus', 'GCV')",
     )
     global_state_text: str = Field(
         '',

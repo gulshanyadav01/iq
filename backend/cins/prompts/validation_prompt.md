@@ -47,10 +47,16 @@ You will validate CICS JSON documents across multiple dimensions:
 - [ ] **Enum values valid**:
   - `source_type`: email|pdf|excel|api|manual
   - `product_category`: motor|health|life|travel|home|other
-  - `channel`: online|offline|partner|direct|broker
-  - `customer_type`: new|renewal|portability
-  - `vehicle_type`: two-wheeler|four-wheeler|gcv|pcv
-  - `coverage_type`: comprehensive|third-party|od-only|package
+  - `booking_mode`: online|offline
+  - `business_type`: new|renewal|rollover|port
+  - `policy_type`: third-party|comprehensive|saod
+  - `fuel_type`: petrol|diesel|cng|lpg|electric
+  - `number_of_wheels`: 3w|4w-and-above
+  - `vehicle_carrier`: public|private|commercial
+  - `zero_dep`: yes|no
+  - `cpa`: with-cpa|without-cpa
+  - `ncb`: boolean (true/false)
+  - `deal_parameter`: od|net|regular-tp|tp-with-vehicle-age|flat-amount|ape
   - `commission_type`: percentage|flat|tiered|hybrid
 
 **Report Format**:

@@ -660,8 +660,34 @@ class Pipeline:
                 _, pass3_prompt = prepare_extraction_request(str(output_dir / f"pass3_content_{safe_name}.txt"))
 
                 if use_multi_pass:
-                    # Call multi-pass directly with return_passes=True to capture per-pass outputs
-                    sheet_start = datetime.now()
+                    from cins.processors.llm_services.factory import get_llm_service
+                    try:
+                        model_used = get_llm_service().model
+                    except Exception:
+                        model_used = ""
+
+                    pass_prompts = {
+                        1: pass1_prompt,
+                        2: pass2_prompt,
+                        3: pass3_prompt,
+                    }
+
+                    def _on_pass_done(pass_num, result_dict, duration):
+                        entry = {
+                            "sheet_name": sheet_name,
+                            "attachment_name": attachment_name,
+                            "pass_number": pass_num,
+                            "result": result_dict,
+                            "prompt_text": pass_prompts[pass_num],
+                            "model": model_used,
+                            "duration": duration,
+                            "status": "completed",
+                            "error": "",
+                        }
+                        sheet_pass_results.append(entry)
+                        if on_sheet_complete:
+                            on_sheet_complete([entry])
+
                     pass_result = extract_multi_pass(
                         pass1_prompt,
                         return_passes=True,
@@ -671,71 +697,38 @@ class Pipeline:
                         email_and_master_data_content=pass1_prompt,
                         master_data_content=pass2_prompt,
                         commission_data_content=pass3_prompt,
+                        on_pass_complete=_on_pass_done,
                     )
-                    sheet_duration = (datetime.now() - sheet_start).total_seconds()
 
                     # pass_result is a dict when return_passes=True
                     if isinstance(pass_result, dict) and "cics" in pass_result:
                         parsed_result = pass_result["cics"]
                         json_result = json.dumps(parsed_result, indent=2)
-
-                        # Capture per-pass outputs for DB storage
-                        from cins.processors.llm_services.factory import get_llm_service
-                        try:
-                            model_used = get_llm_service().model
-                        except Exception:
-                            model_used = ""
-
-                        pass_prompts = {
-                            1: pass1_prompt,
-                            2: pass2_prompt,
-                            3: pass3_prompt,
-                        }
-                        new_entries = []
-                        for pass_num, pass_key in [
-                            (1, "pass1_metadata"),
-                            (2, "pass2_master_data"),
-                            (3, "pass3_products_and_rules"),
-                        ]:
-                            entry = {
-                                "sheet_name": sheet_name,
-                                "attachment_name": attachment_name,
-                                "pass_number": pass_num,
-                                "result": pass_result.get(pass_key),
-                                "prompt_text": pass_prompts[pass_num],
-                                "model": model_used,
-                                "duration": sheet_duration / 3,
-                                "status": "completed",
-                                "error": "",
-                            }
-                            new_entries.append(entry)
-                            sheet_pass_results.append(entry)
-
-                        if on_sheet_complete:
-                            on_sheet_complete(new_entries)
                     else:
-                        # Unexpected shape — treat as failed passes
+                        # Unexpected shape — mark any passes not yet persisted as failed
                         json_result = json.dumps(pass_result) if not isinstance(pass_result, str) else pass_result
                         try:
                             parsed_result = json.loads(json_result)
                         except Exception:
                             parsed_result = {}
+                        persisted_pass_nums = {e["pass_number"] for e in sheet_pass_results if e.get("sheet_name") == sheet_name}
                         failed_entries = []
                         for pass_num in (1, 2, 3):
-                            entry = {
-                                "sheet_name": sheet_name,
-                                "attachment_name": attachment_name,
-                                "pass_number": pass_num,
-                                "result": None,
-                                "prompt_text": "",
-                                "model": "",
-                                "duration": 0.0,
-                                "status": "failed",
-                                "error": "Unexpected multi-pass result shape",
-                            }
-                            failed_entries.append(entry)
-                            sheet_pass_results.append(entry)
-                        if on_sheet_complete:
+                            if pass_num not in persisted_pass_nums:
+                                entry = {
+                                    "sheet_name": sheet_name,
+                                    "attachment_name": attachment_name,
+                                    "pass_number": pass_num,
+                                    "result": None,
+                                    "prompt_text": "",
+                                    "model": "",
+                                    "duration": 0.0,
+                                    "status": "failed",
+                                    "error": "Unexpected multi-pass result shape",
+                                }
+                                failed_entries.append(entry)
+                                sheet_pass_results.append(entry)
+                        if failed_entries and on_sheet_complete:
                             on_sheet_complete(failed_entries)
                 else:
                     extract_response = extract(

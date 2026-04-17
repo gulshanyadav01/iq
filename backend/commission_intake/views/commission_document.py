@@ -9,8 +9,9 @@ from commission_intake.serializers import (
     CommissionDocumentCreateSerializer,
     CommissionDocumentSerializer,
     ProcessingModeRequestSerializer,
+    RerunPassRequestSerializer,
 )
-from commission_intake.tasks import enqueue_processing_chain
+from commission_intake.tasks import enqueue_processing_chain, rerun_single_pass, rerun_transform, run_validation
 
 
 class CommissionDocumentViewSet(viewsets.GenericViewSet):
@@ -122,4 +123,90 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         instance.processing_mode = CommissionDocument.ProcessingMode.EXTRACT_ONLY
         instance.save(update_fields=["status", "error", "processing_mode", "updated_at"])
         enqueue_processing_chain(str(instance.id), mode="extract_only")
+        return Response(CommissionDocumentSerializer(instance).data)
+
+    @extend_schema(
+        request=RerunPassRequestSerializer,
+        responses={200: CommissionDocumentSerializer},
+    )
+    @action(detail=True, methods=["post"], url_path="rerun-pass")
+    def rerun_pass(self, request, *args, **kwargs):
+        """Re-run a single extraction pass (1/2/3) for a specific sheet."""
+        from commission_intake.models import IndexedContent, ExtractionPass
+
+        instance = self.get_object()
+        in_flight = (CommissionDocument.Status.INDEXING, CommissionDocument.Status.EXTRACTING)
+        if instance.status in in_flight:
+            return Response(
+                {"detail": "Document is currently being processed."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if not IndexedContent.objects.filter(document=instance).exists():
+            return Response(
+                {"detail": "Document must be indexed before a pass can be re-run."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        req = RerunPassRequestSerializer(data=request.data)
+        req.is_valid(raise_exception=True)
+        pass_number = req.validated_data["pass_number"]
+        sheet_name = req.validated_data.get("sheet_name", "")
+        attachment_name = req.validated_data.get("attachment_name", "")
+
+        # Mark the pass as pending immediately so the UI reflects queued state
+        ExtractionPass.objects.update_or_create(
+            document=instance,
+            pass_number=pass_number,
+            sheet_name=sheet_name,
+            attachment_name=attachment_name,
+            defaults={"status": ExtractionPass.Status.PENDING, "error": ""},
+        )
+
+        rerun_single_pass.apply_async(
+            args=[str(instance.id), pass_number, sheet_name, attachment_name],
+            queue="commission_intake",
+        )
+        return Response(CommissionDocumentSerializer(instance).data)
+
+    @extend_schema(responses={200: CommissionDocumentSerializer})
+    @action(detail=True, methods=["post"], url_path="transform")
+    def transform(self, request, *args, **kwargs):
+        """Re-run raw→CICS transformation from existing pass results."""
+        from commission_intake.models import ExtractionPass
+
+        instance = self.get_object()
+        in_flight = (CommissionDocument.Status.INDEXING, CommissionDocument.Status.EXTRACTING)
+        if instance.status in in_flight:
+            return Response(
+                {"detail": "Document is currently being processed."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if not ExtractionPass.objects.filter(
+            document=instance, status=ExtractionPass.Status.COMPLETED
+        ).exists():
+            return Response(
+                {"detail": "No completed extraction passes found. Run extraction first."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        rerun_transform.apply_async(args=[str(instance.id)], queue="commission_intake")
+        return Response(CommissionDocumentSerializer(instance).data)
+
+    @extend_schema(responses={200: CommissionDocumentSerializer})
+    @action(detail=True, methods=["post"], url_path="validate")
+    def validate(self, request, *args, **kwargs):
+        """Re-run schema + overlap validation on the existing CICS result."""
+        from commission_intake.models import CICSResult
+
+        instance = self.get_object()
+        in_flight = (CommissionDocument.Status.INDEXING, CommissionDocument.Status.EXTRACTING)
+        if instance.status in in_flight:
+            return Response(
+                {"detail": "Document is currently being processed."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if not CICSResult.objects.filter(document=instance).exists():
+            return Response(
+                {"detail": "No CICS result found. Run extraction and transform first."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        run_validation.apply_async(args=[str(instance.id)], queue="commission_intake")
         return Response(CommissionDocumentSerializer(instance).data)
