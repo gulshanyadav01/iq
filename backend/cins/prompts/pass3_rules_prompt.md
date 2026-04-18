@@ -183,6 +183,20 @@ Do NOT leave blank if policy type is encoded in the section name:
 
 ---
 
+### `state_text` — State from City Names
+
+When a rule references a **city name** (e.g., "AHMEDABAD", "Mumbai", "Chennai") instead of a state, resolve the city to its state and populate `state_text` with the state name.
+
+Examples:
+
+* Rule contains "AHMEDABAD" → `state_text = "Gujarat"`
+* Rule contains "Mumbai" → `state_text = "Maharashtra"`
+* Rule contains "Chennai" → `state_text = "Tamil Nadu"`
+
+Do not leave `state_text` empty just because a city was used — city implies state.
+
+---
+
 ### `conditions["vehicle_sub_class"]` — Vehicle Sub-Class from Context
 
 Populate `conditions["vehicle_sub_class"]` when the section, product name, or grid explicitly identifies a vehicle sub-class.

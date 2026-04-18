@@ -52,6 +52,8 @@ export interface ExtractionPass {
   attachment_name: string
   status: 'pending' | 'running' | 'completed' | 'failed'
   result: Record<string, unknown> | null
+  prompt_text: string
+  system_instruction: string
   llm_model_used: string
   duration_seconds: number
   error: string
@@ -400,8 +402,15 @@ export function useCommissionIntakeDetail() {
     }
   }
 
+  function hasRunningPass(): boolean {
+    if ((doc.value?.extraction_passes || []).some(p => p.status === 'running' || p.status === 'pending')) return true
+    // Keep polling when validation is missing on a completed doc (rerun_transform cleared it, validation task pending)
+    if (doc.value?.status === 'completed' && doc.value.cics_result && !doc.value.validation_result) return true
+    return false
+  }
+
   async function pollDoc() {
-    if (!doc.value || !isInFlight(doc.value.status)) return
+    if (!doc.value || (!isInFlight(doc.value.status) && !hasRunningPass())) return
     try {
       const headers = await getAuthHeaders()
       doc.value = await $fetch<CommissionDocument>(

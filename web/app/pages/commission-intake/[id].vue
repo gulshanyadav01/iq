@@ -233,6 +233,15 @@
                 </div>
                 <div class="flex items-center gap-2">
                   <button
+                    v-if="currentPass.system_instruction || currentPass.prompt_text"
+                    class="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
+                    title="View prompts"
+                    @click="promptModalTab = 'system'; promptModalOpen = true"
+                  >
+                    <UIcon name="i-lucide-file-code" class="w-3.5 h-3.5" />
+                    Prompts
+                  </button>
+                  <button
                     v-if="!isInFlight(doc.status) && currentPass.status !== 'running'"
                     :disabled="actionLoading !== null"
                     class="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
@@ -493,9 +502,34 @@
       </div>
     </div>
   </div>
+
+  <!-- Prompt viewer modal -->
+  <UModal v-model:open="promptModalOpen" title="Pass Prompts" :ui="{ width: 'max-w-3xl' }">
+    <template #body>
+      <div v-if="currentPass">
+        <!-- Tabs -->
+        <div class="flex gap-4 text-xs font-medium border-b border-gray-200 dark:border-gray-700 mb-4">
+          <button
+            :class="['pb-3 border-b-2 transition', promptModalTab === 'system' ? 'border-primary-500 text-primary-600 dark:text-primary-400' : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300']"
+            @click="promptModalTab = 'system'"
+          >
+            System Instruction
+          </button>
+          <button
+            :class="['pb-3 border-b-2 transition', promptModalTab === 'user' ? 'border-primary-500 text-primary-600 dark:text-primary-400' : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300']"
+            @click="promptModalTab = 'user'"
+          >
+            User Prompt
+          </button>
+        </div>
+        <pre class="text-xs bg-gray-50 dark:bg-gray-900 p-4 rounded-lg overflow-auto max-h-[60vh] leading-relaxed whitespace-pre-wrap">{{ promptModalTab === 'system' ? (currentPass.system_instruction || '—') : (currentPass.prompt_text || '—') }}</pre>
+      </div>
+    </template>
+  </UModal>
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useCommissionIntakeDetail } from '~/composables/useCommissionIntakeDetail'
 
@@ -514,6 +548,9 @@ const cicsTabs = [
   { id: 'products' as const, label: 'Products' },
   { id: 'json' as const, label: 'Raw JSON' },
 ]
+
+const promptModalOpen = ref(false)
+const promptModalTab = ref<'system' | 'user'>('system')
 
 const {
   doc, loadError, activeStage, copied, activeCicsTab, actionLoading, actionError, activePassSheetKey,

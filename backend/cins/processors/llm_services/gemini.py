@@ -315,7 +315,7 @@ class GeminiService(LLMServiceMixin):
 
     @staticmethod
     def config_for_raw_extraction() -> GeminiConfig:
-        """Configuration for two-stage raw extraction"""
+        """Configuration for raw extraction"""
         return GeminiConfig(
             temperature=0,
             top_p=1,

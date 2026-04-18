@@ -42,7 +42,6 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       EXCEL_AI_CLASSIFICATION_ENABLED: ${EXCEL_AI_CLASSIFICATION_ENABLED:-true}
-      USE_MULTI_PASS_EXTRACTION: ${USE_MULTI_PASS_EXTRACTION:-true}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always

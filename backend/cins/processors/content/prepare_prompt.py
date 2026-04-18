@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""
-Prompt Preparation Tool
-Prepares user prompts for LLM extraction from document content.
-
-Note: System instructions are now handled by get_raw_extraction_prompt()
-in llm_extract.py to ensure consistency.
-"""
+"""Prompt Preparation Tool — prepares user prompts for LLM extraction from document content."""
 
 import sys
 from pathlib import Path
@@ -29,18 +23,12 @@ def get_document_content(document_content_file):
     except Exception as e:
         raise Exception(f"Error reading document content: {str(e)}")
 
-    return f"""Extract commission data from this document:
-
-{content}"""
+    return content
 
 
 def prepare_extraction_request(document_content_file, extraction_prompt_file=None):
     """
     Prepare user prompt for extraction.
-
-    Note: This function is kept for backward compatibility with Streamlit code.
-    It returns (None, user_prompt) - system instruction should be obtained
-    from llm_extract.get_raw_extraction_prompt() instead.
 
     Args:
         document_content_file: Path to file containing extracted document content

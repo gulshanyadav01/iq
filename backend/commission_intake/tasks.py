@@ -200,7 +200,6 @@ def run_extraction(document_id: str):
     )
     from cins.processors.content.indexer import IndexedDocument
     from cins.processors.core.pipeline import Pipeline
-    from cins.processors.core.llm_extract import is_multi_pass_enabled
 
     try:
         doc = CommissionDocument.objects.get(id=document_id)
@@ -213,7 +212,7 @@ def run_extraction(document_id: str):
 
         # Pre-create ExtractionPass rows as PENDING for each known sheet × 3 passes.
         # This lets the UI display pending state before extraction starts.
-        if is_multi_pass_enabled() and indexed.sheet_contents:
+        if indexed.sheet_contents:
             sheet_metadata = indexed.sheet_metadata or {}
             classifications = sheet_metadata.get("classifications", {})
             # Determine attachment grouping: for email source types, attachment_keys hints at the
@@ -275,7 +274,7 @@ def run_extraction(document_id: str):
 
             result = pipeline.process_from_indexed(indexed_doc, output_path=fake_dir / "cics.json")
 
-            # Final upsert for any entries not yet persisted (e.g. non-multi-pass path).
+            # Final upsert for any entries not yet persisted by the callback.
             _save_extraction_passes(doc, result)
 
             # Save final CICS result
@@ -333,6 +332,7 @@ def _upsert_extraction_passes(doc, entries: list) -> None:
                 "status": entry.get("status", "completed"),
                 "result": entry.get("result"),
                 "prompt_text": entry.get("prompt_text", ""),
+                "system_instruction": entry.get("system_instruction", ""),
                 "llm_model_used": entry.get("model", ""),
                 "duration_seconds": entry.get("duration", 0.0),
                 "error": entry.get("error", ""),
@@ -361,8 +361,6 @@ def _derive_attachment_names(indexed) -> list:
     source_meta = sheet_metadata.get("source_metadata", {})
     excel_attachments = source_meta.get("excel_attachments", [])
     if excel_attachments:
-        # Only single-attachment emails are handled by _process_sheets;
-        # multi-attachment emails would need _process_email_with_attachments (not yet wired).
         return list(excel_attachments)
     return [""]
 
@@ -749,8 +747,9 @@ def rerun_transform(document_id: str):
             doc.provider = provider_name
             doc.save(update_fields=["provider", "updated_at"])
 
-        # Clear stale validation so the UI knows it needs re-running
+        # Run validation immediately after transform
         ValidationResult.objects.filter(document=doc).delete()
+        run_validation.apply_async(args=[document_id], queue=COMMISSION_INTAKE_QUEUE)
 
         return document_id
 

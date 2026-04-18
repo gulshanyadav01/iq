@@ -61,6 +61,8 @@ class ExtractionPassSerializer(serializers.ModelSerializer):
             "attachment_name",
             "status",
             "result",
+            "prompt_text",
+            "system_instruction",
             "llm_model_used",
             "duration_seconds",
             "error",

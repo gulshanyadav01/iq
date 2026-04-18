@@ -1,31 +1,6 @@
 #!/usr/bin/env python3
-"""
-Commission Data Extractor
-Extracts structured commission data from documents using LLMs (Gemini or OpenAI).
-Uses Pydantic models and structured output to ensure schema compliance.
+"""Commission Data Extractor — multi-pass LLM extraction pipeline for insurance commission documents."""
 
-Supports two extraction modes:
-
-1. Two-Stage Extraction (default):
-   - Stage 1: AI extracts to simplified RawExtraction schema
-   - Stage 2: Transformer converts to full CICS schema deterministically
-
-2. Multi-Pass Extraction (optional, set USE_MULTI_PASS_EXTRACTION=true):
-   - Pass 1: Extract metadata, provider, period, global settings
-   - Pass 2: Extract master data only (RTO mappings, declined lists, etc.)
-   - Pass 3: Identify products and extract commission rules for all products
-   - Merge: Combine passes into RawExtraction
-   - Transform: Convert to CICS schema deterministically
-
-Multi-pass reduces AI errors further by using smaller, focused schemas per pass.
-
-Environment variables:
-- GEMINI_API_KEY: Google API key for Gemini
-- OPENAI_API_KEY: OpenAI API key
-- USE_MULTI_PASS_EXTRACTION: Set to 'true' to enable multi-pass mode (default: false)
-"""
-
-import os
 import json
 import sys
 import time
@@ -47,6 +22,7 @@ from cins.schema.extraction_passes import (
     RulesExtraction,
     ProductWithRules,
     RuleEntry,
+    CodegenEnrichmentExtraction,
 )
 from cins.validators.raw_extraction_validator import RawExtractionValidator
 
@@ -59,53 +35,6 @@ CODEGEN_DIMENSION_THRESHOLD = 15    # rows or columns per table for density chec
 
 # Threshold for proactive code-gen mode selection in Pass 2 (master data).
 CODEGEN_INPUT_SIZE_THRESHOLD_BYTES_PASS2 = 30_000  # master_data_content > 30 KB
-
-
-def is_multi_pass_enabled():
-    """
-    Check if multi-pass extraction is enabled via environment variable.
-    Default is False (two-stage single-pass is default).
-
-    Set USE_MULTI_PASS_EXTRACTION=true to enable.
-    """
-    env_value = os.environ.get("USE_MULTI_PASS_EXTRACTION", "false").lower()
-    return env_value in ("true", "1", "yes", "on")
-
-
-def get_raw_extraction_schema():
-    """
-    Get the RawExtraction JSON schema from Pydantic model.
-
-    Returns:
-        dict: JSON schema compatible with Gemini structured output
-    """
-    return RawExtraction.model_json_schema()
-
-
-def get_raw_extraction_prompt():
-    """
-    Get the simplified extraction prompt for RawExtraction.
-
-    Returns:
-        str: The raw extraction prompt content
-    """
-    try:
-        prompt_path = (
-            Path(__file__).parent.parent.parent / "prompts" / "raw_extraction_prompt.md"
-        )
-        with open(prompt_path, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception as e:
-        print(f"Warning: Could not load raw extraction prompt: {e}", file=sys.stderr)
-        return """You are an insurance commission data extraction specialist.
-Extract commission information into a simple, flat format.
-Extract exactly what you see - do NOT transform, compute, or generate IDs.
-Return valid JSON matching the RawExtraction schema."""
-
-
-# ============================================================================
-# MULTI-PASS EXTRACTION SUPPORT
-# ============================================================================
 
 
 def get_pass0a_email_cleaning_schema():
@@ -264,6 +193,194 @@ def get_pass3_rules_codegen_prompt():
             "customer_type_text, channel_text, coverage_type_text, state_text, conditions, "
             "other_conditions, applied_on_text, gst_applicable, source_section, quoted_text, confidence_note."
         )
+
+
+def get_pass3_codegen_enrichment_schema():
+    """Get the CodegenEnrichmentExtraction JSON schema from Pydantic model."""
+    return CodegenEnrichmentExtraction.model_json_schema()
+
+
+def get_pass3_codegen_enrichment_prompt():
+    """Get the Pass 3 codegen enrichment prompt."""
+    try:
+        prompt_path = (
+            Path(__file__).parent.parent.parent
+            / "prompts"
+            / "pass3_codegen_enrichment_prompt.md"
+        )
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        print(f"Warning: Could not load Pass 3 enrichment prompt: {e}", file=sys.stderr)
+        return (
+            "Review the parser output and correct product names/types. "
+            "Fill other_conditions and confidence_note for rules that need them."
+        )
+
+
+def _enrich_codegen_pass3_results(
+    rules_extraction: RulesExtraction,
+    commission_data_content: str,
+    service,
+    metadata,
+    master_data_extraction,
+    output_dir=None,
+    filename_prefix: str = "",
+) -> RulesExtraction:
+    """
+    Post-codegen enrichment: LLM fills AI-assisted fields that the generated parser
+    cannot reliably produce — product_name, product_type, other_conditions, confidence_note.
+
+    Sends a compact summary of the codegen output alongside the original document content
+    so the LLM has full context to correct names/types and infer free-text conditions.
+
+    Non-blocking: any failure returns the original rules_extraction unchanged.
+    """
+    if not rules_extraction.products:
+        return rules_extraction
+
+    print("=" * 70, file=sys.stderr)
+    print("# PASS 3 ENRICHMENT: AI-assisted fields post-codegen", file=sys.stderr)
+    print("=" * 70, file=sys.stderr)
+
+    # Build compact parser output summary for the LLM
+    summary = []
+    for p_idx, product in enumerate(rules_extraction.products):
+        rule_summaries = []
+        for r_idx, rule in enumerate(product.rules):
+            rule_summaries.append({
+                "rule_index": r_idx,
+                "rule_text": rule.rule_text,
+                "commission_value": rule.commission_value,
+                "source_section": rule.source_section,
+            })
+        summary.append({
+            "product_index": p_idx,
+            "product_name": product.product_name,
+            "product_type": product.product_type,
+            "rules": rule_summaries,
+        })
+
+    summary_json = json.dumps(summary, indent=2)
+
+    # Build context header (same as other passes)
+    context_parts = [
+        f"**Provider**: {metadata.provider_name}",
+        f"**Period**: {metadata.period_label}",
+    ]
+    global_settings = []
+    if metadata.global_gst_percentage:
+        global_settings.append(f"- GST: {metadata.global_gst_percentage}")
+    if metadata.global_applied_on:
+        global_settings.append(f"- Applied On: {metadata.global_applied_on}")
+    if metadata.global_deductions:
+        global_settings.append(f"- Deductions: {metadata.global_deductions}")
+    if metadata.global_vehicle_type_text:
+        global_settings.append(f"- Vehicle Type: {metadata.global_vehicle_type_text}")
+    if metadata.global_state_text:
+        global_settings.append(f"- States: {metadata.global_state_text}")
+    if global_settings:
+        context_parts.append("**Global Settings**:")
+        context_parts.extend(global_settings)
+
+    master_data_text = _format_master_data_as_text(master_data_extraction)
+    if master_data_text:
+        context_parts.append("")
+        context_parts.append(master_data_text)
+
+    context_parts += [
+        "",
+        "---",
+        "## Document Content",
+        "",
+        commission_data_content,
+        "",
+        "---",
+        "## Parser Output Summary",
+        "",
+        summary_json,
+    ]
+
+    user_prompt = "\n".join(context_parts)
+
+    if output_dir:
+        prompt_file = output_dir / (
+            f"{filename_prefix}pass3_codegen_enrichment_prompt.txt"
+            if filename_prefix
+            else "pass3_codegen_enrichment_prompt.txt"
+        )
+        with open(prompt_file, "w", encoding="utf-8") as f:
+            f.write(user_prompt)
+        print(f"#   → Saved enrichment prompt to {prompt_file}", file=sys.stderr)
+
+    prompt = get_pass3_codegen_enrichment_prompt()
+    schema = get_pass3_codegen_enrichment_schema()
+
+    config = get_config_for_extraction()
+    config.response_json_schema = schema
+    config.system_instruction = prompt
+
+    try:
+        result_json = service.generate_content(user_prompt, config=config)
+    except Exception as e:
+        print(f"#   ⚠ Enrichment LLM call failed: {e} — using codegen output as-is", file=sys.stderr)
+        return rules_extraction
+
+    if output_dir:
+        raw_file = output_dir / (
+            f"{filename_prefix}pass3_codegen_enrichment_raw.json"
+            if filename_prefix
+            else "pass3_codegen_enrichment_raw.json"
+        )
+        with open(raw_file, "w", encoding="utf-8") as f:
+            f.write(result_json)
+        print(f"#   → Saved enrichment response to {raw_file}", file=sys.stderr)
+
+    try:
+        enrichment = CodegenEnrichmentExtraction.model_validate_json(result_json)
+    except Exception as e:
+        print(f"#   ⚠ Enrichment response parse failed: {e} — using codegen output as-is", file=sys.stderr)
+        return rules_extraction
+
+    # Merge enriched values back into the RulesExtraction
+    products: list[ProductWithRules] = list(rules_extraction.products)
+    corrections = 0
+
+    for ep in enrichment.products:
+        p_idx = ep.product_index
+        if p_idx < 0 or p_idx >= len(products):
+            continue
+
+        product: ProductWithRules = products[p_idx]  # type: ignore[assignment]
+        rules: list[RuleEntry] = list(product.rules)  # type: ignore[arg-type]
+
+        if ep.product_name:
+            product = product.model_copy(update={"product_name": ep.product_name})
+            corrections += 1
+        if ep.product_type:
+            product = product.model_copy(update={"product_type": ep.product_type})
+            corrections += 1
+
+        for era in ep.rules:
+            r_idx = era.rule_index
+            if r_idx < 0 or r_idx >= len(rules):
+                continue
+            rule: RuleEntry = rules[r_idx]
+            updates = {}
+            if era.other_conditions:
+                updates["other_conditions"] = era.other_conditions
+                corrections += 1
+            if era.confidence_note:
+                updates["confidence_note"] = era.confidence_note
+                corrections += 1
+            if updates:
+                rules[r_idx] = rule.model_copy(update=updates)
+
+        products[p_idx] = product.model_copy(update={"rules": rules})
+
+    print(f"# Pass 3 enrichment complete: {corrections} field(s) updated", file=sys.stderr)
+
+    return rules_extraction.model_copy(update={"products": products})
 
 
 def _is_truncated_json(raw_json: str, provider: str) -> bool:
@@ -1689,6 +1806,15 @@ def extract_multi_pass(
                 output_dir=out_path,
                 filename_prefix=filename_prefix,
             )
+            rules_extraction = _enrich_codegen_pass3_results(
+                rules_extraction,
+                pass3_content,
+                service,
+                metadata,
+                master_data_extraction,
+                output_dir=out_path,
+                filename_prefix=filename_prefix,
+            )
         else:
             rules_extraction = _extract_pass3_products_and_rules(
                 pass3_content,
@@ -1821,297 +1947,12 @@ def extract_multi_pass(
         )
 
 
-def extract_two_stage(
-    prompt_text,
-    api_key=None,
-    model=None,
-    return_raw=False,
-    output_dir=None,
-    raw_filename="raw_extraction.json",
-    filename_prefix="",
-    **kwargs,
-):
-    """
-    Two-stage extraction: RawExtraction → CICSDocument
-
-    Stage 1: AI extracts to simplified RawExtraction schema
-    Stage 2: Transformer converts to full CICS schema deterministically
-
-    This approach reduces AI errors by:
-    - Using a simpler schema (fewer fields, no nesting)
-    - AI only extracts observable data (no ID generation, priority assignment)
-    - Transformer handles all derivable fields deterministically
-
-    Args:
-        prompt_text: User prompt with document content to extract
-        api_key: Gemini API key (optional, uses GEMINI_API_KEY env var)
-        model: Model to use (optional, uses GEMINI_MODEL env var or default)
-        return_raw: If True, return both raw extraction and final CICS
-        output_dir: Directory to save stage 1 raw extraction (optional)
-        raw_filename: Filename for raw extraction output (default: raw_extraction.json)
-        filename_prefix: Prefix for output filenames (e.g., sheet name for multi-sheet Excel)
-        **kwargs: Additional arguments passed to API
-
-    Returns:
-        str: Extracted JSON string (CICS format)
-        or dict with 'raw' and 'cics' keys if return_raw=True
-    """
-    # Stage 1: Extract to RawExtraction
-    print("=" * 70, file=sys.stderr)
-    print("# STAGE 1: Extracting to RawExtraction (simplified schema)", file=sys.stderr)
-    print("=" * 70, file=sys.stderr)
-
-    raw_schema = get_raw_extraction_schema()
-    raw_prompt = get_raw_extraction_prompt()
-
-    if not raw_schema:
-        return json.dumps(
-            {"error": "Could not load RawExtraction schema", "status": "failed"},
-            indent=2,
-        )
-
-    try:
-        # Initialize LLM service (handles API key and model defaults)
-        service = get_llm_service()
-        if api_key:
-            service._api_key = api_key
-        if model:
-            service._model = model
-
-        print(f"# Model: {service.model}", file=sys.stderr)
-        print("# Schema: RawExtraction (simplified)", file=sys.stderr)
-
-        # Build config for raw extraction
-        config = get_config_for_extraction()
-        if hasattr(config, "max_output_tokens"):
-            config.max_output_tokens = 65535
-        elif hasattr(config, "max_completion_tokens"):
-            config.max_completion_tokens = 16000
-        elif hasattr(config, "max_tokens"):
-            config.max_tokens = 16000
-        config.response_json_schema = raw_schema
-        config.system_instruction = raw_prompt
-
-        # Save user prompt before calling LLM
-        if output_dir:
-            try:
-                out_path = Path(output_dir)
-                out_path.mkdir(parents=True, exist_ok=True)
-                prompt_filename = (
-                    f"{filename_prefix}user_prompt.txt"
-                    if filename_prefix
-                    else "user_prompt.txt"
-                )
-                prompt_file = out_path / prompt_filename
-                with open(prompt_file, "w", encoding="utf-8") as f:
-                    f.write(prompt_text)
-                print(
-                    f"# Saved user prompt to: {prompt_file}",
-                    file=sys.stderr,
-                )
-            except Exception as e:
-                print(
-                    f"# Warning: Could not save user prompt: {e}",
-                    file=sys.stderr,
-                )
-
-        raw_json = service.generate_content(prompt_text, config=config)
-
-        if output_dir:
-            try:
-                out_path = Path(output_dir)
-                out_path.mkdir(parents=True, exist_ok=True)
-                raw_file = out_path / raw_filename
-                with open(raw_file, "w", encoding="utf-8") as f:
-                    f.write(raw_json)
-                print(
-                    f"# Saved stage 1 raw extraction to: {raw_file}",
-                    file=sys.stderr,
-                )
-            except Exception as e:
-                print(
-                    f"# Warning: Could not save stage 1 output: {e}",
-                    file=sys.stderr,
-                )
-
-        # Validate JSON
-        try:
-            parsed_raw = json.loads(raw_json)
-            print("# Stage 1 complete: Raw extraction successful", file=sys.stderr)
-        except json.JSONDecodeError as e:
-            print(
-                f"# Warning: Raw extraction output is not valid JSON: {e}",
-                file=sys.stderr,
-            )
-
-            # Show preview of problematic output
-            if raw_json:
-                print(
-                    f"#   → Output preview (first 500 chars): {raw_json[:500]}",
-                    file=sys.stderr,
-                )
-                print(f"#   → Output size: {len(raw_json):,} bytes", file=sys.stderr)
-
-                # Save the failed JSON output for debugging
-                if output_dir:
-                    error_filename = (
-                        f"{filename_prefix}raw_extraction_PARSE_ERROR.json"
-                        if filename_prefix
-                        else "raw_extraction_PARSE_ERROR.json"
-                    )
-                    error_file = Path(output_dir) / error_filename
-                    with open(error_file, "w") as f:
-                        f.write(raw_json)
-                    print(
-                        f"#   → Saved failed JSON output to {error_file}",
-                        file=sys.stderr,
-                    )
-
-            print("#   Check saved output file for details.", file=sys.stderr)
-
-            return json.dumps(
-                {
-                    "error": f"Raw extraction produced invalid JSON: {e}",
-                    "raw_output": raw_json[:1000] if raw_json else None,
-                    "status": "failed",
-                },
-                indent=2,
-            )
-
-    except Exception as e:
-        # Catch LLM API errors (OpenAI or Gemini)
-        if "API" in str(type(e).__name__) or "APIError" in str(type(e).__name__):
-            print(f"# Stage 1 LLM API error: {e}", file=sys.stderr)
-        else:
-            print(f"# Stage 1 error: {e}", file=sys.stderr)
-        return json.dumps(
-            {
-                "error": f"Stage 1 (raw extraction) failed: {e}",
-                "status": "failed",
-            },
-            indent=2,
-        )
-    except Exception as e:
-        print(f"# Stage 1 error: {e}", file=sys.stderr)
-        return json.dumps(
-            {
-                "error": f"Stage 1 (raw extraction) failed: {e}",
-                "status": "failed",
-            },
-            indent=2,
-        )
-
-    # Stage 1 Validation
-    print("# Validating raw extraction...", file=sys.stderr)
-
-    try:
-        raw_obj = RawExtraction.model_validate(parsed_raw)
-    except Exception as e:
-        print(f"# Error: Failed to parse raw extraction: {e}", file=sys.stderr)
-        return json.dumps(
-            {
-                "error": f"Raw extraction parsing failed: {e}",
-                "raw_extraction": parsed_raw,
-                "status": "failed",
-            },
-            indent=2,
-        )
-
-    try:
-        validator = RawExtractionValidator()
-        is_valid, errors, warnings = validator.validate(raw_obj)
-
-        if errors:
-            print(f"# Raw extraction validation errors: {len(errors)}", file=sys.stderr)
-            for error in errors:
-                print(f"#   - {error}", file=sys.stderr)
-
-        if warnings:
-            print(
-                f"# Raw extraction validation warnings: {len(warnings)}",
-                file=sys.stderr,
-            )
-            for warning in warnings[:5]:  # Limit output
-                print(f"#   - {warning}", file=sys.stderr)
-
-        if not is_valid:
-            return json.dumps(
-                {
-                    "error": "Raw extraction validation failed",
-                    "validation_errors": errors,
-                    "validation_warnings": warnings,
-                    "raw_extraction": parsed_raw,
-                    "status": "failed",
-                },
-                indent=2,
-            )
-
-    except Exception as e:
-        print(f"# Warning: Could not validate raw extraction: {e}", file=sys.stderr)
-        # Continue anyway - transformer may still work
-
-    # Stage 2: Transform to CICS
-    print("=" * 70, file=sys.stderr)
-    print("# STAGE 2: Transforming to CICS (full schema)", file=sys.stderr)
-    print("=" * 70, file=sys.stderr)
-
-    try:
-        from cins.processors.core.raw_to_cics_transformer import RawToCICSTransformer
-
-        transformer = RawToCICSTransformer()
-        cics_doc, transform_warnings, transform_errors = transformer.transform(raw_obj)
-
-        if transform_warnings:
-            print(f"# Transform warnings: {len(transform_warnings)}", file=sys.stderr)
-            for warning in transform_warnings[:5]:
-                print(f"#   - {warning}", file=sys.stderr)
-
-        if transform_errors:
-            print(f"# Transform errors: {len(transform_errors)}", file=sys.stderr)
-            for error in transform_errors:
-                print(f"#   - {error}", file=sys.stderr)
-
-        # Convert to JSON
-        cics_json = cics_doc.model_dump(exclude_none=True)
-        pretty_cics = json.dumps(cics_json, indent=2)
-
-        print("# Stage 2 complete: CICS document generated", file=sys.stderr)
-        print("=" * 70, file=sys.stderr)
-
-        if return_raw:
-            return {
-                "raw": parsed_raw,
-                "cics": cics_json,
-                "transform_warnings": transform_warnings,
-                "transform_errors": transform_errors,
-            }
-
-        return pretty_cics
-
-    except Exception as e:
-        import traceback
-
-        print(f"# Stage 2 error: {e}", file=sys.stderr)
-        print(traceback.format_exc(), file=sys.stderr)
-        return json.dumps(
-            {
-                "error": f"Stage 2 (transformation) failed: {e}",
-                "raw_extraction": parsed_raw,
-                "status": "failed",
-            },
-            indent=2,
-        )
-
-
 def extract(
     prompt_text,
     api_key=None,
     model=None,
-    multi_pass=None,
-    return_raw=False,
     return_prompts=False,
     output_dir=None,
-    raw_filename="raw_extraction.json",
     filename_prefix="",
     source_type=None,
     email_and_master_data_content=None,
@@ -2120,122 +1961,68 @@ def extract(
     **kwargs,
 ):
     """
-    Extract commission data - main entry point.
-
-    Supports two extraction modes:
-    1. Two-stage (default): RawExtraction → CICS
-    2. Multi-pass (optional): Metadata → Master Data → Products → Rules → Merge → CICS
-
-    NOTE: Content cleaning (Pass 0A/0B) is done during indexing, not extraction.
-    For multi-pass, provide specific content sections for each pass.
+    Extract commission data via multi-pass pipeline (main entry point).
 
     Args:
         prompt_text: Full document content (fallback if specific sections not provided)
         api_key: API key (optional, uses GEMINI_API_KEY or OPENAI_API_KEY env var)
         model: Model to use (optional, uses configured default)
-        multi_pass: If True, use multi-pass extraction; if False, use two-stage; if None, check env var
-        return_raw: If True, return both raw extraction and final CICS (two-stage only)
         return_prompts: If True, return dict with 'result', 'system_instruction', 'user_prompt'
         output_dir: Directory to save intermediate outputs (optional)
-        raw_filename: Filename for raw extraction output (default: raw_extraction.json)
         filename_prefix: Prefix for output filenames (e.g., sheet name for multi-sheet Excel)
-        source_type: Source type ('email', 'pdf', 'excel') - kept for backward compatibility
-        email_and_master_data_content: Email + master data sections for Pass 1 (multi-pass only)
-        master_data_content: Master data sections only for Pass 2 (multi-pass only)
-        commission_data_content: Commission data sections only for Pass 3 (multi-pass only)
-        **kwargs: Additional arguments passed to extraction function
+        source_type: Source type ('email', 'pdf', 'excel')
+        email_and_master_data_content: Email + master data sections for Pass 1
+        master_data_content: Master data sections only for Pass 2
+        commission_data_content: Commission data sections only for Pass 3
 
     Returns:
-        str: Extracted JSON string (CICS format)
-        or dict if return_prompts=True or return_raw=True
+        str or dict: Extracted JSON string (CICS format), or dict if return_prompts=True
     """
-    # Determine extraction mode
-    if multi_pass is None:
-        multi_pass = is_multi_pass_enabled()
+    result = extract_multi_pass(
+        prompt_text,
+        api_key=api_key,
+        model=model,
+        output_dir=output_dir,
+        filename_prefix=filename_prefix,
+        source_type=source_type,
+        email_and_master_data_content=email_and_master_data_content,
+        master_data_content=master_data_content,
+        commission_data_content=commission_data_content,
+        **kwargs,
+    )
 
-    if multi_pass:
-        print(
-            "# Using multi-pass extraction (USE_MULTI_PASS_EXTRACTION=true)",
-            file=sys.stderr,
-        )
-
-        result = extract_multi_pass(
-            prompt_text,
-            api_key=api_key,
-            model=model,
-            return_passes=return_raw,  # Reuse return_raw for returning pass outputs
-            output_dir=output_dir,
-            filename_prefix=filename_prefix,
-            source_type=source_type,
-            email_and_master_data_content=email_and_master_data_content,
-            master_data_content=master_data_content,
-            commission_data_content=commission_data_content,
-            **kwargs,
-        )
-
-        if return_prompts:
-            # For multi-pass, system_instruction varies per pass
-            return {
-                "result": result,
-                "system_instruction": "Multi-pass extraction (see pass-specific prompts)",
-                "user_prompt": prompt_text,
-            }
-        return result
-    else:
-        print("# Using two-stage extraction", file=sys.stderr)
-
-        system_instruction = get_raw_extraction_prompt()
-        result = extract_two_stage(
-            prompt_text,
-            api_key=api_key,
-            model=model,
-            return_raw=return_raw,
-            output_dir=output_dir,
-            raw_filename=raw_filename,
-            filename_prefix=filename_prefix,
-            **kwargs,
-        )
-
-        if return_prompts:
-            return {
-                "result": result,
-                "system_instruction": system_instruction,
-                "user_prompt": prompt_text,
-            }
-        return result
+    if return_prompts:
+        return {
+            "result": result,
+            "system_instruction": "Multi-pass extraction (see pass-specific prompts)",
+            "user_prompt": prompt_text,
+        }
+    return result
 
 
 def main():
     """CLI entry point"""
     if len(sys.argv) < 2:
         print(
-            "Usage: python llm_extract.py <prompt_file> [output_file] [model] [--multi-pass] [--output-dir DIR]"
+            "Usage: python llm_extract.py <prompt_file> [output_file] [model] [--output-dir DIR]"
         )
         print()
         print("  prompt_file: Path to file containing extraction prompt (required)")
         print("  output_file: Path to save extracted JSON (optional)")
         print("  model: Model to use (optional, uses configured default)")
-        print("  --multi-pass: Use multi-pass extraction (metadata → products → rules)")
         print("  --output-dir DIR: Directory to save intermediate outputs")
         print()
         print("Environment variables:")
         print("  GEMINI_API_KEY: Google API key for Gemini")
         print("  OPENAI_API_KEY: OpenAI API key")
-        print("  USE_MULTI_PASS_EXTRACTION: Set to 'true' to enable multi-pass mode")
         print()
         print("Examples:")
         print("  python llm_extract.py prompt.txt output.json")
-        print("  python llm_extract.py prompt.txt output.json --multi-pass")
         print("  python llm_extract.py prompt.txt output.json --output-dir ./outputs")
         sys.exit(1)
 
     # Parse arguments
     args = sys.argv[1:]
-
-    # Parse --multi-pass flag
-    multi_pass_mode = "--multi-pass" in args
-    if multi_pass_mode:
-        args.remove("--multi-pass")
 
     # Parse --output-dir flag
     output_dir = None
@@ -2270,11 +2057,7 @@ def main():
         print(f"Error reading prompt file: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Extract - use multi-pass if flag is set
-    multi_pass = True if multi_pass_mode else None  # None means check env var
-    extract_result = extract(
-        prompt, model=model, multi_pass=multi_pass, output_dir=output_dir
-    )
+    extract_result = extract(prompt, model=model, output_dir=output_dir)
     # CLI never uses return_prompts, so result is always a string
     result = str(extract_result) if extract_result else ""
 

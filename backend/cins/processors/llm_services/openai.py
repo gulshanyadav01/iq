@@ -333,7 +333,7 @@ class OpenAIService(LLMServiceMixin):
 
     @staticmethod
     def config_for_raw_extraction() -> OpenAIConfig:
-        """Configuration for two-stage raw extraction"""
+        """Configuration for raw extraction"""
         return OpenAIConfig(
             temperature=0.3,
             top_p=0.95,

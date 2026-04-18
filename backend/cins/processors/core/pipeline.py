@@ -22,10 +22,6 @@ from typing import Dict, List, Optional
 
 from cins.processors.content.indexer import ContentIndexer, IndexedDocument
 from cins.processors.content.prepare_prompt import prepare_extraction_request
-from cins.processors.content.csv_to_markdown import csv_to_markdown
-from cins.processors.core.llm_extract import extract
-from cins.processors.extractors.extract_eml import extract_eml_content
-from cins.processors.extractors.extract_pdf import extract_pdf_text
 
 logger = logging.getLogger("pipeline")
 
@@ -75,57 +71,6 @@ def _extract_provider_from_path(file_path: str) -> str:
     except (ValueError, IndexError):
         pass
     return Path(file_path).parent.name
-
-
-def _format_eml_content(email_data: Dict) -> str:
-    """Format extracted email data as a prompt-ready string."""
-    parts = [
-        f"Subject: {email_data.get('subject', 'N/A')}",
-        f"From: {email_data.get('from', 'N/A')}",
-        f"Date: {email_data.get('date', 'N/A')}",
-        "=" * 70,
-        email_data.get("body", ""),
-    ]
-
-    attachments = email_data.get("attachments", [])
-    if attachments:
-        parts.append("\n" + "=" * 70)
-        parts.append(f"ATTACHMENTS ({len(attachments)} found)")
-        parts.append("=" * 70)
-
-        for i, att in enumerate(attachments, 1):
-            if "temp_path" in att:
-                continue
-            parts.append(f"\n--- Attachment {i}: {att.get('filename', 'Unknown')} ---")
-            if "error" in att:
-                parts.append(f"Error: {att['error']}")
-            else:
-                parts.append(f"Type: {att.get('content_type', 'Unknown')}")
-                parts.append(f"Size: {att.get('size', 0)} bytes")
-                if "extracted_content" in att:
-                    parts.append("\nExtracted Content:")
-                    parts.append("-" * 70)
-                    parts.append(att["extracted_content"])
-
-    return "\n".join(parts)
-
-
-def _format_email_context(email_data: Dict) -> str:
-    """Format email metadata and body for prepending to sheets."""
-    parts = [
-        "=" * 80,
-        "EMAIL CONTEXT",
-        "=" * 80,
-        f"Subject: {email_data.get('subject', 'N/A')}",
-        f"From: {email_data.get('from', 'N/A')}",
-        f"Date: {email_data.get('date', 'N/A')}",
-        "=" * 80,
-        "",
-        "EMAIL BODY:",
-        email_data.get("body", ""),
-        "",
-    ]
-    return "\n".join(parts)
 
 
 def _merge_products(existing_products: list, new_products: list) -> list:
@@ -535,43 +480,72 @@ class Pipeline:
         output_path: Path,
         start_time: datetime,
     ) -> PipelineResult:
-        """Process a single-unit document (PDF, email without Excel attachments)."""
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        """Process a single-unit document (email without Excel attachments)."""
+        from cins.processors.core.llm_extract import (
+            extract_multi_pass,
+            get_pass1_metadata_prompt,
+            get_pass2_master_data_prompt,
+            get_pass3_rules_prompt,
+        )
+        from cins.processors.llm_services.factory import get_llm_service
+
         output_dir = output_path.parent
+        sheet_name = ""  # no sheet for plain emails
+        sheet_pass_results = []
+        on_sheet_complete = self._on_sheet_complete_callback
+
+        try:
+            model_used = get_llm_service().model
+        except Exception:
+            model_used = ""
 
         content_str = indexed_doc.get_primary_content()
-
         temp_content = output_dir / "extracted_content.txt"
         temp_content.write_text(content_str, encoding="utf-8")
 
         _, user_prompt = prepare_extraction_request(str(temp_content))
 
+        system_instructions = {
+            1: get_pass1_metadata_prompt(),
+            2: get_pass2_master_data_prompt(),
+            3: get_pass3_rules_prompt(),
+        }
+
+        def _on_pass_done(pass_num, result_dict, duration):
+            entry = {
+                "sheet_name": sheet_name,
+                "attachment_name": "",
+                "pass_number": pass_num,
+                "result": result_dict,
+                "prompt_text": user_prompt,
+                "system_instruction": system_instructions.get(pass_num, ""),
+                "model": model_used,
+                "duration": duration,
+                "status": "completed",
+                "error": "",
+            }
+            sheet_pass_results.append(entry)
+            if on_sheet_complete:
+                on_sheet_complete([entry])
+
         source_type = indexed_doc.metadata.get("source_type")
-        extract_response = extract(
+        pass_result = extract_multi_pass(
             user_prompt,
-            return_prompts=True,
+            return_passes=True,
             output_dir=str(output_dir),
             source_type=source_type,
+            on_pass_complete=_on_pass_done,
         )
 
-        json_result = extract_response["result"]
-        actual_system_instruction = extract_response["system_instruction"]
-        actual_user_prompt = extract_response["user_prompt"]
-
-        prompt_path = output_path.parent / (output_path.stem + "_prompt.txt")
-        prompt_path.write_text(
-            f"=== SYSTEM INSTRUCTION ===\n{actual_system_instruction}\n\n=== USER PROMPT ===\n{actual_user_prompt}",
-            encoding="utf-8",
-        )
-
-        try:
-            parsed_result = json.loads(json_result)
-            if parsed_result.get("status") == "failed":
-                raise RuntimeError(parsed_result.get("error", "Unknown LLM error"))
-        except json.JSONDecodeError:
-            if "error" in json_result.lower():
-                raise RuntimeError(f"LLM extraction failed: {json_result[:500]}")
-            parsed_result = {}
+        if isinstance(pass_result, dict) and "cics" in pass_result:
+            parsed_result = pass_result["cics"]
+            json_result = json.dumps(parsed_result, indent=2)
+        else:
+            json_result = json.dumps(pass_result) if not isinstance(pass_result, str) else pass_result
+            try:
+                parsed_result = json.loads(json_result)
+            except Exception:
+                parsed_result = {}
 
         output_path.write_text(json_result, encoding="utf-8")
 
@@ -584,6 +558,7 @@ class Pipeline:
             validation_issues=schema_result.errors if schema_result else [],
             overlap_issues=overlap_result.overlaps if overlap_result else [],
             duration=duration,
+            sheet_pass_results=sheet_pass_results,
         )
 
     def _process_sheets(
@@ -593,8 +568,19 @@ class Pipeline:
         attachment_name: str = "",
         on_sheet_complete=None,
     ) -> PipelineResult:
-        """Process indexed sheets using cached content (multi-pass extraction)."""
-        from cins.processors.core.llm_extract import is_multi_pass_enabled, extract_multi_pass
+        """Process indexed sheets using multi-pass extraction."""
+        from cins.processors.core.llm_extract import (
+            extract_multi_pass,
+            get_pass1_metadata_prompt,
+            get_pass2_master_data_prompt,
+            get_pass3_rules_prompt,
+        )
+
+        system_instructions = {
+            1: get_pass1_metadata_prompt(),
+            2: get_pass2_master_data_prompt(),
+            3: get_pass3_rules_prompt(),
+        }
 
         start_time = datetime.now()
         output_dir = base_output_path.parent
@@ -623,7 +609,6 @@ class Pipeline:
         results = []
         errors = []
         sheet_pass_results = []
-        use_multi_pass = is_multi_pass_enabled()
 
         for sheet_idx, sheet_name in enumerate(sheets_to_process, 1):
             logger.info(f"Processing sheet {sheet_idx}/{total_sheets}: {sheet_name}")
@@ -659,99 +644,77 @@ class Pipeline:
                 _, pass2_prompt = prepare_extraction_request(str(output_dir / f"pass2_content_{safe_name}.txt"))
                 _, pass3_prompt = prepare_extraction_request(str(output_dir / f"pass3_content_{safe_name}.txt"))
 
-                if use_multi_pass:
-                    from cins.processors.llm_services.factory import get_llm_service
-                    try:
-                        model_used = get_llm_service().model
-                    except Exception:
-                        model_used = ""
+                from cins.processors.llm_services.factory import get_llm_service
+                try:
+                    model_used = get_llm_service().model
+                except Exception:
+                    model_used = ""
 
-                    pass_prompts = {
-                        1: pass1_prompt,
-                        2: pass2_prompt,
-                        3: pass3_prompt,
+                pass_prompts = {
+                    1: pass1_prompt,
+                    2: pass2_prompt,
+                    3: pass3_prompt,
+                }
+
+                def _on_pass_done(pass_num, result_dict, duration):
+                    entry = {
+                        "sheet_name": sheet_name,
+                        "attachment_name": attachment_name,
+                        "pass_number": pass_num,
+                        "result": result_dict,
+                        "prompt_text": pass_prompts[pass_num],
+                        "system_instruction": system_instructions.get(pass_num, ""),
+                        "model": model_used,
+                        "duration": duration,
+                        "status": "completed",
+                        "error": "",
                     }
+                    sheet_pass_results.append(entry)
+                    if on_sheet_complete:
+                        on_sheet_complete([entry])
 
-                    def _on_pass_done(pass_num, result_dict, duration):
-                        entry = {
-                            "sheet_name": sheet_name,
-                            "attachment_name": attachment_name,
-                            "pass_number": pass_num,
-                            "result": result_dict,
-                            "prompt_text": pass_prompts[pass_num],
-                            "model": model_used,
-                            "duration": duration,
-                            "status": "completed",
-                            "error": "",
-                        }
-                        sheet_pass_results.append(entry)
-                        if on_sheet_complete:
-                            on_sheet_complete([entry])
+                pass_result = extract_multi_pass(
+                    pass1_prompt,
+                    return_passes=True,
+                    output_dir=str(output_dir),
+                    filename_prefix=f"{safe_name}_",
+                    source_type="excel",
+                    email_and_master_data_content=pass1_prompt,
+                    master_data_content=pass2_prompt,
+                    commission_data_content=pass3_prompt,
+                    on_pass_complete=_on_pass_done,
+                )
 
-                    pass_result = extract_multi_pass(
-                        pass1_prompt,
-                        return_passes=True,
-                        output_dir=str(output_dir),
-                        filename_prefix=f"{safe_name}_",
-                        source_type="excel",
-                        email_and_master_data_content=pass1_prompt,
-                        master_data_content=pass2_prompt,
-                        commission_data_content=pass3_prompt,
-                        on_pass_complete=_on_pass_done,
-                    )
-
-                    # pass_result is a dict when return_passes=True
-                    if isinstance(pass_result, dict) and "cics" in pass_result:
-                        parsed_result = pass_result["cics"]
-                        json_result = json.dumps(parsed_result, indent=2)
-                    else:
-                        # Unexpected shape — mark any passes not yet persisted as failed
-                        json_result = json.dumps(pass_result) if not isinstance(pass_result, str) else pass_result
-                        try:
-                            parsed_result = json.loads(json_result)
-                        except Exception:
-                            parsed_result = {}
-                        persisted_pass_nums = {e["pass_number"] for e in sheet_pass_results if e.get("sheet_name") == sheet_name}
-                        failed_entries = []
-                        for pass_num in (1, 2, 3):
-                            if pass_num not in persisted_pass_nums:
-                                entry = {
-                                    "sheet_name": sheet_name,
-                                    "attachment_name": attachment_name,
-                                    "pass_number": pass_num,
-                                    "result": None,
-                                    "prompt_text": "",
-                                    "model": "",
-                                    "duration": 0.0,
-                                    "status": "failed",
-                                    "error": "Unexpected multi-pass result shape",
-                                }
-                                failed_entries.append(entry)
-                                sheet_pass_results.append(entry)
-                        if failed_entries and on_sheet_complete:
-                            on_sheet_complete(failed_entries)
+                # pass_result is a dict when return_passes=True
+                if isinstance(pass_result, dict) and "cics" in pass_result:
+                    parsed_result = pass_result["cics"]
+                    json_result = json.dumps(parsed_result, indent=2)
                 else:
-                    extract_response = extract(
-                        pass1_prompt,
-                        return_prompts=True,
-                        output_dir=str(output_dir),
-                        raw_filename=f"raw_extraction_{safe_name}.json",
-                        filename_prefix=f"{safe_name}_",
-                        source_type="excel",
-                        email_and_master_data_content=pass1_prompt,
-                        master_data_content=pass2_prompt,
-                        commission_data_content=pass3_prompt,
-                    )
-                    json_result = extract_response["result"]
-
+                    # Unexpected shape — mark any passes not yet persisted as failed
+                    json_result = json.dumps(pass_result) if not isinstance(pass_result, str) else pass_result
                     try:
                         parsed_result = json.loads(json_result)
-                        if parsed_result.get("status") == "failed":
-                            raise ValueError(parsed_result.get("error", "Unknown LLM error"))
-                    except json.JSONDecodeError:
-                        if "error" in json_result.lower():
-                            raise ValueError(f"LLM extraction failed: {json_result[:500]}")
+                    except Exception:
                         parsed_result = {}
+                    persisted_pass_nums = {e["pass_number"] for e in sheet_pass_results if e.get("sheet_name") == sheet_name}
+                    failed_entries = []
+                    for pass_num in (1, 2, 3):
+                        if pass_num not in persisted_pass_nums:
+                            entry = {
+                                "sheet_name": sheet_name,
+                                "attachment_name": attachment_name,
+                                "pass_number": pass_num,
+                                "result": None,
+                                "prompt_text": "",
+                                "model": "",
+                                "duration": 0.0,
+                                "status": "failed",
+                                "error": "Unexpected multi-pass result shape",
+                            }
+                            failed_entries.append(entry)
+                            sheet_pass_results.append(entry)
+                    if failed_entries and on_sheet_complete:
+                        on_sheet_complete(failed_entries)
 
                 prompt_path = output_dir / f"{base_name}_{safe_name}_prompt.txt"
                 prompt_path.write_text(
@@ -783,24 +746,23 @@ class Pipeline:
                 logger.error(f"  ✗ '{sheet_name}' failed: {error_msg}")
                 errors.append({"sheet": sheet_name, "error": error_msg})
                 results.append({"sheet": sheet_name, "status": "failed", "error": error_msg})
-                if use_multi_pass:
-                    exc_entries = []
-                    for pass_num in (1, 2, 3):
-                        entry = {
-                            "sheet_name": sheet_name,
-                            "attachment_name": attachment_name,
-                            "pass_number": pass_num,
-                            "result": None,
-                            "prompt_text": "",
-                            "model": "",
-                            "duration": 0.0,
-                            "status": "failed",
-                            "error": error_msg,
-                        }
-                        exc_entries.append(entry)
-                        sheet_pass_results.append(entry)
-                    if on_sheet_complete:
-                        on_sheet_complete(exc_entries)
+                exc_entries = []
+                for pass_num in (1, 2, 3):
+                    entry = {
+                        "sheet_name": sheet_name,
+                        "attachment_name": attachment_name,
+                        "pass_number": pass_num,
+                        "result": None,
+                        "prompt_text": "",
+                        "model": "",
+                        "duration": 0.0,
+                        "status": "failed",
+                        "error": error_msg,
+                    }
+                    exc_entries.append(entry)
+                    sheet_pass_results.append(entry)
+                if on_sheet_complete:
+                    on_sheet_complete(exc_entries)
 
         successful_results = [r for r in results if r.get("status") == "success"]
         combined_path = base_output_path.parent / f"{base_name}_combined.json"
@@ -823,309 +785,6 @@ class Pipeline:
             sheet_results=results,
             errors=[e["error"] for e in errors],
             sheet_pass_results=sheet_pass_results,
-        )
-
-    def _process_direct(
-        self,
-        file_path: str,
-        output_path: Path,
-    ) -> PipelineResult:
-        """
-        Legacy direct processing without content indexing.
-
-        Routes Excel to sheet-by-sheet; email/PDF through single-document flow.
-        """
-        start_time = datetime.now()
-        file_path_obj = Path(file_path)
-        file_ext = file_path_obj.suffix.lower()
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_dir = output_path.parent
-
-        logger.info(f"Direct processing: {file_path}")
-
-        if file_ext in [".xlsx", ".xls", ".xlsm"]:
-            if self.excel_mode == "sheet_by_sheet":
-                return self._process_excel_sheets(str(file_path), output_path)
-            else:
-                from cins.processors.content.indexer import _convert_excel_to_csv
-                csv_output_dir = output_dir / "csv_converted"
-                csv_output_dir.mkdir(parents=True, exist_ok=True)
-                csv_data = _convert_excel_to_csv(file_path, csv_output_dir)
-                content_str = "\n\n".join(
-                    v for v in csv_data["sheet_contents"].values()
-                )
-
-        elif file_ext == ".eml":
-            email_data = extract_eml_content(file_path, output_dir=str(output_dir))
-            excel_attachments = [
-                att for att in email_data.get("attachments", []) if "temp_path" in att
-            ]
-            if excel_attachments:
-                return self._process_email_with_attachments(email_data, output_path)
-            content_str = _format_eml_content(email_data)
-
-        elif file_ext == ".pdf":
-            content_str = extract_pdf_text(file_path)
-
-        else:
-            raise ValueError(f"Unsupported file type: {file_ext}")
-
-        temp_content = output_dir / "extracted_content.txt"
-        temp_content.write_text(content_str, encoding="utf-8")
-        _, user_prompt = prepare_extraction_request(str(temp_content))
-
-        source_type_map = {".eml": "email", ".pdf": "pdf", ".xlsx": "excel", ".xls": "excel", ".xlsm": "excel"}
-        source_type = source_type_map.get(file_ext)
-
-        extract_response = extract(
-            user_prompt,
-            return_prompts=True,
-            output_dir=str(output_dir),
-            source_type=source_type,
-        )
-
-        json_result = extract_response["result"]
-        prompt_path = output_path.parent / (output_path.stem + "_prompt.txt")
-        prompt_path.write_text(
-            f"=== SYSTEM INSTRUCTION ===\n{extract_response['system_instruction']}\n\n=== USER PROMPT ===\n{extract_response['user_prompt']}",
-            encoding="utf-8",
-        )
-
-        try:
-            parsed_result = json.loads(json_result)
-            if parsed_result.get("status") == "failed":
-                raise RuntimeError(parsed_result.get("error", "Unknown LLM error"))
-        except json.JSONDecodeError:
-            if "error" in json_result.lower():
-                raise RuntimeError(f"LLM extraction failed: {json_result[:500]}")
-            parsed_result = {}
-
-        output_path.write_text(json_result, encoding="utf-8")
-        schema_result, overlap_result = _run_validators(output_path)
-        duration = (datetime.now() - start_time).total_seconds()
-
-        return PipelineResult(
-            cics_doc=parsed_result,
-            output_path=output_path,
-            validation_issues=schema_result.errors if schema_result else [],
-            overlap_issues=overlap_result.overlaps if overlap_result else [],
-            duration=duration,
-        )
-
-    def _process_excel_sheets(
-        self,
-        excel_path: str,
-        base_output_path: Path,
-        context_str: str = "",
-        attachment_name: str = "",
-    ) -> PipelineResult:
-        """Process each Excel sheet separately by converting to CSV."""
-        import openpyxl
-        from cins.processors.content.indexer import _convert_excel_to_csv
-
-        start_time = datetime.now()
-        output_path_obj = Path(base_output_path)
-        output_dir = output_path_obj.parent
-        base_name = output_path_obj.stem
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        wb = openpyxl.load_workbook(excel_path, data_only=True)
-        sheet_names = wb.sheetnames
-        wb.close()
-
-        csv_output_dir = output_dir / "csv_converted"
-        csv_output_dir.mkdir(parents=True, exist_ok=True)
-
-        csv_data = _convert_excel_to_csv(excel_path, csv_output_dir)
-        sheet_contents = csv_data["sheet_contents"]
-        master_sheets = csv_data["master_sheets"]
-        commission_sheets = csv_data["commission_sheets"]
-
-        master_context = ""
-        if master_sheets:
-            master_context = "=" * 80 + "\nMASTER DATA (GLOBAL RULES)\n" + "=" * 80 + "\n"
-            for ms in master_sheets:
-                master_context += ms["formatted_content"] + "\n\n"
-
-        sheets_to_process = (
-            [s["sheet_name"] for s in commission_sheets] if commission_sheets else sheet_names
-        )
-
-        results = []
-        errors = []
-
-        for sheet_idx, sheet_name in enumerate(sheets_to_process, 1):
-            logger.info(f"Processing sheet {sheet_idx}/{len(sheets_to_process)}: {sheet_name}")
-            try:
-                safe_name = get_safe_sheet_name(sheet_name)
-                sheet_output_path = output_dir / f"{base_name}_{safe_name}.json"
-
-                content_str = sheet_contents.get(sheet_name, "")
-                if not content_str:
-                    raise ValueError(f"Sheet '{sheet_name}' not found in CSV results")
-
-                if master_context:
-                    content_str = f"{master_context}\n\n{content_str}"
-                if context_str:
-                    content_str = f"{context_str}\n\n{content_str}"
-
-                temp_path = output_dir / f"extracted_content_{safe_name}.txt"
-                temp_path.write_text(content_str, encoding="utf-8")
-                _, user_prompt = prepare_extraction_request(str(temp_path))
-
-                extract_response = extract(
-                    user_prompt,
-                    return_prompts=True,
-                    output_dir=str(output_dir),
-                    raw_filename=f"raw_extraction_{safe_name}.json",
-                    filename_prefix=f"{safe_name}_",
-                    source_type="excel",
-                )
-
-                json_result = extract_response["result"]
-                prompt_path = output_dir / f"{base_name}_{safe_name}_prompt.txt"
-                prompt_path.write_text(
-                    f"=== SYSTEM INSTRUCTION ===\n{extract_response['system_instruction']}\n\n=== USER PROMPT ===\n{extract_response['user_prompt']}",
-                    encoding="utf-8",
-                )
-
-                try:
-                    parsed_result = json.loads(json_result)
-                    if parsed_result.get("status") == "failed":
-                        raise ValueError(parsed_result.get("error", "Unknown LLM error"))
-                except json.JSONDecodeError:
-                    if "error" in json_result.lower():
-                        raise ValueError(f"LLM extraction failed: {json_result[:500]}")
-                    parsed_result = {}
-
-                sheet_output_path.write_text(json_result, encoding="utf-8")
-                schema_result, overlap_result = _run_validators(sheet_output_path)
-                validation_status = (
-                    _build_validation_status(schema_result, overlap_result)
-                    if schema_result else "UNKNOWN"
-                )
-
-                results.append({
-                    "sheet": sheet_name,
-                    "status": "success",
-                    "output_path": str(sheet_output_path),
-                    "output_filename": sheet_output_path.name,
-                    "validation_status": validation_status,
-                    "json_data": parsed_result,
-                })
-                logger.info(f"  ✓ '{sheet_name}' processed")
-
-            except Exception as e:
-                error_msg = str(e)
-                logger.error(f"  ✗ '{sheet_name}' failed: {error_msg}")
-                errors.append({"sheet": sheet_name, "error": error_msg})
-                results.append({"sheet": sheet_name, "status": "failed", "error": error_msg})
-
-        successful_results = [r for r in results if r.get("status") == "success"]
-        combined_path = output_dir / f"{base_name}_combined.json"
-        combined_schema_result = None
-        combined_overlap_result = None
-        combined_data = {}
-
-        if successful_results:
-            combined_data = _merge_sheet_jsons(successful_results, base_name, output_dir)
-            combined_path.write_text(json.dumps(combined_data, indent=2), encoding="utf-8")
-            combined_schema_result, combined_overlap_result = _run_validators(combined_path)
-
-        duration = (datetime.now() - start_time).total_seconds()
-        return PipelineResult(
-            cics_doc=combined_data,
-            output_path=combined_path if successful_results else base_output_path,
-            validation_issues=combined_schema_result.errors if combined_schema_result else [],
-            overlap_issues=combined_overlap_result.overlaps if combined_overlap_result else [],
-            duration=duration,
-            sheet_results=results,
-            errors=[e["error"] for e in errors],
-        )
-
-    def _process_email_with_attachments(
-        self,
-        email_data: Dict,
-        output_path: Path,
-    ) -> PipelineResult:
-        """Process email with Excel attachments — routes each attachment to sheet-by-sheet."""
-        import os
-        import shutil
-
-        start_time = datetime.now()
-        output_path_obj = Path(output_path)
-        output_dir = output_path_obj.parent
-        base_name = output_path_obj.stem
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        email_context = _format_email_context(email_data)
-        excel_attachments = [
-            att for att in email_data.get("attachments", []) if "temp_path" in att
-        ]
-
-        all_results = []
-        all_errors = []
-        all_sheet_pass_results = []
-
-        for att_idx, attachment in enumerate(excel_attachments, 1):
-            temp_path = attachment["temp_path"]
-            att_filename = Path(attachment["filename"]).stem
-            logger.info(f"Processing attachment {att_idx}/{len(excel_attachments)}: {attachment['filename']}")
-
-            try:
-                att_base_path = output_dir / f"{base_name}_{att_filename}.json"
-                res = self._process_excel_sheets(
-                    str(temp_path),
-                    att_base_path,
-                    context_str=email_context,
-                    attachment_name=attachment["filename"],
-                )
-                for r in res.sheet_results:
-                    r["attachment"] = attachment["filename"]
-                    all_results.append(r)
-                for e_msg in res.errors:
-                    all_errors.append({"attachment": attachment["filename"], "error": e_msg})
-                for spr in res.sheet_pass_results:
-                    all_sheet_pass_results.append(spr)
-
-            except Exception as e:
-                all_errors.append({
-                    "attachment": attachment["filename"],
-                    "error": str(e),
-                })
-
-            finally:
-                try:
-                    if temp_path and Path(temp_path).exists():
-                        safe_stem = Path(attachment["filename"]).stem.replace(" ", "_")
-                        saved = output_dir / f"attachment_{safe_stem}{Path(attachment['filename']).suffix}"
-                        shutil.copy2(temp_path, saved)
-                        os.unlink(temp_path)
-                except Exception as e:
-                    logger.warning(f"Could not save/clean attachment: {e}")
-
-        successful_results = [r for r in all_results if r.get("status") == "success"]
-        combined_path = output_dir / f"{base_name}_combined.json"
-        combined_schema_result = None
-        combined_overlap_result = None
-        combined_data = {}
-
-        if successful_results:
-            combined_data = _merge_sheet_jsons(successful_results, base_name, output_dir)
-            combined_path.write_text(json.dumps(combined_data, indent=2), encoding="utf-8")
-            combined_schema_result, combined_overlap_result = _run_validators(combined_path)
-
-        duration = (datetime.now() - start_time).total_seconds()
-        return PipelineResult(
-            cics_doc=combined_data,
-            output_path=combined_path if successful_results else output_path,
-            validation_issues=combined_schema_result.errors if combined_schema_result else [],
-            overlap_issues=combined_overlap_result.overlaps if combined_overlap_result else [],
-            duration=duration,
-            sheet_results=all_results,
-            errors=[e.get("error", "") for e in all_errors],
-            sheet_pass_results=all_sheet_pass_results,
         )
 
 

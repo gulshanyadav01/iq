@@ -36,6 +36,7 @@ class ExtractionPass(TimeStampedUUIDModel):
     result = models.JSONField(null=True, blank=True)
     # The prompt sent to the LLM (stored for debugging and re-runs)
     prompt_text = models.TextField(blank=True)
+    system_instruction = models.TextField(blank=True)
     llm_model_used = models.CharField(max_length=100, blank=True)
     duration_seconds = models.FloatField(default=0)
     error = models.TextField(blank=True)
