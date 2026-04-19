@@ -1,11 +1,12 @@
 <template>
+  <div>
   <div class="p-8">
     <div class="max-w-7xl mx-auto space-y-6">
       <!-- Back + Header -->
       <div class="flex items-center gap-4">
         <button
           class="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 transition"
-          @click="router.push('/commission-intake')"
+          @click="navigateTo('/commission-intake')"
         >
           <UIcon name="i-lucide-arrow-left" class="w-4 h-4" />
         </button>
@@ -138,21 +139,23 @@
               <!-- Email -->
               <template v-else-if="doc.indexed_content.source_type === 'email'">
                 <div v-if="doc.indexed_content.email_context" class="space-y-1">
-                  <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest">Email Headers</p>
-                  <pre class="text-xs bg-gray-50 dark:bg-gray-900 p-4 rounded-lg whitespace-pre-wrap">{{ doc.indexed_content.email_context }}</pre>
+                  <details class="group">
+                    <summary class="text-xs font-semibold text-gray-500 uppercase tracking-widest cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-300">Email Headers</summary>
+                    <pre class="mt-2 text-xs bg-gray-50 dark:bg-gray-900 p-4 rounded-lg whitespace-pre-wrap">{{ doc.indexed_content.email_context }}</pre>
+                  </details>
                 </div>
                 <div class="space-y-1">
                   <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest">Body</p>
-                  <details class="group">
+                  <details class="group" open>
                     <summary class="text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 cursor-pointer select-none">Show content</summary>
                     <pre class="mt-2 text-xs bg-gray-50 dark:bg-gray-900 p-4 rounded-lg overflow-auto max-h-96 leading-relaxed whitespace-pre-wrap">{{ doc.indexed_content.primary_content.slice(0, 5000) }}{{ doc.indexed_content.primary_content.length > 5000 ? '\n…(truncated)' : '' }}</pre>
                   </details>
                 </div>
                 <!-- Excel attachments extracted from email -->
                 <template v-if="doc.indexed_content.sheet_contents && Object.keys(doc.indexed_content.sheet_contents).length">
-                  <div class="pt-2 border-t border-gray-100 dark:border-gray-800">
+                  <div class="pt-2 border-t border-gray-100 dark:border-gray-800 space-y-2">
                     <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-3">Excel Attachments</p>
-                    <div v-for="(content, sheetName) in doc.indexed_content.sheet_contents" :key="sheetName" class="space-y-2">
+                    <div v-for="(content, sheetName) in doc.indexed_content.sheet_contents" :key="sheetName">
                       <div class="flex items-center gap-2">
                         <span class="text-sm font-medium text-gray-900 dark:text-white">{{ sheetName }}</span>
                         <span :class="['px-1.5 py-0.5 rounded text-[10px] font-medium uppercase', getSheetClassBadge(sheetName, doc.indexed_content)]">
@@ -456,26 +459,66 @@
                 <!-- Overlap issues -->
                 <div v-if="doc.validation_result.overlap_issues.length" class="space-y-2">
                   <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest">Rule Overlap Issues</p>
-                  <table class="w-full text-xs">
-                    <thead>
-                      <tr class="text-left text-gray-400 border-b border-gray-100 dark:border-gray-800">
-                        <th class="pb-2 pr-4 font-semibold">Severity</th>
-                        <th class="pb-2 pr-4 font-semibold">Type</th>
-                        <th class="pb-2 pr-4 font-semibold">Product</th>
-                        <th class="pb-2 font-semibold">Rules</th>
-                      </tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-100 dark:divide-gray-800">
-                      <tr v-for="(overlap, i) in doc.validation_result.overlap_issues" :key="i" class="align-top">
-                        <td class="py-2 pr-4">
-                          <span :class="['px-1.5 py-0.5 rounded text-[10px] font-medium uppercase', getSeverityBadge(overlap.severity)]">{{ overlap.severity }}</span>
-                        </td>
-                        <td class="py-2 pr-4 text-gray-600 dark:text-gray-400">{{ overlap.overlap_type }}</td>
-                        <td class="py-2 pr-4 font-mono text-gray-500">{{ overlap.product_code }}</td>
-                        <td class="py-2 text-gray-700 dark:text-gray-300">{{ overlap.rule1_id }} vs {{ overlap.rule2_id }}</td>
-                      </tr>
-                    </tbody>
-                  </table>
+                  <div class="border border-gray-100 dark:border-gray-800 rounded-xl overflow-hidden">
+                    <table class="w-full text-xs">
+                      <thead>
+                        <tr class="text-left text-gray-400 border-b border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/30">
+                          <th class="py-2 pl-3 pr-4 font-semibold">Severity</th>
+                          <th class="py-2 pr-4 font-semibold">Type</th>
+                          <th class="py-2 pr-4 font-semibold">Product</th>
+                          <th class="py-2 font-semibold">Rules</th>
+                          <th class="py-2 pr-3 font-semibold" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template v-for="(overlap, i) in doc.validation_result.overlap_issues" :key="i">
+                          <tr
+                            class="align-top border-t border-gray-100 dark:border-gray-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/30 transition"
+                            @click="expandedOverlap = expandedOverlap === i ? null : i"
+                          >
+                            <td class="py-2 pl-3 pr-4">
+                              <span :class="['px-1.5 py-0.5 rounded text-[10px] font-medium uppercase', getSeverityBadge(overlap.severity)]">{{ overlap.severity }}</span>
+                            </td>
+                            <td class="py-2 pr-4 text-gray-600 dark:text-gray-400">{{ overlap.overlap_type }}</td>
+                            <td class="py-2 pr-4 font-mono text-gray-500">{{ overlap.product_code }}</td>
+                            <td class="py-2 text-gray-700 dark:text-gray-300 font-mono">{{ overlap.rule1_id }} vs {{ overlap.rule2_id }}</td>
+                            <td class="py-2 pr-3 text-right">
+                              <div class="flex items-center justify-end gap-2">
+                                <button
+                                  class="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium text-primary-600 dark:text-primary-400 hover:bg-primary-50 dark:hover:bg-primary-900/20 transition"
+                                  @click.stop="openOverlapRuleModal(overlap)"
+                                >
+                                  <UIcon name="i-lucide-eye" class="w-3 h-3" />
+                                  View Rules
+                                </button>
+                                <UIcon
+                                  :name="expandedOverlap === i ? 'i-lucide-chevron-up' : 'i-lucide-chevron-down'"
+                                  class="w-3.5 h-3.5 text-gray-400"
+                                />
+                              </div>
+                            </td>
+                          </tr>
+                          <tr v-if="expandedOverlap === i" class="bg-gray-50 dark:bg-gray-800/20 border-t border-gray-100 dark:border-gray-800">
+                            <td colspan="5" class="px-4 py-3 space-y-2">
+                              <p v-if="overlap.description" class="text-gray-700 dark:text-gray-300">{{ overlap.description }}</p>
+                              <div v-if="overlap.overlapping_dimensions?.length" class="flex items-center gap-1.5 flex-wrap">
+                                <span class="text-gray-400 dark:text-gray-500">Dimensions:</span>
+                                <span
+                                  v-for="dim in overlap.overlapping_dimensions"
+                                  :key="dim"
+                                  class="px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 font-mono"
+                                >{{ dim }}</span>
+                              </div>
+                              <div v-if="overlap.suggestion" class="flex items-start gap-1.5 text-gray-500 dark:text-gray-400">
+                                <UIcon name="i-lucide-lightbulb" class="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-amber-500" />
+                                <span>{{ overlap.suggestion }}</span>
+                              </div>
+                            </td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
 
                 <p v-if="!doc.validation_result.schema_issues.length && !doc.validation_result.overlap_issues.length" class="text-sm text-gray-500">No issues found.</p>
@@ -503,8 +546,84 @@
     </div>
   </div>
 
+  <!-- Overlap rule review modal -->
+  <UModal v-model:open="overlapRuleModalOpen" title="Overlapping Rules" :ui="{ content: 'max-w-4xl' }">
+    <template #body>
+      <div v-if="overlapRuleModalData" class="space-y-4 overflow-y-auto max-h-[75vh]">
+        <!-- Header info -->
+        <div class="flex items-center gap-3 text-xs text-gray-500 dark:text-gray-400">
+          <span :class="['px-1.5 py-0.5 rounded font-medium uppercase', getSeverityBadge(overlapRuleModalData.severity)]">{{ overlapRuleModalData.severity }}</span>
+          <span>{{ overlapRuleModalData.overlap_type }}</span>
+          <span class="font-mono text-gray-400">{{ overlapRuleModalData.product_code }}</span>
+        </div>
+        <p v-if="overlapRuleModalData.description" class="text-sm text-gray-700 dark:text-gray-300">{{ overlapRuleModalData.description }}</p>
+        <div v-if="overlapRuleModalData.overlapping_dimensions?.length" class="flex items-center gap-1.5 flex-wrap text-xs">
+          <span class="text-gray-400">Conflicting dimensions:</span>
+          <span
+            v-for="dim in overlapRuleModalData.overlapping_dimensions"
+            :key="dim"
+            class="px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 font-mono"
+          >{{ dim }}</span>
+        </div>
+        <div v-if="overlapRuleModalData.suggestion" class="flex items-start gap-1.5 text-xs text-gray-500 dark:text-gray-400 bg-amber-50 dark:bg-amber-900/10 border border-amber-100 dark:border-amber-800 rounded-lg px-3 py-2">
+          <UIcon name="i-lucide-lightbulb" class="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-amber-500" />
+          <span>{{ overlapRuleModalData.suggestion }}</span>
+        </div>
+        <!-- Side-by-side rules -->
+        <div class="grid grid-cols-2 gap-4 pt-2">
+          <template v-for="ruleId in [overlapRuleModalData.rule1_id, overlapRuleModalData.rule2_id]" :key="ruleId">
+            <div class="bg-gray-50 dark:bg-gray-800/50 rounded-xl overflow-hidden">
+              <div class="px-4 py-2 border-b border-gray-200 dark:border-gray-700">
+                <span class="text-xs font-mono font-semibold text-gray-700 dark:text-gray-300">{{ ruleId }}</span>
+              </div>
+              <template v-if="getRuleById(ruleId) as any">
+                <div class="p-4 text-xs space-y-2">
+                  <div class="flex items-center gap-2">
+                    <span class="text-gray-400 w-16 flex-shrink-0">Type</span>
+                    <span class="text-gray-900 dark:text-gray-100">{{ (getRuleById(ruleId) as any).outcome?.commission_type || '—' }}</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-gray-400 w-16 flex-shrink-0">Value</span>
+                    <span class="text-gray-900 dark:text-gray-100 font-medium">{{ formatCommissionValue((getRuleById(ruleId) as any).outcome) }}</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-gray-400 w-16 flex-shrink-0">Priority</span>
+                    <span class="text-gray-900 dark:text-gray-100">{{ (getRuleById(ruleId) as any).priority ?? '—' }}</span>
+                  </div>
+                </div>
+                <div v-if="Object.keys((getRuleById(ruleId) as any).conditions ?? {}).length" class="px-4 pb-4 border-t border-gray-200 dark:border-gray-700">
+                  <p class="text-[10px] font-semibold text-gray-400 uppercase tracking-widest pt-3 pb-2">Conditions</p>
+                  <table class="w-full text-xs">
+                    <thead>
+                      <tr class="text-left text-gray-400 border-b border-gray-100 dark:border-gray-800">
+                        <th class="pb-1.5 pr-3 font-semibold">Field</th>
+                        <th class="pb-1.5 font-semibold">Value</th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-100 dark:divide-gray-800">
+                      <tr
+                        v-for="(val, field) in (getRuleById(ruleId) as any).conditions"
+                        :key="field"
+                        class="align-top"
+                      >
+                        <td class="py-1.5 pr-3 font-mono text-blue-500 dark:text-blue-400 whitespace-nowrap">{{ field }}</td>
+                        <td class="py-1.5 text-gray-700 dark:text-gray-300 break-all">{{ Array.isArray(val) ? val.join(', ') : val }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div v-else class="px-4 pb-4 text-xs text-gray-400 italic">No conditions (catch-all rule)</div>
+              </template>
+              <div v-else class="p-4 text-xs text-gray-400 italic">Rule not found in CICS result</div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+  </UModal>
+
   <!-- Prompt viewer modal -->
-  <UModal v-model:open="promptModalOpen" title="Pass Prompts" :ui="{ width: 'max-w-3xl' }">
+  <UModal v-model:open="promptModalOpen" title="Pass Prompts" :ui="{ content: 'max-w-3xl' }">
     <template #body>
       <div v-if="currentPass">
         <!-- Tabs -->
@@ -526,16 +645,15 @@
       </div>
     </template>
   </UModal>
+  </div>
 </template>
 
 <script setup lang="ts">
 import { ref } from 'vue'
-import { useRouter } from 'vue-router'
 import { useCommissionIntakeDetail } from '~/composables/useCommissionIntakeDetail'
+import type { OverlapIssue } from '~/composables/useCommissionIntakeDetail'
 
 definePageMeta({ layout: 'default', middleware: 'auth' })
-
-const router = useRouter()
 
 const passLabels: Record<string, string> = {
   pass1: 'Pass 1: Metadata',
@@ -552,6 +670,10 @@ const cicsTabs = [
 const promptModalOpen = ref(false)
 const promptModalTab = ref<'system' | 'user'>('system')
 
+const expandedOverlap = ref<number | null>(null)
+const overlapRuleModalOpen = ref(false)
+const overlapRuleModalData = ref<OverlapIssue | null>(null)
+
 const {
   doc, loadError, activeStage, copied, activeCicsTab, actionLoading, actionError, activePassSheetKey,
   stages, currentPassSheets, currentPass,
@@ -562,4 +684,17 @@ const {
   sheetPassStatus, copyJson, downloadJson,
   triggerIndex, triggerExtract, triggerRerunPass, triggerTransform, triggerValidate,
 } = useCommissionIntakeDetail()
+
+function openOverlapRuleModal(overlap: OverlapIssue) {
+  overlapRuleModalData.value = overlap
+  overlapRuleModalOpen.value = true
+}
+
+function getRuleById(ruleId: string) {
+  for (const product of cicsProducts.value) {
+    const rule = (product.commission_rules as { rule_id: string }[])?.find(r => r.rule_id === ruleId)
+    if (rule) return rule
+  }
+  return null
+}
 </script>

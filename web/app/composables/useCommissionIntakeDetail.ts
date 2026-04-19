@@ -18,6 +18,8 @@ export interface OverlapIssue {
   rule1_id: string
   rule2_id: string
   description: string
+  overlapping_dimensions?: string[]
+  suggestion?: string
 }
 
 export interface ValidationResult {

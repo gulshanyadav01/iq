@@ -22,7 +22,6 @@ from cins.schema.extraction_passes import (
     RulesExtraction,
     ProductWithRules,
     RuleEntry,
-    CodegenEnrichmentExtraction,
 )
 from cins.validators.raw_extraction_validator import RawExtractionValidator
 
@@ -193,194 +192,6 @@ def get_pass3_rules_codegen_prompt():
             "customer_type_text, channel_text, coverage_type_text, state_text, conditions, "
             "other_conditions, applied_on_text, gst_applicable, source_section, quoted_text, confidence_note."
         )
-
-
-def get_pass3_codegen_enrichment_schema():
-    """Get the CodegenEnrichmentExtraction JSON schema from Pydantic model."""
-    return CodegenEnrichmentExtraction.model_json_schema()
-
-
-def get_pass3_codegen_enrichment_prompt():
-    """Get the Pass 3 codegen enrichment prompt."""
-    try:
-        prompt_path = (
-            Path(__file__).parent.parent.parent
-            / "prompts"
-            / "pass3_codegen_enrichment_prompt.md"
-        )
-        with open(prompt_path, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception as e:
-        print(f"Warning: Could not load Pass 3 enrichment prompt: {e}", file=sys.stderr)
-        return (
-            "Review the parser output and correct product names/types. "
-            "Fill other_conditions and confidence_note for rules that need them."
-        )
-
-
-def _enrich_codegen_pass3_results(
-    rules_extraction: RulesExtraction,
-    commission_data_content: str,
-    service,
-    metadata,
-    master_data_extraction,
-    output_dir=None,
-    filename_prefix: str = "",
-) -> RulesExtraction:
-    """
-    Post-codegen enrichment: LLM fills AI-assisted fields that the generated parser
-    cannot reliably produce — product_name, product_type, other_conditions, confidence_note.
-
-    Sends a compact summary of the codegen output alongside the original document content
-    so the LLM has full context to correct names/types and infer free-text conditions.
-
-    Non-blocking: any failure returns the original rules_extraction unchanged.
-    """
-    if not rules_extraction.products:
-        return rules_extraction
-
-    print("=" * 70, file=sys.stderr)
-    print("# PASS 3 ENRICHMENT: AI-assisted fields post-codegen", file=sys.stderr)
-    print("=" * 70, file=sys.stderr)
-
-    # Build compact parser output summary for the LLM
-    summary = []
-    for p_idx, product in enumerate(rules_extraction.products):
-        rule_summaries = []
-        for r_idx, rule in enumerate(product.rules):
-            rule_summaries.append({
-                "rule_index": r_idx,
-                "rule_text": rule.rule_text,
-                "commission_value": rule.commission_value,
-                "source_section": rule.source_section,
-            })
-        summary.append({
-            "product_index": p_idx,
-            "product_name": product.product_name,
-            "product_type": product.product_type,
-            "rules": rule_summaries,
-        })
-
-    summary_json = json.dumps(summary, indent=2)
-
-    # Build context header (same as other passes)
-    context_parts = [
-        f"**Provider**: {metadata.provider_name}",
-        f"**Period**: {metadata.period_label}",
-    ]
-    global_settings = []
-    if metadata.global_gst_percentage:
-        global_settings.append(f"- GST: {metadata.global_gst_percentage}")
-    if metadata.global_applied_on:
-        global_settings.append(f"- Applied On: {metadata.global_applied_on}")
-    if metadata.global_deductions:
-        global_settings.append(f"- Deductions: {metadata.global_deductions}")
-    if metadata.global_vehicle_type_text:
-        global_settings.append(f"- Vehicle Type: {metadata.global_vehicle_type_text}")
-    if metadata.global_state_text:
-        global_settings.append(f"- States: {metadata.global_state_text}")
-    if global_settings:
-        context_parts.append("**Global Settings**:")
-        context_parts.extend(global_settings)
-
-    master_data_text = _format_master_data_as_text(master_data_extraction)
-    if master_data_text:
-        context_parts.append("")
-        context_parts.append(master_data_text)
-
-    context_parts += [
-        "",
-        "---",
-        "## Document Content",
-        "",
-        commission_data_content,
-        "",
-        "---",
-        "## Parser Output Summary",
-        "",
-        summary_json,
-    ]
-
-    user_prompt = "\n".join(context_parts)
-
-    if output_dir:
-        prompt_file = output_dir / (
-            f"{filename_prefix}pass3_codegen_enrichment_prompt.txt"
-            if filename_prefix
-            else "pass3_codegen_enrichment_prompt.txt"
-        )
-        with open(prompt_file, "w", encoding="utf-8") as f:
-            f.write(user_prompt)
-        print(f"#   → Saved enrichment prompt to {prompt_file}", file=sys.stderr)
-
-    prompt = get_pass3_codegen_enrichment_prompt()
-    schema = get_pass3_codegen_enrichment_schema()
-
-    config = get_config_for_extraction()
-    config.response_json_schema = schema
-    config.system_instruction = prompt
-
-    try:
-        result_json = service.generate_content(user_prompt, config=config)
-    except Exception as e:
-        print(f"#   ⚠ Enrichment LLM call failed: {e} — using codegen output as-is", file=sys.stderr)
-        return rules_extraction
-
-    if output_dir:
-        raw_file = output_dir / (
-            f"{filename_prefix}pass3_codegen_enrichment_raw.json"
-            if filename_prefix
-            else "pass3_codegen_enrichment_raw.json"
-        )
-        with open(raw_file, "w", encoding="utf-8") as f:
-            f.write(result_json)
-        print(f"#   → Saved enrichment response to {raw_file}", file=sys.stderr)
-
-    try:
-        enrichment = CodegenEnrichmentExtraction.model_validate_json(result_json)
-    except Exception as e:
-        print(f"#   ⚠ Enrichment response parse failed: {e} — using codegen output as-is", file=sys.stderr)
-        return rules_extraction
-
-    # Merge enriched values back into the RulesExtraction
-    products: list[ProductWithRules] = list(rules_extraction.products)
-    corrections = 0
-
-    for ep in enrichment.products:
-        p_idx = ep.product_index
-        if p_idx < 0 or p_idx >= len(products):
-            continue
-
-        product: ProductWithRules = products[p_idx]  # type: ignore[assignment]
-        rules: list[RuleEntry] = list(product.rules)  # type: ignore[arg-type]
-
-        if ep.product_name:
-            product = product.model_copy(update={"product_name": ep.product_name})
-            corrections += 1
-        if ep.product_type:
-            product = product.model_copy(update={"product_type": ep.product_type})
-            corrections += 1
-
-        for era in ep.rules:
-            r_idx = era.rule_index
-            if r_idx < 0 or r_idx >= len(rules):
-                continue
-            rule: RuleEntry = rules[r_idx]
-            updates = {}
-            if era.other_conditions:
-                updates["other_conditions"] = era.other_conditions
-                corrections += 1
-            if era.confidence_note:
-                updates["confidence_note"] = era.confidence_note
-                corrections += 1
-            if updates:
-                rules[r_idx] = rule.model_copy(update=updates)
-
-        products[p_idx] = product.model_copy(update={"rules": rules})
-
-    print(f"# Pass 3 enrichment complete: {corrections} field(s) updated", file=sys.stderr)
-
-    return rules_extraction.model_copy(update={"products": products})
 
 
 def _is_truncated_json(raw_json: str, provider: str) -> bool:
@@ -1218,7 +1029,7 @@ def _extract_pass3_via_codegen(
                     f"Code-gen LLM call failed after {attempt} attempts: {e}"
                 ],
                 overall_requires_review=True,
-            )
+            ), code
 
         code = _strip_fences(raw_code)
         print(f"#   → Generated code: {len(code):,} chars", file=sys.stderr)
@@ -1249,7 +1060,7 @@ def _extract_pass3_via_codegen(
                     f"Code-gen AST validation failed after {attempt} attempts: {e}"
                 ],
                 overall_requires_review=True,
-            )
+            ), code
 
         # Execute — pass the full prompt as commission_markdown so code can read it
         try:
@@ -1265,7 +1076,7 @@ def _extract_pass3_via_codegen(
                     f"Code-gen execution failed after {attempt} attempts: {e}"
                 ],
                 overall_requires_review=True,
-            )
+            ), code
 
         print(f"#   → Code-gen produced {len(raw_dicts)} raw dicts", file=sys.stderr)
 
@@ -1282,7 +1093,7 @@ def _extract_pass3_via_codegen(
                     f"Code-gen produced no rules after {attempt} attempts"
                 ],
                 overall_requires_review=True,
-            )
+            ), code
 
         # Pydantic validation
         valid_entries, error_notes = validate_entries(raw_dicts)
@@ -1308,7 +1119,7 @@ def _extract_pass3_via_codegen(
                 products=[],
                 overall_ambiguities=error_notes,
                 overall_requires_review=True,
-            )
+            ), code
 
         # Partial or full success — use what we have
         print(f"#   ✓ Code-gen succeeded on attempt {attempt}", file=sys.stderr)
@@ -1363,7 +1174,7 @@ def _extract_pass3_via_codegen(
         products=products,
         overall_ambiguities=error_notes if error_notes else [],
         overall_requires_review=bool(error_notes),
-    )
+    ), code
 
 
 def _extract_pass3_products_and_rules(
@@ -1593,6 +1404,8 @@ def extract_multi_pass(
     master_data_content=None,
     commission_data_content=None,
     on_pass_complete=None,
+    on_pass_start=None,
+    provider=None,
     **kwargs,
 ):
     """
@@ -1638,7 +1451,7 @@ def extract_multi_pass(
     print("=" * 70, file=sys.stderr)
 
     # Initialize LLM service
-    service = get_llm_service()
+    service = get_llm_service(provider=provider)
     if api_key:
         service._api_key = api_key
     if model:
@@ -1682,6 +1495,8 @@ def extract_multi_pass(
 
     try:
         # Pass 1: Metadata (email content + master data/metadata sections)
+        if on_pass_start:
+            on_pass_start(1)
         _pass1_start = time.monotonic()
         metadata = _extract_pass1_metadata(
             pass1_content, service, output_dir=out_path, filename_prefix=filename_prefix
@@ -1698,7 +1513,7 @@ def extract_multi_pass(
                 json.dump(metadata.model_dump(), f, indent=2)
 
         if on_pass_complete:
-            on_pass_complete(1, metadata.model_dump(), _pass1_duration)
+            on_pass_complete(1, metadata.model_dump(), _pass1_duration, {})
 
         # Early exit: if document states rates are unchanged, skip Pass 2 and Pass 3
         if metadata.inherits_from_previous:
@@ -1755,6 +1570,8 @@ def extract_multi_pass(
 
         # Pass 2: Master Data (master data/metadata sections only)
         # Proactive check: use code-gen mode if content is too large for JSON output
+        if on_pass_start:
+            on_pass_start(2)
         _pass2_start = time.monotonic()
         if _should_use_codegen_for_pass2(pass2_content):
             print(
@@ -1788,17 +1605,21 @@ def extract_multi_pass(
                 json.dump(master_data_extraction.model_dump(), f, indent=2)
 
         if on_pass_complete:
-            on_pass_complete(2, master_data_extraction.model_dump(), _pass2_duration)
+            on_pass_complete(2, master_data_extraction.model_dump(), _pass2_duration, {})
 
         # Pass 3: Products and Rules (commission data sections only)
         # Proactive check: use code-gen mode if content is too large for JSON output
+        if on_pass_start:
+            on_pass_start(3)
         _pass3_start = time.monotonic()
+        _pass3_codegen_code = ""
+        _pass3_extraction_method = "llm"
         if _should_use_codegen_for_pass3(pass3_content):
             print(
                 "# Pass 3: Using code-gen mode (proactive threshold triggered)",
                 file=sys.stderr,
             )
-            rules_extraction = _extract_pass3_via_codegen(
+            rules_extraction, _pass3_codegen_code = _extract_pass3_via_codegen(
                 pass3_content,
                 service,
                 metadata,
@@ -1806,15 +1627,7 @@ def extract_multi_pass(
                 output_dir=out_path,
                 filename_prefix=filename_prefix,
             )
-            rules_extraction = _enrich_codegen_pass3_results(
-                rules_extraction,
-                pass3_content,
-                service,
-                metadata,
-                master_data_extraction,
-                output_dir=out_path,
-                filename_prefix=filename_prefix,
-            )
+            _pass3_extraction_method = "codegen"
         else:
             rules_extraction = _extract_pass3_products_and_rules(
                 pass3_content,
@@ -1836,7 +1649,10 @@ def extract_multi_pass(
                 json.dump(rules_extraction.model_dump(), f, indent=2)
 
         if on_pass_complete:
-            on_pass_complete(3, rules_extraction.model_dump(), _pass3_duration)
+            on_pass_complete(3, rules_extraction.model_dump(), _pass3_duration, {
+                "extraction_method": _pass3_extraction_method,
+                "codegen_code": _pass3_codegen_code,
+            })
 
         # Merge passes into RawExtraction
         print("=" * 70, file=sys.stderr)

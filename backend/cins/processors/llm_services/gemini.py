@@ -266,9 +266,19 @@ class GeminiService(LLMServiceMixin):
         model: Optional[str] = None,
     ) -> str:
         """Internal method with retry logic"""
+        from cins.processors.llm_services.langfuse_client import start_generation, get_trace_context
+
         client = self._get_client()
         model = model or self._model
         gen_config = self._build_config(config)
+
+        ctx = get_trace_context()
+        prompt_input = config.system_instruction if (config and config.system_instruction) else (contents if isinstance(contents, str) else None)
+        generation = start_generation(
+            name=ctx["trace_name"] or "gemini-generate",
+            model=model,
+            input=prompt_input,
+        )
 
         last_error = None
         for attempt in range(self._max_retries):
@@ -281,7 +291,20 @@ class GeminiService(LLMServiceMixin):
                     config=gen_config,
                 )
 
-                return response.text or ""
+                text = response.text or ""
+
+                if generation:
+                    usage = getattr(response, "usage_metadata", None)
+                    generation.update(
+                        output=text,
+                        usage_details={
+                            "input": getattr(usage, "prompt_token_count", None),
+                            "output": getattr(usage, "candidates_token_count", None),
+                        } if usage else None,
+                    )
+                    generation.end()
+
+                return text
 
             except Exception as e:
                 last_error = e
@@ -296,6 +319,10 @@ class GeminiService(LLMServiceMixin):
                     logger.error(
                         f"Gemini API failed after {self._max_retries} attempts: {e}"
                     )
+
+        if generation:
+            generation.update(level="ERROR", status_message=str(last_error))
+            generation.end()
 
         raise GeminiAPIError(
             f"Gemini API error after {self._max_retries} attempts: {last_error}"

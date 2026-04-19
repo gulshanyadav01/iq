@@ -288,17 +288,19 @@ class ContentIndexer:
     in input-indexed/ for fast access during multiple LLM extraction runs.
     """
 
-    def __init__(self, indexed_dir: Path, enable_cleaning: bool = True):
+    def __init__(self, indexed_dir: Path, enable_cleaning: bool = True, llm_provider: str = None):
         """
         Initialize content indexer.
 
         Args:
             indexed_dir: Root directory for indexed content (e.g., input-indexed/)
             enable_cleaning: Enable Pass 0A/0B cleaning during indexing (default: True)
+            llm_provider: LLM provider override ("gemini" or "openai"). Falls back to LLM_PROVIDER env var.
         """
         self.indexed_dir = Path(indexed_dir)
         self.indexed_dir.mkdir(parents=True, exist_ok=True)
         self.enable_cleaning = enable_cleaning
+        self.llm_provider = llm_provider
         self._llm_service = None  # Lazy-loaded when cleaning is needed
         logger.info(
             f"ContentIndexer initialized with directory: {self.indexed_dir}, cleaning={enable_cleaning}"
@@ -310,7 +312,7 @@ class ContentIndexer:
             try:
                 from cins.processors.llm_services.factory import get_llm_service
 
-                self._llm_service = get_llm_service()
+                self._llm_service = get_llm_service(provider=self.llm_provider)
                 logger.info("LLM service initialized for content cleaning")
             except Exception as e:
                 logger.warning(f"Could not initialize LLM service for cleaning: {e}")

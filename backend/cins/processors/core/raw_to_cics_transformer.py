@@ -335,6 +335,7 @@ VALID_STATE_NAMES = {
     "uttar-pradesh",
     "ladakh",
     "uttarakhand",
+    "dadra-and-nagar-haveli-and-daman-and-diu",
 }
 
 # Maps various state name/abbreviation forms to canonical names
@@ -381,6 +382,15 @@ STATE_NAME_MAPPINGS = {
     "uttar pradesh": "uttar-pradesh",
     "uttarakhand": "uttarakhand",
     "west bengal": "west-bengal",
+    "dadra and nagar haveli and daman and diu": "dadra-and-nagar-haveli-and-daman-and-diu",
+    "dadra & nagar haveli and daman & diu": "dadra-and-nagar-haveli-and-daman-and-diu",
+    "dadra and nagar haveli": "dadra-and-nagar-haveli-and-daman-and-diu",
+    "dadra & nagar haveli": "dadra-and-nagar-haveli-and-daman-and-diu",
+    "dadra and nagar": "dadra-and-nagar-haveli-and-daman-and-diu",
+    "daman and diu": "dadra-and-nagar-haveli-and-daman-and-diu",
+    "daman & diu": "dadra-and-nagar-haveli-and-daman-and-diu",
+    "dnhdd": "dadra-and-nagar-haveli-and-daman-and-diu",
+    "dd": "dadra-and-nagar-haveli-and-daman-and-diu",
     # 2-letter abbreviations
     "an": "andaman-and-nicobar",
     "ap": "andhra-pradesh",
@@ -417,8 +427,6 @@ STATE_NAME_MAPPINGS = {
     "up": "uttar-pradesh",
     "uk": "uttarakhand",
     "wb": "west-bengal",
-    # Common short forms
-    "dd": "delhi-ncr",
 }
 
 

@@ -292,6 +292,20 @@ class OpenAIService(LLMServiceMixin):
 
     def _generate_with_retry(self, client, request_kwargs: Dict[str, Any]) -> str:
         """Internal method with retry logic"""
+        from cins.processors.llm_services.langfuse_client import start_generation, get_trace_context
+
+        ctx = get_trace_context()
+        messages = request_kwargs.get("messages", [])
+        prompt_input = next(
+            (m["content"] for m in reversed(messages) if m.get("role") == "system"),
+            messages[-1]["content"] if messages else None,
+        )
+        generation = start_generation(
+            name=ctx["trace_name"] or "openai-generate",
+            model=request_kwargs["model"],
+            input=prompt_input,
+        )
+
         last_error = None
         for attempt in range(self._max_retries):
             try:
@@ -300,8 +314,20 @@ class OpenAIService(LLMServiceMixin):
                 )
 
                 response = client.chat.completions.create(**request_kwargs)
+                text = response.choices[0].message.content or ""
 
-                return response.choices[0].message.content or ""
+                if generation:
+                    usage = getattr(response, "usage", None)
+                    generation.update(
+                        output=text,
+                        usage_details={
+                            "input": getattr(usage, "prompt_tokens", None),
+                            "output": getattr(usage, "completion_tokens", None),
+                        } if usage else None,
+                    )
+                    generation.end()
+
+                return text
 
             except Exception as e:
                 last_error = e
@@ -316,6 +342,10 @@ class OpenAIService(LLMServiceMixin):
                     logger.error(
                         f"OpenAI API failed after {self._max_retries} attempts: {e}"
                     )
+
+        if generation:
+            generation.update(level="ERROR", status_message=str(last_error))
+            generation.end()
 
         raise OpenAIAPIError(
             f"OpenAI API error after {self._max_retries} attempts: {last_error}"

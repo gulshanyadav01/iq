@@ -42,10 +42,22 @@ You do NOT need to load any file. `commission_markdown` is already available.
 
 ## APPROVED FIELDS (string unless noted)
 
+### product_name
+
+Motor products — use exactly one of:
+
+- `"Private Car"` — car, PVT CAR, 4W, four-wheeler, taxi, pvt
+- `"Two Wheeler"` — TW, 2W, bike, scooter, motorcycle, moped
+- `"Commercial Vehicle"` — GCV, GCCV, PCV, PCCV, MSV, bus, tractor, misc D, CV, agri tractor
+
+Non-motor: use name as written in document.
+Set `product_name` as a **string constant** in your code, not a variable read from a column header.
+Vehicle makes (Hero, TVS, Honda, Bajaj, etc.) are NOT separate products.
+
 ```
 rule_text          (str, required) - human-readable description of the rule
 commission_value   (str, required) - "12%", "32.5%", "0%" — always as percentage string
-product_name       (str) - product name from document
+product_name       (str) - canonical product name (see ### product_name above)
 product_type       (str) - "GCV", "PCCV", "MSV", "motor", "4W", "2W", etc.
 customer_type_text (str) - "new", "renewal", "rollover", "port", ""
 channel_text       (str) - "online", "offline", ""
@@ -244,6 +256,7 @@ indices derived by inspecting the header rows from `commission_markdown`.**
 4. **Apply notes/master conditions** — collect them with `extract_notes()` and put in `other_conditions`.
 5. **One rule per grid cell** — each state × coverage × row combination = one dict in `result`.
 6. **result must be set** as a module-level variable (not inside a function, not returned).
+7. **Never use a raw column header abbreviation as `product_name`.** Always map to the canonical name from the `### product_name` list above (e.g., `"PCCV"` → `"Commercial Vehicle"`).
 
 ---
 

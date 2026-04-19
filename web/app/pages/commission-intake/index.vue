@@ -189,14 +189,13 @@
             <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
               LLM Provider
             </label>
-            <select
+            <USelect
               v-model="form.llm_provider"
-              class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-500 dark:bg-gray-700 dark:text-white disabled:opacity-50"
+              :items="[{ label: 'Gemini', value: 'gemini' }, { label: 'OpenAI', value: 'openai' }]"
+              value-key="value"
               :disabled="uploading"
-            >
-              <option value="gemini">Gemini</option>
-              <option value="openai">OpenAI</option>
-            </select>
+              class="w-full"
+            />
           </div>
 
           <!-- Model (optional) -->
@@ -218,14 +217,13 @@
             <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
               Excel Processing Mode
             </label>
-            <select
+            <USelect
               v-model="form.excel_mode"
-              class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-500 dark:bg-gray-700 dark:text-white disabled:opacity-50"
+              :items="[{ label: 'Sheet by Sheet', value: 'sheet_by_sheet' }, { label: 'Combined', value: 'combined' }]"
+              value-key="value"
               :disabled="uploading"
-            >
-              <option value="sheet_by_sheet">Sheet by Sheet</option>
-              <option value="combined">Combined</option>
-            </select>
+              class="w-full"
+            />
           </div>
 
           <!-- Processing Mode -->

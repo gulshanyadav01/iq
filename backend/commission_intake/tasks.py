@@ -17,6 +17,13 @@ import tempfile
 from celery import chain, shared_task
 from celery.exceptions import Ignore
 
+from cins.processors.llm_services.langfuse_client import (
+    set_trace_context,
+    clear_trace_context,
+    flush as langfuse_flush,
+    make_pass_trace_id,
+)
+
 logger = logging.getLogger("commission_intake.tasks")
 
 COMMISSION_INTAKE_QUEUE = "commission_intake"
@@ -57,6 +64,7 @@ def index_document(document_id: str):
     from cins.processors.content.indexer import ContentIndexer, INDEXER_VERSION
 
     try:
+        set_trace_context(session_id=document_id)
         doc = CommissionDocument.objects.get(id=document_id)
 
         # Download file from S3/MinIO to a local temp file
@@ -81,7 +89,7 @@ def index_document(document_id: str):
                 except Exception:
                     pass
 
-            indexer = ContentIndexer(indexed_dir=index_dir)
+            indexer = ContentIndexer(indexed_dir=index_dir, llm_provider=doc.llm_provider)
             indexed_doc = indexer.index_document(
                 file_path=tmp_path,
                 provider=doc.provider or "unknown",
@@ -176,6 +184,9 @@ def index_document(document_id: str):
         logger.exception(f"Indexing failed for document {document_id}: {exc}")
         _fail_document(document_id, str(exc))
         raise Ignore()
+    finally:
+        langfuse_flush()
+        clear_trace_context()
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +213,7 @@ def run_extraction(document_id: str):
     from cins.processors.core.pipeline import Pipeline
 
     try:
+        set_trace_context(session_id=document_id)
         doc = CommissionDocument.objects.get(id=document_id)
         indexed = IndexedContent.objects.get(document=doc)
 
@@ -305,6 +317,9 @@ def run_extraction(document_id: str):
         logger.exception(f"Extraction failed for document {document_id}: {exc}")
         _fail_document(document_id, str(exc))
         raise Ignore()
+    finally:
+        langfuse_flush()
+        clear_trace_context()
 
 
 def _build_content_files(indexed: "IndexedContent") -> dict:
@@ -334,6 +349,8 @@ def _upsert_extraction_passes(doc, entries: list) -> None:
                 "prompt_text": entry.get("prompt_text", ""),
                 "system_instruction": entry.get("system_instruction", ""),
                 "llm_model_used": entry.get("model", ""),
+                "extraction_method": entry.get("extraction_method", "llm"),
+                "codegen_code": entry.get("codegen_code", ""),
                 "duration_seconds": entry.get("duration", 0.0),
                 "error": entry.get("error", ""),
             },
@@ -559,6 +576,12 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
 
     doc = None
     try:
+        set_trace_context(
+            session_id=document_id,
+            trace_id=make_pass_trace_id(document_id, pass_number, sheet_name, attachment_name),
+            trace_name=f"rerun-pass-{pass_number}",
+            metadata={"document_id": document_id, "pass": pass_number, "sheet": sheet_name, "attachment": attachment_name},
+        )
         doc = CommissionDocument.objects.get(id=document_id)
         indexed = IndexedContent.objects.get(document=doc)
 
@@ -609,6 +632,8 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
         service = get_llm_service(**({"model": doc.llm_model} if doc.llm_model else {}))
 
         start = _time.monotonic()
+        p3_codegen_code = ""
+        p3_extraction_method = "llm"
 
         if pass_number == 1:
             result_obj = _extract_pass1_metadata(pass1_prompt, service)
@@ -635,8 +660,11 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
             ).first()
             metadata_obj = MetadataExtraction.model_validate(pass1_row.result) if pass1_row and pass1_row.result else MetadataExtraction()
             master_data_obj = MasterDataExtraction.model_validate(pass2_row.result) if pass2_row and pass2_row.result else MasterDataExtraction()
+            p3_codegen_code = ""
+            p3_extraction_method = "llm"
             if _should_use_codegen_for_pass3(pass3_prompt):
-                result_obj = _extract_pass3_via_codegen(pass3_prompt, service, metadata_obj, master_data_obj)
+                result_obj, p3_codegen_code = _extract_pass3_via_codegen(pass3_prompt, service, metadata_obj, master_data_obj)
+                p3_extraction_method = "codegen"
             else:
                 result_obj = _extract_pass3_products_and_rules(pass3_prompt, service, metadata_obj, master_data_obj)
             result_dict = result_obj.model_dump()
@@ -652,6 +680,8 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
                 "status": ExtractionPass.Status.COMPLETED,
                 "result": result_dict,
                 "llm_model_used": service.model,
+                "extraction_method": p3_extraction_method if pass_number == 3 else "llm",
+                "codegen_code": p3_codegen_code if pass_number == 3 else "",
                 "duration_seconds": round(duration, 2),
                 "error": "",
             },
@@ -669,6 +699,9 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
                 attachment_name=attachment_name,
             ).update(status=ExtractionPass.Status.FAILED, error=str(exc))
         raise Ignore()
+    finally:
+        langfuse_flush()
+        clear_trace_context()
 
 
 # ---------------------------------------------------------------------------

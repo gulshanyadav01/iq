@@ -32,12 +32,23 @@ class ExtractionPass(TimeStampedUUIDModel):
         default=Status.PENDING,
         db_index=True,
     )
+    class ExtractionMethod(models.TextChoices):
+        LLM = "llm", "LLM (JSON)"
+        CODEGEN = "codegen", "Code-gen"
+
     # Raw JSON output from the LLM for this pass (null until completed)
     result = models.JSONField(null=True, blank=True)
     # The prompt sent to the LLM (stored for debugging and re-runs)
     prompt_text = models.TextField(blank=True)
     system_instruction = models.TextField(blank=True)
     llm_model_used = models.CharField(max_length=100, blank=True)
+    extraction_method = models.CharField(
+        max_length=40,
+        choices=ExtractionMethod.choices,
+        default=ExtractionMethod.LLM,
+        blank=True,
+    )
+    codegen_code = models.TextField(blank=True)
     duration_seconds = models.FloatField(default=0)
     error = models.TextField(blank=True)
 

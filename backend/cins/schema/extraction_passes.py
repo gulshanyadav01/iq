@@ -538,67 +538,6 @@ class RulesExtraction(BaseModel):
 
 
 # ============================================================================
-# PASS 3 CODEGEN ENRICHMENT
-# ============================================================================
-
-
-class EnrichedRuleAnnotation(BaseModel):
-    """AI-assisted annotation for a single rule produced by the codegen parser."""
-
-    rule_index: int = Field(..., description="Zero-based index of the rule within its product")
-    other_conditions: str = Field(
-        "",
-        description=(
-            "Free-text conditions with no dedicated field and no clean key-value structure "
-            "(e.g., 'tourist permit only', 'corporate-registered vehicles'). "
-            "Leave empty if none apply."
-        ),
-    )
-    confidence_note: str = Field(
-        "",
-        description="Any uncertainty or ambiguity about this rule. Leave empty if confident.",
-    )
-
-
-class EnrichedProduct(BaseModel):
-    """AI-assisted corrections and annotations for a single product from the codegen parser."""
-
-    product_index: int = Field(..., description="Zero-based index of the product in the extracted list")
-    product_name: str = Field(
-        "",
-        description="Corrected full product name (e.g., 'Private Car Commercial Vehicle'). Leave empty to keep the parser value.",
-    )
-    product_type: str = Field(
-        "",
-        description="Corrected product type/category (e.g., 'PCCV', '4W', 'GCV'). Leave empty to keep the parser value.",
-    )
-    rules: List[EnrichedRuleAnnotation] = Field(
-        default_factory=list,
-        description="Annotations for individual rules that need other_conditions or confidence_note filled.",
-    )
-
-
-class CodegenEnrichmentExtraction(BaseModel):
-    """
-    Post-codegen enrichment pass: AI-assisted corrections and annotations
-    for product_name, product_type, other_conditions, and confidence_note.
-
-    Only include products/rules that need correction or annotation.
-    """
-
-    products: List[EnrichedProduct] = Field(
-        default_factory=list,
-        description="Products that need name/type correction or rule annotation.",
-    )
-
-    class Config:
-        json_schema_extra = {
-            "title": "Pass 3 Codegen Enrichment",
-            "description": "AI-assisted corrections for product names/types and rule conditions after codegen extraction",
-        }
-
-
-# ============================================================================
 # MERGE LOGIC: Combine passes into RawExtraction
 # ============================================================================
 

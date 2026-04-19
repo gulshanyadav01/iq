@@ -39,43 +39,39 @@ def _load_env():
         pass  # dotenv not installed, rely on system env
 
 
-def get_llm_provider() -> str:
-    """Get the configured LLM provider from environment"""
-    _load_env()
-    provider = os.environ.get("LLM_PROVIDER", "gemini").lower()
+def get_llm_provider(provider: Optional[str] = None) -> str:
+    """Get the LLM provider. Explicit argument takes precedence over LLM_PROVIDER env var."""
+    if provider:
+        p = provider.lower()
+        if p in ["openai", "gemini"]:
+            return p
+        logger.warning(f"Invalid llm_provider '{p}'. Defaulting to 'gemini'.")
+        return "gemini"
 
-    if provider not in ["openai", "gemini"]:
+    _load_env()
+    p = os.environ.get("LLM_PROVIDER", "gemini").lower()
+    if p not in ["openai", "gemini"]:
         logger.warning(
-            f"Invalid LLM_PROVIDER '{provider}'. Defaulting to 'gemini'. "
+            f"Invalid LLM_PROVIDER '{p}'. Defaulting to 'gemini'. "
             f"Valid options: 'openai', 'gemini'"
         )
-        provider = "gemini"
+        p = "gemini"
 
-    logger.info(f"Using LLM provider: {provider}")
-    return provider
+    logger.info(f"Using LLM provider: {p}")
+    return p
 
 
-def get_llm_service(**kwargs):
+def get_llm_service(provider: Optional[str] = None, **kwargs):
     """
-    Factory function to get the appropriate LLM service based on environment configuration.
+    Factory function to get the appropriate LLM service.
 
-    Returns:
-        Either GeminiService or OpenAIService instance based on LLM_PROVIDER env var
-
-    Raises:
-        LLMServiceError: If the required provider library is not installed or configured
-
-    Usage:
-        # Get service based on LLM_PROVIDER env var
-        service = get_llm_service()
-        response = service.generate_content("Your prompt here")
-
-        # Override with specific kwargs
-        service = get_llm_service(max_retries=5)
+    Args:
+        provider: Explicit provider override ("openai" or "gemini").
+                  Falls back to LLM_PROVIDER env var if not given.
     """
-    provider = get_llm_provider()
+    resolved = get_llm_provider(provider)
 
-    if provider == "openai":
+    if resolved == "openai":
         try:
             from cins.processors.llm_services.openai import OpenAIService
 
@@ -99,11 +95,11 @@ def get_llm_service(**kwargs):
             )
 
 
-def get_config_for_extraction():
-    """Get extraction configuration for the current provider"""
-    provider = get_llm_provider()
+def get_config_for_extraction(provider: Optional[str] = None):
+    """Get extraction configuration for the given provider (or env default)."""
+    resolved = get_llm_provider(provider)
 
-    if provider == "openai":
+    if resolved == "openai":
         from cins.processors.llm_services.openai import OpenAIService
 
         return OpenAIService.config_for_extraction()
@@ -113,11 +109,11 @@ def get_config_for_extraction():
         return GeminiService.config_for_extraction()
 
 
-def get_config_for_raw_extraction():
-    """Get raw extraction configuration for the current provider"""
-    provider = get_llm_provider()
+def get_config_for_raw_extraction(provider: Optional[str] = None):
+    """Get raw extraction configuration for the given provider (or env default)."""
+    resolved = get_llm_provider(provider)
 
-    if provider == "openai":
+    if resolved == "openai":
         from cins.processors.llm_services.openai import OpenAIService
 
         return OpenAIService.config_for_raw_extraction()
@@ -127,11 +123,11 @@ def get_config_for_raw_extraction():
         return GeminiService.config_for_raw_extraction()
 
 
-def get_config_for_layout_detection():
-    """Get layout detection configuration for the current provider"""
-    provider = get_llm_provider()
+def get_config_for_layout_detection(provider: Optional[str] = None):
+    """Get layout detection configuration for the given provider (or env default)."""
+    resolved = get_llm_provider(provider)
 
-    if provider == "openai":
+    if resolved == "openai":
         from cins.processors.llm_services.openai import OpenAIService
 
         return OpenAIService.config_for_layout_detection()
@@ -141,11 +137,11 @@ def get_config_for_layout_detection():
         return GeminiService.config_for_layout_detection()
 
 
-def get_config_for_sheet_classification():
-    """Get sheet classification configuration for the current provider"""
-    provider = get_llm_provider()
+def get_config_for_sheet_classification(provider: Optional[str] = None):
+    """Get sheet classification configuration for the given provider (or env default)."""
+    resolved = get_llm_provider(provider)
 
-    if provider == "openai":
+    if resolved == "openai":
         from cins.processors.llm_services.openai import OpenAIService
 
         return OpenAIService.config_for_sheet_classification()
@@ -155,11 +151,11 @@ def get_config_for_sheet_classification():
         return GeminiService.config_for_sheet_classification()
 
 
-def get_config_for_code_generation():
-    """Get code-generation fallback configuration for the current provider"""
-    provider = get_llm_provider()
+def get_config_for_code_generation(provider: Optional[str] = None):
+    """Get code-generation fallback configuration for the given provider (or env default)."""
+    resolved = get_llm_provider(provider)
 
-    if provider == "openai":
+    if resolved == "openai":
         from cins.processors.llm_services.openai import OpenAIService
 
         return OpenAIService.config_for_code_generation()

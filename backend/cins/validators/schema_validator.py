@@ -194,7 +194,7 @@ class SchemaValidator:
                 "document_metadata"
             )
 
-        if "provider" in self.current_doc:
+        if self.current_doc.get("provider"):
             self._validate_required_in_object(
                 self.current_doc["provider"],
                 ["provider_id", "provider_name"],
@@ -422,7 +422,7 @@ class SchemaValidator:
                     suggestion="Use only alphanumeric, underscore, and hyphen"
                 ))
 
-        if "provider" in self.current_doc:
+        if self.current_doc.get("provider"):
             provider_id = self.current_doc["provider"].get("provider_id")
             if provider_id and not id_pattern.match(provider_id):
                 self.issues.append(ValidationIssue(
@@ -496,7 +496,7 @@ class SchemaValidator:
         # Validate email format
         email_pattern = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
 
-        if "provider" in self.current_doc:
+        if self.current_doc.get("provider"):
             contact_email = self.current_doc["provider"].get("contact_email")
             if contact_email and not email_pattern.match(contact_email):
                 self.issues.append(ValidationIssue(
@@ -662,7 +662,7 @@ class SchemaValidator:
     def _validate_completeness(self):
         """Validate data completeness"""
         # Check for provider contact info
-        if "provider" in self.current_doc:
+        if self.current_doc.get("provider"):
             provider = self.current_doc["provider"]
             if not provider.get("contact_email") and not provider.get("contact_phone"):
                 self.issues.append(ValidationIssue(

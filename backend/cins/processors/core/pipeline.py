@@ -292,7 +292,7 @@ class Pipeline:
         file_path = Path(file_path)
         provider = _extract_provider_from_path(str(file_path))
 
-        indexer = ContentIndexer(self.indexed_dir)
+        indexer = ContentIndexer(self.indexed_dir, llm_provider=self.llm_provider)
         document_id = indexer._sanitize_filename(file_path.stem)
 
         indexed_doc = indexer.get_indexed_document(document_id, provider)
@@ -324,7 +324,7 @@ class Pipeline:
         """
         file_path = Path(file_path)
         provider = _extract_provider_from_path(str(file_path))
-        indexer = ContentIndexer(self.indexed_dir)
+        indexer = ContentIndexer(self.indexed_dir, llm_provider=self.llm_provider)
         return indexer.index_document(
             str(file_path),
             provider,
@@ -421,7 +421,7 @@ class Pipeline:
 
         logger.info("Running Pass 3 (products & rules extraction)")
         commission_data_content = pass3_prompt_file.read_text(encoding="utf-8")
-        service = get_llm_service()
+        service = get_llm_service(provider=self.llm_provider)
         rules_extraction = _extract_pass3_products_and_rules(
             commission_data_content,
             service,
@@ -495,7 +495,7 @@ class Pipeline:
         on_sheet_complete = self._on_sheet_complete_callback
 
         try:
-            model_used = get_llm_service().model
+            model_used = get_llm_service(provider=self.llm_provider).model
         except Exception:
             model_used = ""
 
@@ -511,7 +511,7 @@ class Pipeline:
             3: get_pass3_rules_prompt(),
         }
 
-        def _on_pass_done(pass_num, result_dict, duration):
+        def _on_pass_done(pass_num, result_dict, duration, extra=None):
             entry = {
                 "sheet_name": sheet_name,
                 "attachment_name": "",
@@ -523,10 +523,25 @@ class Pipeline:
                 "duration": duration,
                 "status": "completed",
                 "error": "",
+                "extraction_method": (extra or {}).get("extraction_method", "llm"),
+                "codegen_code": (extra or {}).get("codegen_code", ""),
             }
             sheet_pass_results.append(entry)
             if on_sheet_complete:
                 on_sheet_complete([entry])
+
+        def _on_pass_start(pass_num):
+            from cins.processors.llm_services.langfuse_client import (
+                set_trace_context, get_trace_context, make_pass_trace_id,
+            )
+            ctx = get_trace_context()
+            if ctx["session_id"]:
+                set_trace_context(
+                    session_id=ctx["session_id"],
+                    trace_id=make_pass_trace_id(ctx["session_id"], pass_num),
+                    trace_name=f"pass-{pass_num}",
+                    metadata={"document_id": ctx["session_id"], "pass": pass_num},
+                )
 
         source_type = indexed_doc.metadata.get("source_type")
         pass_result = extract_multi_pass(
@@ -535,6 +550,8 @@ class Pipeline:
             output_dir=str(output_dir),
             source_type=source_type,
             on_pass_complete=_on_pass_done,
+            on_pass_start=_on_pass_start,
+            provider=self.llm_provider,
         )
 
         if isinstance(pass_result, dict) and "cics" in pass_result:
@@ -646,7 +663,7 @@ class Pipeline:
 
                 from cins.processors.llm_services.factory import get_llm_service
                 try:
-                    model_used = get_llm_service().model
+                    model_used = get_llm_service(provider=self.llm_provider).model
                 except Exception:
                     model_used = ""
 
@@ -656,7 +673,7 @@ class Pipeline:
                     3: pass3_prompt,
                 }
 
-                def _on_pass_done(pass_num, result_dict, duration):
+                def _on_pass_done(pass_num, result_dict, duration, extra=None):
                     entry = {
                         "sheet_name": sheet_name,
                         "attachment_name": attachment_name,
@@ -668,10 +685,25 @@ class Pipeline:
                         "duration": duration,
                         "status": "completed",
                         "error": "",
-                    }
+                        "extraction_method": (extra or {}).get("extraction_method", "llm"),
+                        "codegen_code": (extra or {}).get("codegen_code", ""),
+                            }
                     sheet_pass_results.append(entry)
                     if on_sheet_complete:
                         on_sheet_complete([entry])
+
+                def _on_pass_start(pass_num):
+                    from cins.processors.llm_services.langfuse_client import (
+                        set_trace_context, get_trace_context, make_pass_trace_id,
+                    )
+                    ctx = get_trace_context()
+                    if ctx["session_id"]:
+                        set_trace_context(
+                            session_id=ctx["session_id"],
+                            trace_id=make_pass_trace_id(ctx["session_id"], pass_num, sheet_name, attachment_name),
+                            trace_name=f"pass-{pass_num}-{safe_name}",
+                            metadata={"document_id": ctx["session_id"], "pass": pass_num, "sheet": sheet_name, "attachment": attachment_name},
+                        )
 
                 pass_result = extract_multi_pass(
                     pass1_prompt,
@@ -683,6 +715,8 @@ class Pipeline:
                     master_data_content=pass2_prompt,
                     commission_data_content=pass3_prompt,
                     on_pass_complete=_on_pass_done,
+                    on_pass_start=_on_pass_start,
+                    provider=self.llm_provider,
                 )
 
                 # pass_result is a dict when return_passes=True
