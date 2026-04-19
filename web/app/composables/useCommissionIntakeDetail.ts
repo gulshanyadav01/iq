@@ -57,6 +57,7 @@ export interface ExtractionPass {
   prompt_text: string
   system_instruction: string
   llm_model_used: string
+  extraction_method: 'llm' | 'codegen'
   duration_seconds: number
   error: string
 }

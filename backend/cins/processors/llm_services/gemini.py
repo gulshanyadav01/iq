@@ -274,7 +274,7 @@ class GeminiService(LLMServiceMixin):
 
         ctx = get_trace_context()
         prompt_input = config.system_instruction if (config and config.system_instruction) else (contents if isinstance(contents, str) else None)
-        generation = start_generation(
+        generation, prop_ctx = start_generation(
             name=ctx["trace_name"] or "gemini-generate",
             model=model,
             input=prompt_input,
@@ -303,6 +303,7 @@ class GeminiService(LLMServiceMixin):
                         } if usage else None,
                     )
                     generation.end()
+                    prop_ctx.__exit__(None, None, None)
 
                 return text
 
@@ -323,6 +324,7 @@ class GeminiService(LLMServiceMixin):
         if generation:
             generation.update(level="ERROR", status_message=str(last_error))
             generation.end()
+            prop_ctx.__exit__(None, None, None)
 
         raise GeminiAPIError(
             f"Gemini API error after {self._max_retries} attempts: {last_error}"

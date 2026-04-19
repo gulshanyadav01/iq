@@ -300,7 +300,7 @@ class OpenAIService(LLMServiceMixin):
             (m["content"] for m in reversed(messages) if m.get("role") == "system"),
             messages[-1]["content"] if messages else None,
         )
-        generation = start_generation(
+        generation, prop_ctx = start_generation(
             name=ctx["trace_name"] or "openai-generate",
             model=request_kwargs["model"],
             input=prompt_input,
@@ -326,6 +326,7 @@ class OpenAIService(LLMServiceMixin):
                         } if usage else None,
                     )
                     generation.end()
+                    prop_ctx.__exit__(None, None, None)
 
                 return text
 
@@ -346,6 +347,7 @@ class OpenAIService(LLMServiceMixin):
         if generation:
             generation.update(level="ERROR", status_message=str(last_error))
             generation.end()
+            prop_ctx.__exit__(None, None, None)
 
         raise OpenAIAPIError(
             f"OpenAI API error after {self._max_retries} attempts: {last_error}"

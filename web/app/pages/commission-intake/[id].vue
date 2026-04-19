@@ -132,7 +132,10 @@
                     <summary class="text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 cursor-pointer select-none">
                       Show content
                     </summary>
-                    <pre class="mt-2 text-xs bg-gray-50 dark:bg-gray-900 p-4 rounded-lg overflow-auto max-h-64 leading-relaxed whitespace-pre-wrap">{{ (content as string).slice(0, 3000) }}{{ (content as string).length > 3000 ? '\n…(truncated)' : '' }}</pre>
+                    <div class="mt-2 overflow-x-auto max-h-64 overflow-y-auto rounded-lg bg-gray-50 dark:bg-gray-900 p-4">
+                      <!-- eslint-disable-next-line vue/no-v-html -->
+                      <div class="prose prose-xs dark:prose-invert max-w-none text-xs whitespace-nowrap [&_table]:border-collapse [&_td]:border [&_td]:border-gray-200 [&_td]:dark:border-gray-700 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-200 [&_th]:dark:border-gray-700 [&_th]:px-2 [&_th]:py-1 [&_th]:bg-gray-100 [&_th]:dark:bg-gray-800" v-html="renderMd((content as string).slice(0, 3000) + ((content as string).length > 3000 ? '\n…(truncated)' : ''))" />
+                    </div>
                   </details>
                 </div>
               </template>
@@ -166,7 +169,10 @@
                         <summary class="text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 cursor-pointer select-none">
                           Show content
                         </summary>
-                        <pre class="mt-2 text-xs bg-gray-50 dark:bg-gray-900 p-4 rounded-lg overflow-auto max-h-64 leading-relaxed whitespace-pre-wrap">{{ (content as string).slice(0, 3000) }}{{ (content as string).length > 3000 ? '\n…(truncated)' : '' }}</pre>
+                        <div class="mt-2 overflow-x-auto max-h-64 overflow-y-auto rounded-lg bg-gray-50 dark:bg-gray-900 p-4">
+                          <!-- eslint-disable-next-line vue/no-v-html -->
+                          <div class="prose prose-xs dark:prose-invert max-w-none text-xs whitespace-nowrap [&_table]:border-collapse [&_td]:border [&_td]:border-gray-200 [&_td]:dark:border-gray-700 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-200 [&_th]:dark:border-gray-700 [&_th]:px-2 [&_th]:py-1 [&_th]:bg-gray-100 [&_th]:dark:bg-gray-800" v-html="renderMd((content as string).slice(0, 3000) + ((content as string).length > 3000 ? '\n…(truncated)' : ''))" />
+                        </div>
                       </details>
                     </div>
                   </div>
@@ -228,11 +234,12 @@
               <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between" :class="{ 'border-t-0': currentPassSheets.length > 1 }">
                 <div>
                   <h2 class="text-sm font-semibold text-gray-900 dark:text-white">{{ passLabels[activeStage] }}</h2>
-                  <p class="text-xs text-gray-500 mt-0.5">
-                    {{ currentPass.llm_model_used || doc.llm_provider }}
-                    <span v-if="currentPass.duration_seconds"> · {{ currentPass.duration_seconds.toFixed(1) }}s</span>
-                    <span v-if="currentPass.status && currentPass.status !== 'completed'" :class="['ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase', getPassStatusBadge(currentPass.status)]">{{ currentPass.status }}</span>
-                  </p>
+                  <div class="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                    <span class="text-xs text-gray-500">{{ currentPass.llm_model_used || doc.llm_provider }}</span>
+                    <span v-if="currentPass.duration_seconds" class="text-xs text-gray-500"> · {{ currentPass.duration_seconds.toFixed(1) }}s</span>
+                    <span v-if="currentPass.extraction_method === 'codegen'" class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 uppercase">codegen</span>
+                    <span v-if="currentPass.status && currentPass.status !== 'completed'" :class="['px-1.5 py-0.5 rounded text-[10px] font-medium uppercase', getPassStatusBadge(currentPass.status)]">{{ currentPass.status }}</span>
+                  </div>
                 </div>
                 <div class="flex items-center gap-2">
                   <button
@@ -641,7 +648,10 @@
             User Prompt
           </button>
         </div>
-        <pre class="text-xs bg-gray-50 dark:bg-gray-900 p-4 rounded-lg overflow-auto max-h-[60vh] leading-relaxed whitespace-pre-wrap">{{ promptModalTab === 'system' ? (currentPass.system_instruction || '—') : (currentPass.prompt_text || '—') }}</pre>
+        <div class="overflow-x-auto overflow-y-auto max-h-[60vh] rounded-lg bg-gray-50 dark:bg-gray-900 p-4">
+          <!-- eslint-disable-next-line vue/no-v-html -->
+          <div class="prose prose-xs dark:prose-invert max-w-none text-xs [&_table]:border-collapse [&_td]:border [&_td]:border-gray-200 [&_td]:dark:border-gray-700 [&_td]:px-2 [&_td]:py-1 [&_td]:whitespace-nowrap [&_th]:border [&_th]:border-gray-200 [&_th]:dark:border-gray-700 [&_th]:px-2 [&_th]:py-1 [&_th]:bg-gray-100 [&_th]:dark:bg-gray-800 [&_th]:whitespace-nowrap" v-html="renderMd(promptModalTab === 'system' ? (currentPass.system_instruction || '—') : (currentPass.prompt_text || '—'))" />
+        </div>
       </div>
     </template>
   </UModal>
@@ -650,8 +660,15 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import MarkdownIt from 'markdown-it'
 import { useCommissionIntakeDetail } from '~/composables/useCommissionIntakeDetail'
 import type { OverlapIssue } from '~/composables/useCommissionIntakeDetail'
+
+const md = new MarkdownIt({ html: false, breaks: false })
+
+function renderMd(content: string): string {
+  return md.render(content)
+}
 
 definePageMeta({ layout: 'default', middleware: 'auth' })
 

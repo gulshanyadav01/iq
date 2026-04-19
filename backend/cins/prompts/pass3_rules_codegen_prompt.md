@@ -63,7 +63,12 @@ customer_type_text (str) - "new", "renewal", "rollover", "port", ""
 channel_text       (str) - "online", "offline", ""
 coverage_type_text (str) - "comprehensive", "TP", "SAOD", "third party", ""
 state_text         (str) - state name or code as found in document
-conditions         (dict) - key-value for grid dimensions without dedicated field
+conditions         (dict) - key-value for grid dimensions. Use ONLY these canonical keys:
+                     "fuel_type", "ncb", "cpa", "zero_dep", "vehicle_sub_class", "vehicle_carrier",
+                     "number_of_wheels", "school_bus_type", "cc", "gvw", "seating_capacity",
+                     "vehicle_age", "vehicle_make", "vehicle_model", "od_term", "tp_term",
+                     "deal_parameter", "rto"
+                     Do NOT invent keys outside this list
 other_conditions   (str) - free-text conditions that don't fit key-value structure
 applied_on_text    (str) - "Net Premium", "OD Premium", "Total Premium", ""
 gst_applicable     (bool) - True or False
@@ -85,6 +90,7 @@ Allowed builtins: `range`, `len`, `list`, `dict`, `str`, `int`, `float`, `bool`,
 String methods are allowed on string instances (`.split()`, `.strip()`, `.startswith()`, etc.)
 
 FORBIDDEN:
+
 - `import`, `from ... import`
 - `exec`, `eval`, `compile`, `open`, `__import__`
 - `getattr`, `setattr`, `globals`, `locals`, `vars`
@@ -143,11 +149,55 @@ def extract_notes(tables):
                 for line in lines if line.strip() and "---" not in line
             ))
     return " ".join(parts).strip()
+
+def parse_cc_range(header):
+    """
+    Extract a CC or KW range string from a column header.
+    Returns a normalized range string if the header encodes a numeric engine range, else "".
+    Examples:
+      "150cc"       -> "150"
+      "150_350cc"   -> "150-350"
+      "150-350cc"   -> "150-350"
+      "> 16 KW"     -> ">16"
+      "7 KW Bike"   -> "7"
+      "SCOOTER"     -> ""
+      "Hero OEM"    -> ""
+    """
+    h = header.strip().upper()
+    # Remove unit suffixes to isolate numbers
+    for unit in ("CC", "KW"):
+        h = h.replace(unit, " ")
+    h = h.strip()
+    # above/greater-than pattern
+    for prefix in (">", ">=", "ABOVE", "GREATER THAN", "MORE THAN"):
+        if h.startswith(prefix):
+            rest = h[len(prefix):].strip().split()[0] if h[len(prefix):].strip() else ""
+            digits = "".join(c for c in rest if c.isdigit() or c == ".")
+            if digits:
+                return ">" + digits
+    # range pattern: two numbers separated by _, -, or space
+    parts = h.replace("_", " ").replace("-", " ").split()
+    nums = ["".join(c for c in p if c.isdigit() or c == ".") for p in parts if any(c.isdigit() for c in p)]
+    if len(nums) >= 2:
+        return nums[0] + "-" + nums[1]
+    if len(nums) == 1:
+        return nums[0]
+    return ""
 ```
 
 ---
 
 ## TABLE PARSING PATTERN
+
+### Multi-level header grids
+
+Some commission tables use 2–4 header rows encoding multiple dimensions (e.g. make group, CC range, sub-class). When you encounter such a table:
+
+- Inspect ALL header rows to understand what each column encodes before writing parsing logic.
+- Use `parse_cc_range(header)` on each column header to detect CC/KW ranges. If it returns a non-empty string, store it as `conditions["cc"]`.
+- If a header is a brand/make name (no digits, not a CC range), store it as `conditions["vehicle_make"]`.
+- If a header identifies a vehicle sub-class (e.g. "SCOOTER", "BIKE", "BUS"), store it as `conditions["vehicle_sub_class"]`.
+- A single column may encode multiple dimensions (e.g. "7 KW Bike" = cc + sub-class); split and assign each to its canonical key.
 
 After splitting tables, for each `[type: commission]` table:
 

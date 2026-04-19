@@ -64,6 +64,7 @@ class ExtractionPassSerializer(serializers.ModelSerializer):
             "prompt_text",
             "system_instruction",
             "llm_model_used",
+            "extraction_method",
             "duration_seconds",
             "error",
             "created_at",

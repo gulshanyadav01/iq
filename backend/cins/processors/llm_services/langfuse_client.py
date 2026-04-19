@@ -112,20 +112,24 @@ def get_trace_context() -> dict:
 def start_generation(name: str, model: str, input: Optional[str], metadata: Optional[dict] = None):
     """
     Start a Langfuse generation observation attached to the current trace context.
-    Returns the observation object (call .end() when done), or None if Langfuse is disabled.
-    Uses TraceContext to attach to the trace_id set via set_trace_context().
+    Returns (observation, propagate_ctx) — caller must call propagate_ctx.__exit__ then observation.end().
+    Returns (None, None) if Langfuse is disabled or trace_id is unset.
+    session_id is set via propagate_attributes() per Langfuse v4 docs.
     """
     client = get_langfuse()
     if not client:
-        return None
+        return None, None
     ctx = get_trace_context()
     trace_id = ctx.get("trace_id")
     if not trace_id:
-        return None
+        return None, None
     try:
+        from langfuse import propagate_attributes
         from langfuse.types import TraceContext
 
-        return client.start_observation(
+        prop_ctx = propagate_attributes(session_id=ctx.get("session_id"))
+        prop_ctx.__enter__()
+        obs = client.start_observation(
             trace_context=TraceContext(trace_id=trace_id),
             name=name,
             as_type="generation",
@@ -133,9 +137,10 @@ def start_generation(name: str, model: str, input: Optional[str], metadata: Opti
             input=input,
             metadata=metadata or ctx.get("metadata"),
         )
+        return obs, prop_ctx
     except Exception as exc:
         logger.warning("Langfuse start_generation failed: %s", exc)
-        return None
+        return None, None
 
 
 def flush() -> None:
