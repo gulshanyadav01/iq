@@ -234,14 +234,19 @@ export function useCommissionIntakeDetail() {
     const meta = d.document_metadata as Record<string, unknown> | undefined
     const provider = d.provider as Record<string, unknown> | undefined
     const period = d.commission_period as Record<string, unknown> | undefined
-    return [
+    const changeRef = d.change_reference as Record<string, unknown> | undefined
+    const rows = [
       { key: 'document_id', value: meta?.document_id },
-      { key: 'provider', value: (provider as any)?.name },
-      { key: 'period_label', value: (period as any)?.label },
+      { key: 'provider', value: (provider as any)?.provider_name },
+      { key: 'period_label', value: (period as any)?.period_label },
       { key: 'effective_from', value: (period as any)?.effective_from },
       { key: 'effective_to', value: (period as any)?.effective_to },
       { key: 'source_file', value: meta?.source_file },
     ]
+    if (changeRef?.is_inherited) {
+      rows.push({ key: 'inherited_from', value: changeRef.inheritance_notes as string || 'Rates continued from previous period' })
+    }
+    return rows
   })
 
   const cicsProducts = computed(() => {

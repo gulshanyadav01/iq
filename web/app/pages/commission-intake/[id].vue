@@ -348,6 +348,17 @@
 
               <!-- Summary tab -->
               <div v-if="activeCicsTab === 'summary'" class="p-6 space-y-6">
+                <!-- Inherited rates banner -->
+                <div
+                  v-if="(doc.cics_result!.cics_doc as any)?.change_reference?.is_inherited"
+                  class="flex items-start gap-2.5 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl px-4 py-3 text-xs text-amber-800 dark:text-amber-300"
+                >
+                  <UIcon name="i-lucide-copy" class="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <span class="font-semibold">Rates inherited from previous period — no new products in this document.</span>
+                    <span v-if="(doc.cics_result!.cics_doc as any)?.change_reference?.inheritance_notes" class="ml-1 text-amber-700 dark:text-amber-400">{{ (doc.cics_result!.cics_doc as any).change_reference.inheritance_notes }}</span>
+                  </div>
+                </div>
                 <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
                   <div v-for="metric in cicsMetrics" :key="metric.label" class="bg-gray-50 dark:bg-gray-800/50 rounded-xl p-4">
                     <p class="text-xs text-gray-500 dark:text-gray-400">{{ metric.label }}</p>
@@ -369,7 +380,12 @@
 
               <!-- Products tab -->
               <div v-else-if="activeCicsTab === 'products'" class="p-6 space-y-4 overflow-auto max-h-[60vh]">
-                <div v-if="!cicsProducts.length" class="text-sm text-gray-500">No products found.</div>
+                <div v-if="!cicsProducts.length" class="text-sm text-gray-500">
+                  <span v-if="(doc.cics_result!.cics_doc as any)?.change_reference?.is_inherited">
+                    No products extracted — rates are inherited from a previous period. See the Summary tab for details.
+                  </span>
+                  <span v-else>No products found.</span>
+                </div>
                 <details
                   v-for="product in cicsProducts"
                   :key="product.product_code"
