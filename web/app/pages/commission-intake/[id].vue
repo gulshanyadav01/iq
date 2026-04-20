@@ -20,8 +20,16 @@
             <span v-if="doc?.llm_provider" class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">{{ doc.llm_provider }}</span>
           </div>
         </div>
-        <!-- Action buttons: Re-index / Extract -->
+        <!-- Action buttons: Export Excel (primary, when complete) / Re-index / Extract -->
         <div v-if="doc && !isInFlight(doc.status)" class="flex items-center gap-2">
+          <button
+            v-if="doc.cics_result"
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-primary-600 hover:bg-primary-700 text-white transition"
+            @click="downloadExcel"
+          >
+            <UIcon name="i-lucide-table" class="w-3.5 h-3.5" />
+            Export Excel
+          </button>
           <button
             :disabled="actionLoading !== null"
             class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-400 transition disabled:opacity-50 disabled:cursor-not-allowed"
@@ -698,7 +706,7 @@ const {
   validationBannerClass, validationBannerIcon, validationBannerText,
   isInFlight, getStatusBadgeClass, formatStatus, getPassStatusBadge, getSeverityBadge,
   getSheetClassification, getSheetClassBadge, formatCommissionValue, formatConditions,
-  sheetPassStatus, copyJson, downloadJson,
+  sheetPassStatus, copyJson, downloadJson, downloadExcel,
   triggerIndex, triggerExtract, triggerRerunPass, triggerTransform, triggerValidate,
 } = useCommissionIntakeDetail()
 

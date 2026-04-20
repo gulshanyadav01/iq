@@ -1,4 +1,9 @@
+import io
+
+from django.http import FileResponse
 from drf_spectacular.utils import extend_schema
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -210,3 +215,156 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             )
         run_validation.apply_async(args=[str(instance.id)], queue="commission_intake")
         return Response(CommissionDocumentSerializer(instance).data)
+
+    @extend_schema(exclude=True)
+    @action(detail=True, methods=["get"], url_path="export-excel")
+    def export_excel(self, request, *args, **kwargs):
+        """Export flattened CICS products/rules as an Excel workbook matching the grid dump format."""
+        from commission_intake.models import CICSResult
+
+        instance = self.get_object()
+        if not CICSResult.objects.filter(document=instance).exists():
+            return Response({"detail": "No CICS result available."}, status=status.HTTP_404_NOT_FOUND)
+
+        cics_doc = instance.cics_result.cics_doc or {}
+        provider_name = (cics_doc.get("provider") or {}).get("provider_name", "")
+        period = cics_doc.get("commission_period") or {}
+        deal_start = period.get("effective_from", "")
+        deal_end = period.get("effective_to", "")
+
+        headers = [
+            "DealId", "ReferenceDealId", "DealParameter", "DealStartDate", "DealEndDate",
+            "Insurer", "Product", "SubProduct",
+            "VehicleSubClass", "PolicyType", "State", "RTO", "NumberOfWheels",
+            "GVWStartRange", "GVWEndRange", "CCStartRange", "CCEndRange",
+            "SeatingCapacityStartRange", "SeatingCapacityEndRange",
+            "SchoolBusType", "BookingMode", "ZeroDep", "NCB", "CPA",
+            "FuelType", "VehicleAge", "VehicleMake", "VehicleModel",
+            "VehicleCarrier", "BusinessType", "ODTerm", "TPTerm",
+            "ODPercentage", "TPPercentage", "NetPercentage",
+            "TPLessThanEqual3YearPercentage", "TPGreaterThanEqual4YearPercentage", "FlatAmount",
+        ]
+
+        def cv(v):
+            """Normalise a cell value: join lists, stringify booleans, blank out None."""
+            if v is None:
+                return ""
+            if isinstance(v, list):
+                return ",".join(str(i) for i in v)
+            if isinstance(v, bool):
+                return "Yes" if v else "No"
+            return v
+
+        def outcome_percentages(outcome, deal_param):
+            """
+            Map a single CommissionOutcome to the 6 commission columns.
+            Column assignment is driven by deal_parameter and commission_type.
+            """
+            od_pct = tp_pct = net_pct = tp_lte3 = tp_gte4 = flat = ""
+            if not outcome:
+                return od_pct, tp_pct, net_pct, tp_lte3, tp_gte4, flat
+
+            pct = outcome.get("percentage_value")
+            flat_val = outcome.get("flat_value")
+            c_type = outcome.get("commission_type", "")
+
+            params = [p.strip().lower() for p in (deal_param or "").split(",") if p.strip()]
+
+            if c_type == "flat" and flat_val is not None:
+                flat = flat_val
+            elif "od" in params:
+                od_pct = pct if pct is not None else ""
+            elif "net" in params:
+                net_pct = pct if pct is not None else ""
+            elif "tp" in params or "regular-tp" in params:
+                tp_pct = pct if pct is not None else ""
+            elif "tp-with-vehicle-age" in params:
+                # split between lte3 and gte4 if tiers present, else put in both
+                tiers = outcome.get("tiers") or []
+                if tiers:
+                    for tier in tiers:
+                        thresh = (tier.get("threshold") or {})
+                        t_max = thresh.get("max")
+                        if t_max is not None and t_max <= 3:
+                            tp_lte3 = tier.get("value", "")
+                        else:
+                            tp_gte4 = tier.get("value", "")
+                else:
+                    tp_lte3 = pct if pct is not None else ""
+                    tp_gte4 = pct if pct is not None else ""
+            else:
+                # fallback: percentage goes to OD column
+                if pct is not None:
+                    od_pct = pct
+
+            return od_pct, tp_pct, net_pct, tp_lte3, tp_gte4, flat
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Commission Rules"
+
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(fill_type="solid", fgColor="1F5C99")
+        for col_idx, col_name in enumerate(headers, start=1):
+            cell = ws.cell(row=1, column=col_idx, value=col_name)
+            cell.font = header_font
+            cell.fill = header_fill
+
+        row_idx = 2
+        for product in cics_doc.get("products", []):
+            product_name = product.get("product_name", "")
+            sub_product = product.get("sub_category", "")
+            for rule in product.get("commission_rules", []):
+                conditions = rule.get("conditions") or {}
+                outcome = rule.get("outcome") or {}
+                deal_param = cv(conditions.get("deal_parameter"))
+                od_pct, tp_pct, net_pct, tp_lte3, tp_gte4, flat = outcome_percentages(outcome, deal_param)
+
+                row = [
+                    "",                                  # DealId
+                    "",                                  # ReferenceDealId
+                    deal_param,                          # DealParameter
+                    deal_start,                          # DealStartDate
+                    deal_end,                            # DealEndDate
+                    provider_name,                       # Insurer
+                    product_name,                        # Product
+                    sub_product,                         # SubProduct
+                    cv(conditions.get("vehicle_sub_class")),
+                    cv(conditions.get("policy_type")),
+                    cv(conditions.get("state")),
+                    cv(conditions.get("rto")),
+                    cv(conditions.get("number_of_wheels")),
+                    cv(conditions.get("gvw_start_range")),
+                    cv(conditions.get("gvw_end_range")),
+                    cv(conditions.get("cc_start_range")),
+                    cv(conditions.get("cc_end_range")),
+                    cv(conditions.get("seating_capacity_start_range")),
+                    cv(conditions.get("seating_capacity_end_range")),
+                    cv(conditions.get("school_bus_type")),
+                    cv(conditions.get("booking_mode")),
+                    cv(conditions.get("zero_dep")),
+                    cv(conditions.get("ncb")),
+                    cv(conditions.get("cpa")),
+                    cv(conditions.get("fuel_type")),
+                    cv(conditions.get("vehicle_age")),
+                    cv(conditions.get("vehicle_make")),
+                    cv(conditions.get("vehicle_model")),
+                    cv(conditions.get("vehicle_carrier")),
+                    cv(conditions.get("business_type")),
+                    cv(conditions.get("od_term")),
+                    cv(conditions.get("tp_term")),
+                    od_pct, tp_pct, net_pct, tp_lte3, tp_gte4, flat,
+                ]
+                for col_idx, val in enumerate(row, start=1):
+                    ws.cell(row=row_idx, column=col_idx, value=val)
+                row_idx += 1
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+
+        base_name = instance.original_filename.rsplit(".", 1)[0]
+        filename = f"{base_name}_cics.xlsx"
+        response = FileResponse(buf, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response

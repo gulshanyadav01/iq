@@ -385,6 +385,21 @@ export function useCommissionIntakeDetail() {
     URL.revokeObjectURL(url)
   }
 
+  async function downloadExcel() {
+    if (!doc.value?.cics_result) return
+    const headers = await getAuthHeaders()
+    const blob = await $fetch<Blob>(
+      `${getBaseUrl()}/api/commission-intake/documents/${route.params.id}/export-excel/`,
+      { method: 'GET', headers, responseType: 'blob' }
+    )
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${doc.value.original_filename.replace(/\.[^.]+$/, '')}_cics.xlsx`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   // ── Data fetching + polling ────────────────────────────────────────────────
 
   async function getAuthHeaders() {
@@ -525,7 +540,7 @@ export function useCommissionIntakeDetail() {
     passesForNum, passAggregateStatus,
     isInFlight, getStatusBadgeClass, formatStatus, getPassStatusBadge, getSeverityBadge,
     getSheetClassification, getSheetClassBadge, formatCommissionValue, formatConditions,
-    sheetPassStatus, copyJson, downloadJson, loadDoc,
+    sheetPassStatus, copyJson, downloadJson, downloadExcel, loadDoc,
     triggerIndex, triggerExtract, triggerRerunPass, triggerTransform, triggerValidate,
   }
 }
