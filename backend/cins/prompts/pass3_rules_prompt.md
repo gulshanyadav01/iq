@@ -7,6 +7,17 @@ Stop immediately after closing JSON.
 
 ---
 
+## CONTENT STRUCTURE
+
+The input may contain an **"Email Commission Data"** section followed by a **"Commission Data Sheet"** section.
+
+- **Email Commission Data**: Commission rates, rules, or tables embedded in the email body (not in the attachment). Extract rules from this section the same way as from commission tables.
+- **Commission Data Sheet**: The primary commission data (typically from an Excel attachment).
+
+If both sections are present, extract commission rules from **both**. Rules from the email body and the attachment may complement or overlap — extract each unique rule. If the email body provides rates for specific products/states/conditions that are not in the sheet, extract those as additional rules.
+
+---
+
 ## TABLE TYPES
 
 Tables are labeled `[type: commission]` or `[type: master]`.
@@ -14,10 +25,15 @@ Tables are labeled `[type: commission]` or `[type: master]`.
 - **Commission tables**: extract rules. Each cell = one rule.
 - **Master tables**: reference data only. Do NOT create rules from them.
 
-When a rule references a master table category (e.g., "Group X", "Metro List"), expand the underlying values into `state_text` or the relevant field, and keep the category label in `conditions`.
+When a rule references a master table category/group/tier (e.g., "Group X", "Metro List", "Zone A", "CAT 1"), record the category label **verbatim** in the field where it belongs (`state_text`, `conditions["rto"]`, etc. — match the dimension the master table is classifying). Do NOT walk through master data yourself to produce derived fields — the transformer performs those lookups downstream.
 
-Example: Rule row = "Region A", Commission column = "Category 1" (value 0.15). Master table maps "Region A" → "Entity X, Entity Y".
-→ `state_text = "Entity X, Entity Y"`, `conditions = {"category": "Category 1"}`, `commission_value = "0.15"`
+Rules of thumb:
+
+- If the master table maps a label to **states** (e.g., "Metro List" → "MH, GJ, DL"), put the label in `state_text` as written (e.g., `state_text = "Metro List"`). Do not emit the expanded state list.
+- If the master table maps a label to **RTO codes** (e.g., "CAT 0" → "AN01, AP01, ..."), put the label in `conditions["rto"]` as written (e.g., `conditions = {"rto": "CAT 0, CAT 1"}`). Do not emit the expanded RTO codes, and do not translate RTO codes through to the states they belong to.
+- Keep the commission cell's own label in `conditions` under the dimension it represents (e.g., `conditions["category"] = "Category 1"`).
+
+The principle: pass 3 records what the rule says; the transformer resolves references. Never chain master-data lookups to produce a dimension the rule did not itself name.
 
 ---
 

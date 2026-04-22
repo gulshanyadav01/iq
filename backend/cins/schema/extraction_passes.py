@@ -280,6 +280,11 @@ class MetadataExtraction(BaseModel):
         description="Other conditions that apply to all rules",
     )
 
+    has_commission_data: bool = Field(
+        False,
+        description="True if the source content (e.g. email body) contains commission rates, tables, or rule structures — not just metadata or provider info. Used to determine whether email content should be included in Pass 3 extraction.",
+    )
+
     # Inheritance information
     inherits_from_previous: bool = Field(
         False, description="True if document says rates are same as previous period"

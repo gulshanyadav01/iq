@@ -71,16 +71,36 @@ If a condition varies by:
 
 ---
 
+## Commission Data Detection
+
+Set `has_commission_data: true` if the **email body** (not attachments) contains any of:
+
+* Commission rates, percentages, or grid values (e.g. "12%", "0.15", "15 per cent")
+* Commission tables or rate grids
+* Product-wise commission structures (e.g. "Private Car: 12%", "4W Comp | 12% | 10%")
+* Tier/slab-based commission rules (e.g. "up to 1 lakh: 15%", "slab 1-3: 10%")
+* Conditions tied to specific commission values (e.g. "for comprehensive: 12%, for TP: 8%")
+
+**Do NOT set `has_commission_data: true` if** the email body only contains:
+
+* Metadata (provider name, period, dates)
+* Global settings (GST %, applied on, deductions)
+* References to attachments ("please find attached", "see attached file")
+* Master/reference data (RTO lists, declined lists, state codes)
+* Inheritance/continuation confirmations ("same as last month", "rates unchanged")
+
+---
+
 ## Inheritance Check
 
 Set `inherits_from_previous: true` ONLY if the document **explicitly confirms** rates are unchanged, for example:
 
-* “Rates unchanged”
-* “Same as previous”
-* “Continued from last month”
-* “No change in commission”
-* “Please continue the same grid”
-* “Same structure applies”
+* "Rates unchanged"
+* "Same as previous"
+* "Continued from last month"
+* "No change in commission"
+* "Please continue the same grid"
+* "Same structure applies"
 * "A simple OK message in response to confirmation question"
 
 Then also add a short explanation in `inheritance_note`.

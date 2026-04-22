@@ -501,6 +501,7 @@ def _extract_pass2_via_codegen(
         return s
 
     last_error = None
+    last_generated_code = ""
     current_prompt = user_prompt
 
     for attempt in range(1, MAX_CODEGEN_ATTEMPTS + 1):
@@ -521,6 +522,7 @@ def _extract_pass2_via_codegen(
             continue
 
         generated_code = _strip_fences(raw_code)
+        last_generated_code = generated_code
 
         # Save generated code
         if output_dir:
@@ -609,7 +611,7 @@ def _extract_pass2_via_codegen(
             return MasterDataExtraction(
                 master_data=valid_entries,
                 document_structure_notes="; ".join(error_notes) if error_notes else "",
-            )
+            ), generated_code, user_prompt
 
         # All entries failed validation — retry
         last_error = (
@@ -629,7 +631,7 @@ def _extract_pass2_via_codegen(
     return MasterDataExtraction(
         master_data=[],
         document_structure_notes=f"Code-gen failed after {MAX_CODEGEN_ATTEMPTS} attempts: {last_error}",
-    )
+    ), last_generated_code, user_prompt
 
 
 def _extract_pass2_master_data(
@@ -756,13 +758,14 @@ def _extract_pass2_master_data(
                 "#   → Output appears truncated; falling back to code-gen",
                 file=sys.stderr,
             )
-            return _extract_pass2_via_codegen(
+            extraction, codegen_code, codegen_prompt = _extract_pass2_via_codegen(
                 master_data_content,
                 service,
                 metadata,
                 output_dir=output_dir,
                 filename_prefix=filename_prefix,
             )
+            return extraction, codegen_code, codegen_prompt
 
         raise  # Re-raise to propagate error
 
@@ -770,7 +773,7 @@ def _extract_pass2_master_data(
         f"# Pass 2 complete: {len(master_data_extraction.master_data)} master data entries",
         file=sys.stderr,
     )
-    return master_data_extraction
+    return master_data_extraction, "", user_prompt
 
 
 def _format_master_data_as_text(master_data_extraction):
@@ -1029,7 +1032,7 @@ def _extract_pass3_via_codegen(
                     f"Code-gen LLM call failed after {attempt} attempts: {e}"
                 ],
                 overall_requires_review=True,
-            ), code
+            ), code, user_prompt
 
         code = _strip_fences(raw_code)
         print(f"#   → Generated code: {len(code):,} chars", file=sys.stderr)
@@ -1060,7 +1063,7 @@ def _extract_pass3_via_codegen(
                     f"Code-gen AST validation failed after {attempt} attempts: {e}"
                 ],
                 overall_requires_review=True,
-            ), code
+            ), code, user_prompt
 
         # Execute — pass the full prompt as commission_markdown so code can read it
         try:
@@ -1076,7 +1079,7 @@ def _extract_pass3_via_codegen(
                     f"Code-gen execution failed after {attempt} attempts: {e}"
                 ],
                 overall_requires_review=True,
-            ), code
+            ), code, user_prompt
 
         print(f"#   → Code-gen produced {len(raw_dicts)} raw dicts", file=sys.stderr)
 
@@ -1093,7 +1096,7 @@ def _extract_pass3_via_codegen(
                     f"Code-gen produced no rules after {attempt} attempts"
                 ],
                 overall_requires_review=True,
-            ), code
+            ), code, user_prompt
 
         # Pydantic validation
         valid_entries, error_notes = validate_entries(raw_dicts)
@@ -1119,7 +1122,7 @@ def _extract_pass3_via_codegen(
                 products=[],
                 overall_ambiguities=error_notes,
                 overall_requires_review=True,
-            ), code
+            ), code, user_prompt
 
         # Partial or full success — use what we have
         print(f"#   ✓ Code-gen succeeded on attempt {attempt}", file=sys.stderr)
@@ -1174,7 +1177,7 @@ def _extract_pass3_via_codegen(
         products=products,
         overall_ambiguities=error_notes if error_notes else [],
         overall_requires_review=bool(error_notes),
-    ), code
+    ), code, user_prompt
 
 
 def _extract_pass3_products_and_rules(
@@ -1344,7 +1347,7 @@ def _extract_pass3_products_and_rules(
                     "#   → Token-limit truncation detected → falling back to code generation",
                     file=sys.stderr,
                 )
-                return _extract_pass3_via_codegen(
+                codegen_result, _codegen_code, _codegen_prompt = _extract_pass3_via_codegen(
                     commission_data_content,
                     service,
                     metadata,
@@ -1352,6 +1355,7 @@ def _extract_pass3_products_and_rules(
                     output_dir,
                     filename_prefix,
                 )
+                return codegen_result, _codegen_prompt
 
         raise  # Re-raise for non-truncation parse errors
 
@@ -1389,7 +1393,7 @@ def _extract_pass3_products_and_rules(
             f"#   → {product.product_name}: {len(product.rules)} rules", file=sys.stderr
         )
 
-    return rules_extraction
+    return rules_extraction, user_prompt
 
 
 def extract_multi_pass(
@@ -1403,6 +1407,7 @@ def extract_multi_pass(
     email_and_master_data_content=None,
     master_data_content=None,
     commission_data_content=None,
+    email_body_content=None,
     on_pass_complete=None,
     on_pass_start=None,
     provider=None,
@@ -1418,7 +1423,8 @@ def extract_multi_pass(
     Each pass receives only the relevant content sections:
     - Pass 1: Email content + master data/metadata sections
     - Pass 2: Master data/metadata sections only
-    - Pass 3: Commission data sections only
+    - Pass 3: Commission data sections only (optionally prepended with email
+      body if Pass 1 detects commission data in email via has_commission_data)
 
     Passes:
     - Pass 1: Extract metadata, provider, period, global settings
@@ -1438,6 +1444,8 @@ def extract_multi_pass(
         email_and_master_data_content: Email + master data sections for Pass 1 (if None, uses prompt_text)
         master_data_content: Master data sections only for Pass 2 (if None, uses prompt_text)
         commission_data_content: Commission data sections only for Pass 3 (if None, uses prompt_text)
+        email_body_content: Cleaned email body content (without master data). If provided and
+            Pass 1 detects has_commission_data=True, this is prepended to Pass 3 content.
         on_pass_complete: Optional callable(pass_number, result_dict, duration_seconds) called
             immediately after each pass completes, before the next pass starts.
         **kwargs: Additional arguments
@@ -1515,6 +1523,17 @@ def extract_multi_pass(
         if on_pass_complete:
             on_pass_complete(1, metadata.model_dump(), _pass1_duration, {})
 
+        # If Pass 1 detected commission data in email body, prepend it to Pass 3 content
+        if email_body_content and metadata.has_commission_data:
+            print(
+                "# Pass 1 detected commission data in email — prepending email body to Pass 3",
+                file=sys.stderr,
+            )
+            pass3_content = (
+                f"## Email Commission Data\n\n{email_body_content}"
+                f"\n\n---\n\n{pass3_content}"
+            )
+
         # Early exit: if document states rates are unchanged, skip Pass 2 and Pass 3
         if metadata.inherits_from_previous:
             print("=" * 70, file=sys.stderr)
@@ -1573,26 +1592,32 @@ def extract_multi_pass(
         if on_pass_start:
             on_pass_start(2)
         _pass2_start = time.monotonic()
+        _pass2_codegen_code = ""
+        _pass2_extraction_method = "llm"
+        _pass2_user_prompt = pass2_content
         if _should_use_codegen_for_pass2(pass2_content):
             print(
                 "# Pass 2: Using code-gen mode (proactive threshold triggered)",
                 file=sys.stderr,
             )
-            master_data_extraction = _extract_pass2_via_codegen(
+            master_data_extraction, _pass2_codegen_code, _pass2_user_prompt = _extract_pass2_via_codegen(
                 pass2_content,
                 service,
                 metadata,
                 output_dir=out_path,
                 filename_prefix=filename_prefix,
             )
+            _pass2_extraction_method = "codegen"
         else:
-            master_data_extraction = _extract_pass2_master_data(
+            master_data_extraction, _pass2_codegen_code, _pass2_user_prompt = _extract_pass2_master_data(
                 pass2_content,
                 service,
                 metadata,
                 output_dir=out_path,
                 filename_prefix=filename_prefix,
             )
+            if _pass2_codegen_code:
+                _pass2_extraction_method = "codegen"
         _pass2_duration = time.monotonic() - _pass2_start
 
         if out_path:
@@ -1605,7 +1630,11 @@ def extract_multi_pass(
                 json.dump(master_data_extraction.model_dump(), f, indent=2)
 
         if on_pass_complete:
-            on_pass_complete(2, master_data_extraction.model_dump(), _pass2_duration, {})
+            on_pass_complete(2, master_data_extraction.model_dump(), _pass2_duration, {
+                "extraction_method": _pass2_extraction_method,
+                "codegen_code": _pass2_codegen_code,
+                "user_prompt": _pass2_user_prompt,
+            })
 
         # Pass 3: Products and Rules (commission data sections only)
         # Proactive check: use code-gen mode if content is too large for JSON output
@@ -1614,12 +1643,13 @@ def extract_multi_pass(
         _pass3_start = time.monotonic()
         _pass3_codegen_code = ""
         _pass3_extraction_method = "llm"
+        _pass3_user_prompt = pass3_content
         if _should_use_codegen_for_pass3(pass3_content):
             print(
                 "# Pass 3: Using code-gen mode (proactive threshold triggered)",
                 file=sys.stderr,
             )
-            rules_extraction, _pass3_codegen_code = _extract_pass3_via_codegen(
+            rules_extraction, _pass3_codegen_code, _pass3_user_prompt = _extract_pass3_via_codegen(
                 pass3_content,
                 service,
                 metadata,
@@ -1629,7 +1659,7 @@ def extract_multi_pass(
             )
             _pass3_extraction_method = "codegen"
         else:
-            rules_extraction = _extract_pass3_products_and_rules(
+            rules_extraction, _pass3_user_prompt = _extract_pass3_products_and_rules(
                 pass3_content,
                 service,
                 metadata,
@@ -1652,6 +1682,7 @@ def extract_multi_pass(
             on_pass_complete(3, rules_extraction.model_dump(), _pass3_duration, {
                 "extraction_method": _pass3_extraction_method,
                 "codegen_code": _pass3_codegen_code,
+                "user_prompt": _pass3_user_prompt,
             })
 
         # Merge passes into RawExtraction

@@ -4,6 +4,7 @@ from django.http import FileResponse
 from drf_spectacular.utils import extend_schema
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -358,6 +359,14 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                 for col_idx, val in enumerate(row, start=1):
                     ws.cell(row=row_idx, column=col_idx, value=val)
                 row_idx += 1
+
+        for col_idx in range(1, len(headers) + 1):
+            col_letter = get_column_letter(col_idx)
+            max_len = max(
+                len(str(ws.cell(row=r, column=col_idx).value or ""))
+                for r in range(1, row_idx)
+            )
+            ws.column_dimensions[col_letter].width = max_len + 4
 
         buf = io.BytesIO()
         wb.save(buf)

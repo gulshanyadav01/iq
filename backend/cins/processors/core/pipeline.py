@@ -57,6 +57,38 @@ def get_safe_sheet_name(sheet_name: str) -> str:
     return safe_name[:50]
 
 
+def build_pass_contents(
+    sheet_name: str,
+    sheet_content: str,
+    master_context: str,
+    email_body: str,
+    commission_sheets: list,
+) -> tuple:
+    """
+    Build the per-pass content strings for a single sheet extraction.
+
+    Single source of truth shared by both the full pipeline (_process_sheets)
+    and the per-pass rerun task (rerun_single_pass). Any routing change
+    (new source types, new header formats, etc.) only needs to happen here.
+
+    Returns:
+        (pass1_content, pass2_content, pass3_content, email_is_primary_commission)
+    """
+    email_is_primary_commission = bool(email_body) and not commission_sheets
+
+    pass1_content = (email_body + "\n\n") if email_body else ""
+    pass1_content += master_context
+
+    pass2_content = master_context
+
+    if email_is_primary_commission:
+        pass3_content = f"## Email Commission Data\n\n{email_body}"
+    else:
+        pass3_content = f"## Commission Data Sheet: {sheet_name}\n\n{sheet_content}"
+
+    return pass1_content, pass2_content, pass3_content, email_is_primary_commission
+
+
 def _extract_provider_from_path(file_path: str) -> str:
     """
     Extract provider name from file path.
@@ -422,7 +454,7 @@ class Pipeline:
         logger.info("Running Pass 3 (products & rules extraction)")
         commission_data_content = pass3_prompt_file.read_text(encoding="utf-8")
         service = get_llm_service(provider=self.llm_provider)
-        rules_extraction = _extract_pass3_products_and_rules(
+        rules_extraction, _ = _extract_pass3_products_and_rules(
             commission_data_content,
             service,
             metadata,
@@ -512,19 +544,20 @@ class Pipeline:
         }
 
         def _on_pass_done(pass_num, result_dict, duration, extra=None):
+            _extra = extra or {}
             entry = {
                 "sheet_name": sheet_name,
                 "attachment_name": "",
                 "pass_number": pass_num,
                 "result": result_dict,
-                "prompt_text": user_prompt,
+                "prompt_text": _extra.get("user_prompt") or user_prompt,
                 "system_instruction": system_instructions.get(pass_num, ""),
                 "model": model_used,
                 "duration": duration,
                 "status": "completed",
                 "error": "",
-                "extraction_method": (extra or {}).get("extraction_method", "llm"),
-                "codegen_code": (extra or {}).get("codegen_code", ""),
+                "extraction_method": _extra.get("extraction_method", "llm"),
+                "codegen_code": _extra.get("codegen_code", ""),
             }
             sheet_pass_results.append(entry)
             if on_sheet_complete:
@@ -623,6 +656,13 @@ class Pipeline:
         sheets_to_process = commission_sheets if commission_sheets else list(sheet_contents.keys())
         total_sheets = len(sheets_to_process)
 
+        email_body_for_pass3 = ""
+        if indexed_doc.is_email:
+            _email_body = indexed_doc.get_primary_content()
+            if _email_body:
+                email_body_for_pass3 = _email_body
+
+
         results = []
         errors = []
         sheet_pass_results = []
@@ -638,17 +678,18 @@ class Pipeline:
                 safe_name = get_safe_sheet_name(sheet_name)
                 sheet_output_path = output_dir / f"{base_name}_{safe_name}.json"
 
-                # Build per-pass content
-                pass1_content = ""
-                if indexed_doc.is_email:
-                    email_content = indexed_doc.get_primary_content()
-                    if email_content:
-                        pass1_content = f"{email_content}\n\n"
-                if master_context:
-                    pass1_content += master_context
-
-                pass2_content = master_context
-                pass3_content = f"## Commission Data Sheet: {sheet_name}\n\n{content}"
+                # Build per-pass content via shared helper (also used by rerun_single_pass)
+                pass1_content, pass2_content, pass3_content, email_is_primary_commission = (
+                    build_pass_contents(
+                        sheet_name=sheet_name,
+                        sheet_content=content,
+                        master_context=master_context,
+                        email_body=email_body_for_pass3,
+                        commission_sheets=commission_sheets,
+                    )
+                )
+                if email_is_primary_commission:
+                    logger.info(f"  '{sheet_name}': email body used as Pass 3 commission content")
 
                 for pass_name, pass_content in [
                     (f"pass1_content_{safe_name}.txt", pass1_content),
@@ -674,20 +715,21 @@ class Pipeline:
                 }
 
                 def _on_pass_done(pass_num, result_dict, duration, extra=None):
+                    _extra = extra or {}
                     entry = {
                         "sheet_name": sheet_name,
                         "attachment_name": attachment_name,
                         "pass_number": pass_num,
                         "result": result_dict,
-                        "prompt_text": pass_prompts[pass_num],
+                        "prompt_text": _extra.get("user_prompt") or pass_prompts.get(pass_num, ""),
                         "system_instruction": system_instructions.get(pass_num, ""),
                         "model": model_used,
                         "duration": duration,
                         "status": "completed",
                         "error": "",
-                        "extraction_method": (extra or {}).get("extraction_method", "llm"),
-                        "codegen_code": (extra or {}).get("codegen_code", ""),
-                            }
+                        "extraction_method": _extra.get("extraction_method", "llm"),
+                        "codegen_code": _extra.get("codegen_code", ""),
+                    }
                     sheet_pass_results.append(entry)
                     if on_sheet_complete:
                         on_sheet_complete([entry])
@@ -714,6 +756,10 @@ class Pipeline:
                     email_and_master_data_content=pass1_prompt,
                     master_data_content=pass2_prompt,
                     commission_data_content=pass3_prompt,
+                    # When email body IS the commission content it's already embedded in
+                    # pass3_prompt; skip the separate email_body_content prepend to avoid
+                    # mixing it with master sheet data.
+                    email_body_content=None if email_is_primary_commission else (email_body_for_pass3 or None),
                     on_pass_complete=_on_pass_done,
                     on_pass_start=_on_pass_start,
                     provider=self.llm_provider,

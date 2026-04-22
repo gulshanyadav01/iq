@@ -3,7 +3,7 @@ services:
     image: rhobotsai/auth:latest
     command: [ "start" ]
     ports:
-      - "10000:10000"
+      - ${PORT}:${PORT}
     environment:
       NODE_ENV: ${NODE_ENV:-development}
       PORT: ${PORT:-10000}

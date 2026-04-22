@@ -16,6 +16,168 @@ import ast
 import threading
 from typing import List, Tuple
 
+# Helper functions pre-injected into the codegen sandbox.
+# The LLM does not need to write these — they are always available.
+_SANDBOX_HELPERS = """
+def parse_md_tables(md):
+    tables = []
+    current_name = None
+    current_type = "unknown"
+    current_lines = []
+    for line in md.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("##"):
+            if "[type:" in stripped:
+                if current_name is not None:
+                    tables.append((current_name, current_type, current_lines))
+                parts = stripped.split("[type:")
+                current_name = parts[0].strip().lstrip("#").strip()
+                current_type = parts[1].rstrip("]").strip()
+                current_lines = []
+            elif "Master Data Reference:" in stripped or "Master Data" in stripped:
+                if current_name is not None:
+                    tables.append((current_name, current_type, current_lines))
+                current_name = stripped.lstrip("#").strip()
+                current_type = "master"
+                current_lines = []
+            elif "Commission Data Sheet:" in stripped or "Email Commission Data" in stripped:
+                if current_name is not None:
+                    tables.append((current_name, current_type, current_lines))
+                current_name = stripped.lstrip("#").strip()
+                current_type = "commission"
+                current_lines = []
+        elif current_name is not None:
+            current_lines.append(line)
+    if current_name is not None:
+        tables.append((current_name, current_type, current_lines))
+    return tables
+
+def parse_md_row(line):
+    return [c.strip() for c in line.strip("|").split("|")]
+
+def get_entry_type(table_name, header):
+    tl = table_name.lower()
+    hl = " ".join(header).lower()
+    if any(w in tl or w in hl for w in ("rto", "zone", "category", "tier")):
+        return "rto_mapping"
+    if any(w in tl or w in hl for w in ("declined", "excluded", "restricted")):
+        return "declined"
+    if any(w in tl or w in hl for w in ("vehicle", "class", "segment")):
+        return "vehicle_classification"
+    if any(w in tl or w in hl for w in ("state", "region", "territory")):
+        return "state_mapping"
+    return "general_term"
+
+def is_rto_code(s):
+    s = s.strip().upper().replace("-", "")
+    return len(s) >= 3 and s[:2].isalpha() and s[2:].isdigit() and len(s[2:]) <= 3
+
+def extract_rto_entries(table_name, header, data_rows, applies_to_hint):
+    vehicle_keywords = ("scooter", "bike", "2w", "4w", "moped", "car", "pcv", "gcv", "cv", "motor")
+    entries = []
+    if not data_rows:
+        return entries
+    col0_vals = []
+    for row in data_rows:
+        if row and row[0].strip():
+            col0_vals.append(row[0].strip())
+    rto_count = sum(1 for s in col0_vals if is_rto_code(s))
+    rto_in_col0 = rto_count > len(col0_vals) / 2 if col0_vals else False
+    if rto_in_col0:
+        # Detect layout: are cells in non-col-0 columns category labels (e.g. "Category 4")
+        # or are they presence markers (ticks, Y/N, value-per-column-header)?
+        # If any column's header contains a vehicle keyword, treat cell values in that
+        # column as category labels and pivot by (column_header, cell_value).
+        vehicle_col_indices = []
+        other_col_indices = []
+        for hi in range(1, len(header)):
+            hl = header[hi].lower()
+            if any(v in hl for v in vehicle_keywords):
+                vehicle_col_indices.append(hi)
+            else:
+                other_col_indices.append(hi)
+        if vehicle_col_indices:
+            # Layout: col 0 = RTO code, vehicle columns contain category labels as cell values.
+            # Group RTO codes by (vehicle_header, category_label).
+            grouped = {}
+            for vcol in vehicle_col_indices:
+                vehicle_label = header[vcol].strip()
+                for row in data_rows:
+                    rto_code = row[0].strip() if len(row) > 0 else ""
+                    cell = row[vcol].strip() if len(row) > vcol else ""
+                    if not rto_code or not is_rto_code(rto_code) or not cell:
+                        continue
+                    group_key = (vehicle_label, cell)
+                    if group_key not in grouped:
+                        grouped[group_key] = []
+                    grouped[group_key].append(rto_code)
+            for (vehicle_label, cat_label), codes in grouped.items():
+                entries.append({
+                    "entry_type": "rto_mapping",
+                    "applies_to": vehicle_label,
+                    "key": cat_label,
+                    "values": ", ".join(sorted(set(codes))),
+                    "notes": "",
+                    "source_sheet": table_name,
+                    "is_global_rule": True,
+                    "priority": None,
+                })
+        else:
+            # Original Layout A: column headers are category labels, cells are presence markers.
+            cat_index = []
+            col_idx = 1
+            while col_idx < len(header):
+                cat_label = header[col_idx].strip()
+                if cat_label:
+                    cat_index.append((col_idx, cat_label))
+                col_idx = col_idx + 1
+            cat_codes = {}
+            for col_idx, cat_label in cat_index:
+                codes = []
+                for row in data_rows:
+                    rto_code = row[0].strip() if len(row) > 0 else ""
+                    cell = row[col_idx].strip() if len(row) > col_idx else ""
+                    if rto_code and is_rto_code(rto_code) and cell:
+                        codes.append(rto_code)
+                if codes:
+                    cat_codes[cat_label] = codes
+            for cat_label in cat_codes:
+                codes = cat_codes[cat_label]
+                entries.append({
+                    "entry_type": "rto_mapping",
+                    "applies_to": applies_to_hint,
+                    "key": cat_label,
+                    "values": ", ".join(sorted(set(codes))),
+                    "notes": "",
+                    "source_sheet": table_name,
+                    "is_global_rule": True,
+                    "priority": None,
+                })
+    else:
+        for row in data_rows:
+            cat_label = row[0].strip() if row else ""
+            if not cat_label:
+                continue
+            code_parts = []
+            for cell in row[1:]:
+                for part in cell.split(","):
+                    part = part.strip()
+                    if part:
+                        code_parts.append(part)
+            entries.append({
+                "entry_type": "rto_mapping",
+                "applies_to": applies_to_hint,
+                "key": cat_label,
+                "values": ", ".join(code_parts),
+                "notes": "",
+                "source_sheet": table_name,
+                "is_global_rule": True,
+                "priority": None,
+            })
+    return entries
+
+"""
+
 
 class CodeGenExecutionError(Exception):
     """Raised when the generated code fails to execute."""
@@ -152,15 +314,19 @@ def execute_entry_code(
         "__builtins__": safe_builtins,
         "__name__": "__code_gen__",
     }
-    # Pre-inject commission_markdown so generated code can read it directly
-    safe_locals = {"commission_markdown": commission_markdown}
+    # Pre-inject helper functions and commission_markdown into a single namespace.
+    # We pass ONLY globals (no separate locals) to exec so that top-level
+    # assignments and comprehensions resolve names against the same dict —
+    # otherwise comprehensions can't see variables assigned at the top level.
+    safe_globals["commission_markdown"] = commission_markdown
+    exec(compile(_SANDBOX_HELPERS, "<helpers>", "exec"), safe_globals)  # noqa: S102
 
     # Execution result container (shared between threads)
     exec_result = {"error": None, "done": False}
 
     def _run():
         try:
-            exec(compile(code, "<codegen>", "exec"), safe_globals, safe_locals)  # noqa: S102
+            exec(compile(code, "<codegen>", "exec"), safe_globals)  # noqa: S102
             exec_result["done"] = True
         except Exception as exc:
             exec_result["error"] = exc
@@ -182,7 +348,7 @@ def execute_entry_code(
     if not exec_result["done"]:
         raise CodeGenExecutionError("Generated code did not complete successfully")
 
-    result = safe_locals.get("result")
+    result = safe_globals.get("result")
     if result is None:
         raise CodeGenExecutionError(
             "Generated code did not set a 'result' variable"

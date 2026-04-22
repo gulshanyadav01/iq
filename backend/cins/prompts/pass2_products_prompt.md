@@ -14,7 +14,8 @@ Extract reference sheets, mappings, and definitions.
 
 Examples:
 
-* RTO mappings
+* RTO mappings (including RTO-to-category/zone/tier tables)
+* Category/zone/tier definitions and their RTO assignments
 * Declined/excluded lists
 * Vehicle classifications
 * State/zone mappings
@@ -37,7 +38,7 @@ For each master entry, extract:
   `rto_mapping` | `declined` | `vehicle_classification` | `state_mapping` | `general_term`
 
 * `applies_to`
-  "all" if global, otherwise exact product/vehicle reference
+  "all" if global, otherwise exact product/vehicle reference (e.g. "Scooter", "Bike", "2W", "4W"). For tables with separate columns per vehicle type, create one entry per vehicle type column.
 
 * `key`
   Identifier (state code, vehicle type, term name, etc.)

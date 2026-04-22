@@ -593,15 +593,19 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
             attachment_name=attachment_name,
         ).update(status=ExtractionPass.Status.RUNNING, error="")
 
-        # ── Replicate pipeline._process_sheets content-building logic ──────────
+        from cins.processors.core.pipeline import build_pass_contents
+
         sheet_contents = indexed.sheet_contents or {}
         sheet_metadata = indexed.sheet_metadata or {}
         classifications = sheet_metadata.get("classifications", {})
 
-        # Identify master sheets (same logic as IndexedDocument.get_master_sheets)
         master_sheets = [
             s for s, meta in classifications.items()
             if (meta.get("classification") or meta.get("sheet_type")) == "master_data"
+        ]
+        commission_sheets = [
+            s for s, meta in classifications.items()
+            if (meta.get("classification") or meta.get("sheet_type")) == "commission_data"
         ]
 
         master_context = ""
@@ -611,27 +615,21 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
                 master_context += f"\n\n## Master Data Reference: {ms}\n\n{content}"
 
         sheet_content = sheet_contents.get(sheet_name, "")
+        email_body = indexed.primary_content if indexed.source_type == "email" else ""
 
-        # Build per-pass content strings (mirrors pipeline._process_sheets lines 640-660)
-        pass1_content = ""
-        if indexed.source_type == "email" and indexed.primary_content:
-            pass1_content = indexed.primary_content + "\n\n"
-        pass1_content += master_context
-
-        pass2_content = master_context
-        pass3_content = f"## Commission Data Sheet: {sheet_name}\n\n{sheet_content}"
-
-        # prepare_extraction_request just wraps content in "Extract commission data from…"
-        def _wrap(content: str) -> str:
-            return f"Extract commission data from this document:\n\n{content}"
-
-        pass1_prompt = _wrap(pass1_content)
-        pass2_prompt = _wrap(pass2_content)
-        pass3_prompt = _wrap(pass3_content)
+        pass1_prompt, pass2_prompt, pass3_prompt, email_is_primary_commission = build_pass_contents(
+            sheet_name=sheet_name,
+            sheet_content=sheet_content,
+            master_context=master_context,
+            email_body=email_body,
+            commission_sheets=commission_sheets,
+        )
 
         service = get_llm_service(**({"model": doc.llm_model} if doc.llm_model else {}))
 
         start = _time.monotonic()
+        p2_codegen_code = ""
+        p2_extraction_method = "llm"
         p3_codegen_code = ""
         p3_extraction_method = "llm"
 
@@ -644,10 +642,15 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
                 sheet_name=sheet_name, attachment_name=attachment_name,
             ).first()
             metadata_obj = MetadataExtraction.model_validate(pass1_row.result) if pass1_row and pass1_row.result else MetadataExtraction()
+            p2_codegen_code = ""
+            p2_extraction_method = "llm"
             if _should_use_codegen_for_pass2(pass2_prompt):
-                result_obj = _extract_pass2_via_codegen(pass2_prompt, service, metadata_obj)
+                result_obj, p2_codegen_code, _user_prompt = _extract_pass2_via_codegen(pass2_prompt, service, metadata_obj)
+                p2_extraction_method = "codegen"
             else:
-                result_obj = _extract_pass2_master_data(pass2_prompt, service, metadata_obj)
+                result_obj, p2_codegen_code, _user_prompt = _extract_pass2_master_data(pass2_prompt, service, metadata_obj)
+                if p2_codegen_code:
+                    p2_extraction_method = "codegen"
             result_dict = result_obj.model_dump()
         else:  # pass 3
             pass1_row = ExtractionPass.objects.filter(
@@ -660,13 +663,22 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
             ).first()
             metadata_obj = MetadataExtraction.model_validate(pass1_row.result) if pass1_row and pass1_row.result else MetadataExtraction()
             master_data_obj = MasterDataExtraction.model_validate(pass2_row.result) if pass2_row and pass2_row.result else MasterDataExtraction()
+
+            # email_is_primary_commission: email body already IS pass3_content — no prepend needed.
+            # Otherwise fall back to the has_commission_data flag (email body mixed with sheet content).
+            if not email_is_primary_commission and metadata_obj.has_commission_data and email_body:
+                pass3_prompt = (
+                    f"## Email Commission Data\n\n{email_body}"
+                    f"\n\n---\n\n{pass3_prompt}"
+                )
+
             p3_codegen_code = ""
             p3_extraction_method = "llm"
             if _should_use_codegen_for_pass3(pass3_prompt):
-                result_obj, p3_codegen_code = _extract_pass3_via_codegen(pass3_prompt, service, metadata_obj, master_data_obj)
+                result_obj, p3_codegen_code, _ = _extract_pass3_via_codegen(pass3_prompt, service, metadata_obj, master_data_obj)
                 p3_extraction_method = "codegen"
             else:
-                result_obj = _extract_pass3_products_and_rules(pass3_prompt, service, metadata_obj, master_data_obj)
+                result_obj, _ = _extract_pass3_products_and_rules(pass3_prompt, service, metadata_obj, master_data_obj)
             result_dict = result_obj.model_dump()
 
         duration = _time.monotonic() - start
@@ -680,8 +692,8 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
                 "status": ExtractionPass.Status.COMPLETED,
                 "result": result_dict,
                 "llm_model_used": service.model,
-                "extraction_method": p3_extraction_method if pass_number == 3 else "llm",
-                "codegen_code": p3_codegen_code if pass_number == 3 else "",
+                "extraction_method": p3_extraction_method if pass_number == 3 else p2_extraction_method if pass_number == 2 else "llm",
+                "codegen_code": p3_codegen_code if pass_number == 3 else p2_codegen_code if pass_number == 2 else "",
                 "duration_seconds": round(duration, 2),
                 "error": "",
             },

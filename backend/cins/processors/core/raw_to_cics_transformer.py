@@ -929,12 +929,8 @@ class RawToCICSTransformer:
         location_text = entry.state_text or getattr(raw, "global_state_text", None)
         state = self._expand_state_names(location_text, master_data)
 
-        # Extract RTO codes from location_text
-        rto = None
-        if location_text:
-            rto_codes = re.findall(r"\b[A-Z]{2}-\d{1,3}\b", location_text.upper())
-            if rto_codes:
-                rto = list(set(rto_codes))
+        # Extract/expand RTO codes from location_text
+        rto = self._expand_rto_codes(location_text, master_data)
 
         # Extract domain-specific fields from entry.conditions dict
         entry_conditions = getattr(entry, "conditions", None) or {}
@@ -1004,10 +1000,21 @@ class RawToCICSTransformer:
         vehicle_make = self._parse_text_list(entry_conditions.get("vehicle_make"))
         vehicle_model = self._parse_text_list(entry_conditions.get("vehicle_model"))
 
-        # RTO from conditions dict
-        cond_rto = self._parse_text_list(entry_conditions.get("rto"))
-        if cond_rto:
-            rto = list(set((rto or []) + cond_rto))
+        # RTO from conditions dict — expand categories via master data.
+        # The LLM may use "rto", "rto_category", "rto_zone", or similar — accept any.
+        cond_rto_text = None
+        for k in ("rto", "rto_category", "rto_zone", "rto_categories", "rto_cluster"):
+            v = entry_conditions.get(k)
+            if v:
+                cond_rto_text = v if cond_rto_text is None else f"{cond_rto_text}, {v}"
+        if cond_rto_text:
+            expanded = self._expand_rto_codes(cond_rto_text, master_data)
+            if expanded:
+                rto = sorted(set((rto or []) + expanded))
+            else:
+                raw_items = self._parse_text_list(cond_rto_text)
+                if raw_items:
+                    rto = sorted(set((rto or []) + raw_items))
 
         # Integer range fields
         gvw_start, gvw_end = self._parse_range_field(entry_conditions.get("gvw"))
@@ -1229,6 +1236,52 @@ class RawToCICSTransformer:
             return sorted(set(discovered_names))
 
         return None
+
+    def _expand_rto_codes(
+        self, rto_text: Optional[str], master_data: Optional[List[RawMasterDataEntry]]
+    ) -> Optional[List[str]]:
+        """
+        Expand RTO text to canonical RTO codes.
+        Resolves category labels (CAT 0, Zone A, Category 1) via rto_mapping master data entries.
+        Accepts both hyphenated (MH-01) and concatenated (MH01) code formats.
+        """
+        if not rto_text:
+            return None
+
+        code_pattern = r"\b[A-Z]{2}-?\d{1,3}\b"
+
+        def _normalize_label(s: str) -> str:
+            # Collapse common abbreviations and whitespace so that
+            # "CAT 0", "Category 0", "category-0", "cat0" all normalize equivalently.
+            s = s.upper()
+            s = re.sub(r"\bCATEGORY\b", "CAT", s)
+            s = re.sub(r"\bZONES?\b", "ZONE", s)
+            s = re.sub(r"\bTIERS?\b", "TIER", s)
+            s = re.sub(r"\bCLUSTERS?\b", "CLUSTER", s)
+            s = re.sub(r"\bGROUPS?\b", "GROUP", s)
+            s = re.sub(r"[-_]", " ", s)
+            s = re.sub(r"\s+", " ", s).strip()
+            return s
+
+        literal_codes = re.findall(code_pattern, rto_text.upper())
+        discovered = list(literal_codes)
+
+        if master_data:
+            normalized_text = _normalize_label(rto_text)
+            for m in master_data:
+                if m.entry_type != "rto_mapping" or not m.key or not m.values:
+                    continue
+                key_norm = _normalize_label(m.key)
+                if not key_norm:
+                    continue
+                if re.search(rf"\b{re.escape(key_norm)}\b", normalized_text):
+                    codes = re.findall(code_pattern, m.values.upper())
+                    discovered.extend(codes)
+
+        if not discovered:
+            return None
+
+        return sorted(set(discovered))
 
     # ==================== OUTCOMES ====================
 

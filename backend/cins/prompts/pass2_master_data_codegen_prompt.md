@@ -73,92 +73,112 @@ FORBIDDEN:
 
 ---
 
-## REQUIRED HELPER FUNCTIONS
+## PRE-LOADED HELPER FUNCTIONS
 
-Always define and use these helpers:
+The following functions are **already available** in your execution environment — do NOT redefine them:
 
-```python
-def parse_md_tables(md):
-    """Split markdown string into ordered list of (name, table_type, lines)."""
-    tables = []
-    current_name = None
-    current_type = "unknown"
-    current_lines = []
-    for line in md.splitlines():
-        if line.startswith("## Table") and "[type:" in line:
-            if current_name is not None:
-                tables.append((current_name, current_type, current_lines))
-            parts = line.split("[type:")
-            current_name = parts[0].strip().lstrip("#").strip()
-            current_type = parts[1].rstrip("]").strip()
-            current_lines = []
-        elif current_name is not None:
-            current_lines.append(line)
-    if current_name is not None:
-        tables.append((current_name, current_type, current_lines))
-    return tables
+- `parse_md_tables(md)` — splits the markdown string into `(name, table_type, lines)` tuples
+- `parse_md_row(line)` — splits a pipe-delimited markdown row into a list of cell strings
+- `get_entry_type(table_name, header)` — returns the `entry_type` string for a master table
+- `is_rto_code(s)` — returns `True` if `s` looks like an RTO code (e.g. `MH-01`, `AN01`)
+- `extract_rto_entries(table_name, header, data_rows, applies_to_hint)` — handles RTO tables in either orientation and always returns entries with `key=category_label, values=RTO codes`
 
-def parse_md_row(line):
-    """Split a markdown pipe-row into a list of stripped cell strings."""
-    return [c.strip() for c in line.strip("|").split("|")]
-```
+Do NOT write or redefine any of these functions. Just call them.
 
 ---
 
-## TABLE PARSING PATTERN
+## REQUIRED MAIN LOOP (copy this structure exactly — do NOT restructure it)
 
 After splitting tables, for each `[type: master]` or `[type: notes]` table:
 
 1. Collect markdown rows that start with `|` and do not contain `---`.
-2. The first row is typically a header — use it to understand column meaning.
+2. The first row is the header — use it to understand column meaning.
 3. Data rows come after the header. For each data row, emit one dict.
 
-**Determine `entry_type` from the table name or column headers:**
-- Tables/columns mentioning "RTO", "zone", "state code" → `rto_mapping`
-- Tables/columns mentioning "declined", "excluded", "restricted", "0%" → `declined`
-- Tables/columns mentioning "vehicle", "class", "segment", "make", "model" → `vehicle_classification`
-- Tables/columns mentioning "state", "region", "territory" (without RTO codes) → `state_mapping`
-- Everything else → `general_term`
-
-**Example parsing pattern:**
+`entry_type` is determined by calling `get_entry_type(table_name, header)` — always use this helper, never inline the logic.
+For `rto_mapping` tables, call `extract_rto_entries(...)` instead of the generic row loop.
 
 ```python
 tables = parse_md_tables(commission_markdown)
 result = []
+seen = set()
+
+vehicle_keywords = ("scooter", "bike", "2w", "4w", "moped", "car", "pcv", "gcv", "cv", "motor")
 
 for table_name, ttype, lines in tables:
     if ttype not in ("master", "notes"):
         continue
 
-    md_rows = [parse_md_row(l) for l in lines if l.startswith("|") and "---" not in l]
+    md_rows = [parse_md_row(ln) for ln in lines if ln.startswith("|") and "---" not in ln]
     if not md_rows:
         continue
 
-    header = md_rows[0] if md_rows else []
+    header = [md_rows[0][i].strip() for i in range(len(md_rows[0]))]
+    etype = get_entry_type(table_name, header)
+    data_rows = md_rows[1:]
 
-    for row in md_rows[1:]:
+    if etype == "rto_mapping":
+        applies_to_hint = "all"
+        for hi in range(1, len(header)):
+            if any(v in header[hi].lower() for v in vehicle_keywords):
+                applies_to_hint = header[hi].strip()
+                break
+        rto_entries = extract_rto_entries(table_name, header, data_rows, applies_to_hint)
+        for entry in rto_entries:
+            dedup_key = ("rto_mapping", entry["key"], entry["applies_to"])
+            if dedup_key not in seen:
+                seen.add(dedup_key)
+                result.append(entry)
+        continue
+
+    key_col = 0
+    vehicle_cols = [i for i in range(len(header)) if any(v in header[i].lower() for v in vehicle_keywords)]
+
+    for row in data_rows:
         if not any(c.strip() for c in row):
             continue
-
-        key_val = row[0].strip() if len(row) > 0 else ""
-        values_val = row[1].strip() if len(row) > 1 else ""
-
+        key_val = row[key_col].strip() if len(row) > key_col else ""
         if not key_val:
             continue
 
-        result.append({
-            "entry_type": "rto_mapping",   # determine from table_name / header
-            "applies_to": "all",
-            "key": key_val,
-            "values": values_val,
-            "notes": "",
-            "source_sheet": table_name,
-            "is_global_rule": True,
-            "priority": None,
-        })
+        if vehicle_cols:
+            for vcol in vehicle_cols:
+                if vcol >= len(header):
+                    continue
+                cell = row[vcol].strip() if len(row) > vcol else ""
+                if not cell:
+                    continue
+                dedup_key = (etype, key_val, header[vcol])
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+                result.append({
+                    "entry_type": etype,
+                    "applies_to": header[vcol],
+                    "key": key_val,
+                    "values": cell,
+                    "notes": "",
+                    "source_sheet": table_name,
+                    "is_global_rule": True,
+                    "priority": None,
+                })
+        else:
+            values_val = row[1].strip() if len(row) > 1 else ""
+            dedup_key = (etype, key_val, "all")
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            result.append({
+                "entry_type": etype,
+                "applies_to": "all",
+                "key": key_val,
+                "values": values_val,
+                "notes": "",
+                "source_sheet": table_name,
+                "is_global_rule": True,
+                "priority": None,
+            })
 ```
-
-**Replace the placeholder `entry_type` with a value derived from the actual table name and column headers.**
 
 ---
 
