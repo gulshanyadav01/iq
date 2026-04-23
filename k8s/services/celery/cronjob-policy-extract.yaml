@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-policy-extract
+  namespace: insure-iq
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: celery-policy-extract
+  template:
+    metadata:
+      labels:
+        app: celery-policy-extract
+    spec:
+      containers:
+      - name: celery
+        image: insure-iq-backend:latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - celery
+        - -A
+        - config
+        - worker
+        - -Q
+        - policy_extract
+        - -l
+        - info
+        envFrom:
+        - configMapRef:
+            name: insure-iq-config
+        - secretRef:
+            name: backend-secrets
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
