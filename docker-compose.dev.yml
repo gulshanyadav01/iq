@@ -36,6 +36,15 @@ services:
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       MINERVA_API_URL: ${MINERVA_API_URL:-https://rhobots.pbpartners.com/api/mineru/file_parse}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      EXCEL_AI_CLASSIFICATION_ENABLED: ${EXCEL_AI_CLASSIFICATION_ENABLED:-true}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always
@@ -68,6 +77,18 @@ services:
       <<: *backend-env
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+
+  celery_commission_intake:
+    image: insure-iq-backend:latest
+    volumes:
+      - ./backend:/app
+    command: ["celery-commission-intake"]
+    environment:
+      <<: *backend-env
     depends_on:
       backend:
         condition: service_healthy
@@ -116,7 +137,7 @@ services:
         condition: service_healthy
     command: [ "start" ]
     ports:
-      - "10000:10000"
+      - ${PORT}:${PORT}
     environment:
       NODE_ENV: ${NODE_ENV:-development}
       PORT: ${PORT:-10000}

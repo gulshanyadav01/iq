@@ -3,7 +3,7 @@ services:
     image: rhobotsai/auth:latest
     command: [ "start" ]
     ports:
-      - "10000:10000"
+      - ${PORT}:${PORT}
     environment:
       NODE_ENV: ${NODE_ENV:-development}
       PORT: ${PORT:-10000}
@@ -65,6 +65,15 @@ services:
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-django-db}
       CELERY_CACHE_BACKEND: ${CELERY_CACHE_BACKEND:-django-cache}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      EXCEL_AI_CLASSIFICATION_ENABLED: ${EXCEL_AI_CLASSIFICATION_ENABLED:-true}
       MINERVA_API_URL: ${MINERVA_API_URL:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"

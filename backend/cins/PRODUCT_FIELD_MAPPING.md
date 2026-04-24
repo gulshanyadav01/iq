@@ -1,0 +1,34 @@
+# Product Field Mapping
+
+| Field | Car | TW | CV |
+| --- | --- | --- | --- |
+| DealStartDate | Yes | Yes | Yes |
+| DealEndDate | Yes | Yes | Yes |
+| Insurer | Yes | Yes | Yes |
+| Product | Yes | Yes | Yes |
+| SubProduct | Yes | - | Yes |
+| VehicleSubClass | Yes | Yes | Yes |
+| PolicyType | Yes | Yes | Yes |
+| State | Yes | Yes | Yes |
+| RTO | Yes | Yes | Yes |
+| NumberOfWheels | Yes | - | Yes |
+| GVWStartRange | - | - | Yes |
+| GVWEndRange | - | - | Yes |
+| CCStartRange | Yes | Yes | Yes |
+| CCEndRange | Yes | Yes | Yes |
+| SeatingCapacityStartRange | Yes | - | Yes |
+| SeatingCapacityEndRange | Yes | - | Yes |
+| SchoolBusType | Yes | - | Yes |
+| BookingMode | Yes | Yes | Yes |
+| ZeroDep | Yes | Yes | Yes |
+| NCB | Yes | Yes | Yes |
+| CPA | Yes | Yes | Yes |
+| FuelType | Yes | Yes | Yes |
+| VehicleAge | Yes | Yes | Yes |
+| VehicleMake | Yes | Yes | Yes |
+| VehicleModel | Yes | Yes | Yes |
+| VehicleCarrier | Yes | Yes | Yes |
+| BusinessType | Yes | Yes | Yes |
+| ODTerm | Yes | Yes | Yes |
+| TPTerm | Yes | Yes | Yes |
+| DealParameter | Yes | Yes | Yes |

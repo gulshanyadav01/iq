@@ -28,4 +28,5 @@ urlpatterns = [
 
     path('api/', include('accounts.urls')),
     path("api/policy-extract/", include("policy_extract.urls")),
+    path("api/commission-intake/", include("commission_intake.urls")),
 ]
