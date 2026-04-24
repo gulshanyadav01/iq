@@ -46,6 +46,9 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         return CommissionDocumentSerializer
 
     @extend_schema(
+        summary="Upload commission document",
+        description="Accepts multipart file upload (.eml/.pdf/.xlsx). Enqueues index→extract→validate chain. Returns immediately with status=initiated.",
+        tags=["Commission Intake"],
         request=CommissionDocumentCreateSerializer,
         responses={201: CommissionDocumentSerializer},
     )
@@ -56,19 +59,32 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         enqueue_processing_chain(str(doc.id), mode=doc.processing_mode)
         return Response(CommissionDocumentSerializer(doc).data, status=status.HTTP_201_CREATED)
 
-    @extend_schema(responses={200: CommissionDocumentSerializer(many=True)})
+    @extend_schema(
+        summary="List commission documents",
+        description="Returns all documents (newest first) with current processing status.",
+        tags=["Commission Intake"],
+        responses={200: CommissionDocumentSerializer(many=True)},
+    )
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset().order_by("-created_at")
         serializer = CommissionDocumentSerializer(queryset, many=True)
         return Response(serializer.data)
 
-    @extend_schema(responses={200: CommissionDocumentSerializer})
+    @extend_schema(
+        summary="Get commission document",
+        description="Poll current processing status. Includes nested cics_result and validation_result when completed.",
+        tags=["Commission Intake"],
+        responses={200: CommissionDocumentSerializer},
+    )
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
         serializer = CommissionDocumentSerializer(instance)
         return Response(serializer.data)
 
     @extend_schema(
+        summary="Retry failed document",
+        description="Re-enqueues a FAILED document with optional processing mode override.",
+        tags=["Commission Intake"],
         request=ProcessingModeRequestSerializer,
         responses={200: CommissionDocumentSerializer},
     )
@@ -90,7 +106,12 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         enqueue_processing_chain(str(instance.id), mode=mode)
         return Response(CommissionDocumentSerializer(instance).data)
 
-    @extend_schema(responses={200: CommissionDocumentSerializer})
+    @extend_schema(
+        summary="Re-index document",
+        description="Runs indexing step only (index_only mode).",
+        tags=["Commission Intake"],
+        responses={200: CommissionDocumentSerializer},
+    )
     @action(detail=True, methods=["post"], url_path="index")
     def index(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -107,7 +128,12 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         enqueue_processing_chain(str(instance.id), mode="index_only")
         return Response(CommissionDocumentSerializer(instance).data)
 
-    @extend_schema(responses={200: CommissionDocumentSerializer})
+    @extend_schema(
+        summary="Re-run extraction",
+        description="Requires document to be indexed. Runs LLM extraction passes.",
+        tags=["Commission Intake"],
+        responses={200: CommissionDocumentSerializer},
+    )
     @action(detail=True, methods=["post"], url_path="extract")
     def extract(self, request, *args, **kwargs):
         from commission_intake.models import IndexedContent
@@ -132,12 +158,14 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         return Response(CommissionDocumentSerializer(instance).data)
 
     @extend_schema(
+        summary="Re-run single extraction pass",
+        description="Re-runs one of pass 1/2/3 for a specific sheet/attachment.",
+        tags=["Commission Intake"],
         request=RerunPassRequestSerializer,
         responses={200: CommissionDocumentSerializer},
     )
     @action(detail=True, methods=["post"], url_path="rerun-pass")
     def rerun_pass(self, request, *args, **kwargs):
-        """Re-run a single extraction pass (1/2/3) for a specific sheet."""
         from commission_intake.models import IndexedContent, ExtractionPass
 
         instance = self.get_object()
@@ -173,10 +201,14 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         )
         return Response(CommissionDocumentSerializer(instance).data)
 
-    @extend_schema(responses={200: CommissionDocumentSerializer})
+    @extend_schema(
+        summary="Re-run CICS transformation",
+        description="Rebuilds CICS result from existing completed passes.",
+        tags=["Commission Intake"],
+        responses={200: CommissionDocumentSerializer},
+    )
     @action(detail=True, methods=["post"], url_path="transform")
     def transform(self, request, *args, **kwargs):
-        """Re-run raw→CICS transformation from existing pass results."""
         from commission_intake.models import ExtractionPass
 
         instance = self.get_object()
@@ -196,10 +228,14 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         rerun_transform.apply_async(args=[str(instance.id)], queue="commission_intake")
         return Response(CommissionDocumentSerializer(instance).data)
 
-    @extend_schema(responses={200: CommissionDocumentSerializer})
+    @extend_schema(
+        summary="Re-run validation",
+        description="Runs schema + overlap validation on the existing CICS result.",
+        tags=["Commission Intake"],
+        responses={200: CommissionDocumentSerializer},
+    )
     @action(detail=True, methods=["post"], url_path="validate")
     def validate(self, request, *args, **kwargs):
-        """Re-run schema + overlap validation on the existing CICS result."""
         from commission_intake.models import CICSResult
 
         instance = self.get_object()

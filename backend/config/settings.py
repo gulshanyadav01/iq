@@ -41,7 +41,8 @@ env = environ.Env(
     AWS_S3_REGION_NAME=str,
     CELERY_RESULT_BACKEND=str,
     CELERY_CACHE_BACKEND=str,
-    CELERY_BROKER_URL=str
+    CELERY_BROKER_URL=str,
+    POLICY_EXTRACT_CALLBACK_URL=(str, '')
 )
 environ.Env.read_env(os.path.join(BASE_DIR, '.env'))
 
@@ -66,6 +67,8 @@ CSRF_TRUSTED_ORIGINS = env('CSRF_TRUSTED_ORIGINS')
 HOST_NAME = env('HOST_NAME')
 
 BETTER_AUTH_URL = env('BETTER_AUTH_URL')
+
+POLICY_EXTRACT_CALLBACK_URL = env('POLICY_EXTRACT_CALLBACK_URL')
 
 # Application definition
 
@@ -290,15 +293,35 @@ CORS_ALLOW_HEADERS = (
 )
 
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'Backend API Docs',
+    'TITLE': 'InsurIQ API',
+    'DESCRIPTION': (
+        'REST API for InsurIQ — commission document intake, CICS extraction, '
+        'and insurance policy parsing.'
+    ),
     'CONTACT': {
         'email': 'tech@rhobots.ai'
     },
+    'LICENSE': {
+        'name': 'Proprietary'
+    },
     'VERSION': '0.0.1',
     'SERVE_INCLUDE_SCHEMA': False,
+    'COMPONENT_SPLIT_REQUEST': True,
     'SERVERS': [
-        {"url": HOST_NAME, "description": "Server"}
+        {"url": f"{HOST_NAME}/service-api", "description": "Server"}
     ],
+    'TAGS': [
+        {'name': 'Commission Intake', 'description': 'Upload and process commission schedule documents.'},
+        {'name': 'Policy Extract', 'description': 'Submit and poll insurance policy extraction requests.'},
+        {'name': 'Health', 'description': 'System health check.'},
+    ],
+    'SCHEMA_PATH_PREFIX': '/api/',
+    'SWAGGER_UI_SETTINGS': {
+        'url': '/service-api/api/schema/',
+    },
+    'REDOC_SETTINGS': {
+        'url': '/service-api/api/schema/',
+    },
 }
 PASSWORD_RESET_TIMEOUT = 259200
 

@@ -18,10 +18,10 @@ from typing import Dict, Any
 from datetime import datetime
 
 try:
-    import google.generativeai as genai
+    from google import genai
 except ImportError:
-    print("Error: google-generativeai not installed")
-    print("Install with: pip install google-generativeai")
+    print("Error: google-genai not installed")
+    print("Install with: pip install google-genai")
     sys.exit(1)
 
 
@@ -87,9 +87,8 @@ class MineruGeminiParser:
                               Defaults to 'minerva_gemini_intermediate_data' in cwd.
                               Pass a validation set path to co-locate with the set.
         """
-        genai.configure(api_key=api_key or os.getenv("GOOGLE_API_KEY"))
         self.model_name = model
-        self.model = genai.GenerativeModel(model)
+        self._client = genai.Client(api_key=api_key or os.getenv("GOOGLE_API_KEY"))
 
         # Cost tracking
         self.total_input_tokens = 0
@@ -401,7 +400,10 @@ class MineruGeminiParser:
                 print(f"   🔄 Retry {attempt}/{MAX_RETRIES - 1} (previous response was truncated)...")
 
             try:
-                response = self.model.generate_content(prompt)
+                response = self._client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                )
 
                 # Track tokens
                 if hasattr(response, 'usage_metadata') and response.usage_metadata:
@@ -751,7 +753,10 @@ class MineruGeminiParser:
                 print(f"   🔄 Retry {attempt}/{MAX_RETRIES - 1} (previous response was truncated)...")
 
             try:
-                response = self.model.generate_content(prompt)
+                response = self._client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                )
 
                 # Track tokens
                 if hasattr(response, 'usage_metadata') and response.usage_metadata:

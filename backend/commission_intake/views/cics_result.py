@@ -20,7 +20,12 @@ class CICSResultViewSet(viewsets.GenericViewSet):
     queryset = CICSResult.objects.select_related("document").all()
     serializer_class = CICSResultSerializer
 
-    @extend_schema(responses={200: CICSResultSerializer})
+    @extend_schema(
+        summary="Get CICS result",
+        description="Returns the full CICS document, raw extraction JSON, and per-sheet breakdown.",
+        tags=["Commission Intake"],
+        responses={200: CICSResultSerializer},
+    )
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
         serializer = CICSResultSerializer(instance)
