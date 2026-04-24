@@ -1,4 +1,4 @@
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import extend_schema, OpenApiCallback
 from rest_framework import viewsets, status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -8,6 +8,7 @@ from policy_extract.serializers import (
     PolicyExtractionRequestCreateSerializer,
     PolicyExtractionRequestLinkCreateSerializer,
     PolicyExtractionRequestSerializer,
+    PolicyExtractCallbackSerializer,
 )
 from policy_extract.tasks import enqueue_processing_chain
 
@@ -34,10 +35,23 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
 
     @extend_schema(
         summary="Submit policy extraction request",
-        description="Accept file upload (multipart) or file_link (JSON). Returns extraction request with status=initiated.",
+        description="Accept file upload (multipart) or file_link (JSON). Returns extraction request with status=initiated. "
+                    "On completion or failure, a POST callback is sent to the configured callback_url.",
         tags=["Policy Extract"],
         request=PolicyExtractionRequestCreateSerializer,
         responses={201: PolicyExtractionRequestSerializer},
+        callbacks=[
+            OpenApiCallback(
+                name="policyExtractCallback",
+                path="{$request.body#/callback_url}",
+                decorator=extend_schema(
+                    summary="Policy extraction callback",
+                    description="POSTed by the server when extraction completes or fails.",
+                    request=PolicyExtractCallbackSerializer,
+                    responses={200: None},
+                ),
+            )
+        ],
     )
     def create(self, request, *args, **kwargs):
         if "file_link" in request.data:

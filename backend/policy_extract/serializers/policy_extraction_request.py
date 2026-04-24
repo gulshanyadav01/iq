@@ -77,3 +77,31 @@ class PolicyExtractionRequestSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+
+class PolicyExtractResultSerializer(serializers.Serializer):
+    extracted_fields = serializers.DictField(help_text="Structured fields extracted from the policy document.")
+
+
+class PolicyExtractCallbackEntitySerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    policy_extraction_id = serializers.CharField()
+    status = serializers.ChoiceField(choices=["initiated", "processing", "completed", "failed"])
+    original_filename = serializers.CharField()
+    source_url = serializers.CharField(allow_null=True)
+    metadata = serializers.DictField(allow_null=True)
+    result = PolicyExtractResultSerializer(allow_null=True)
+    error = serializers.CharField(allow_null=True)
+    created_at = serializers.DateTimeField()
+    updated_at = serializers.DateTimeField()
+
+
+class PolicyExtractCallbackSerializer(serializers.Serializer):
+    id = serializers.CharField(help_text="policy_extraction_id of the request (e.g. pext_...).")
+    event_type = serializers.ChoiceField(
+        choices=["policy_extract.completed", "policy_extract.failed"],
+        help_text="Type of event that triggered this callback.",
+    )
+    entity_type = serializers.CharField(default="policy_extraction_request")
+    entity_payload = PolicyExtractCallbackEntitySerializer()
+    event_created_at = serializers.DateTimeField()
