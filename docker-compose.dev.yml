@@ -125,7 +125,6 @@ services:
     volumes:
       - ./web:/app/web
       - /app/web/node_modules
-      - /app/web/.nuxt
     ports:
       - "${APP_PORT:-3000}:3000"
     restart: always
