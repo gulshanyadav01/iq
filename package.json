@@ -19,6 +19,7 @@
     "nuke": "bash ./scripts/nuke.sh",
     "init": "bash ./scripts/init-db-user.sh",
     "dev:build": "bash ./scripts/dev-build.sh",
+    "prod:build": "bash ./scripts/prod-build.sh",
     "dev": "pnpm i && pnpm run dev:up --pull always",
     "start": "pnpm i && pnpm run prod:up --pull always",
     "prepare": "husky"
