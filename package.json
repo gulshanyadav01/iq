@@ -18,6 +18,7 @@
     "db:reset": "docker compose -f ./docker-compose.dev.yml up -d postgres && docker compose exec postgres bash -c \"/scripts/reset-databases.sh\"",
     "nuke": "bash ./scripts/nuke.sh",
     "init": "bash ./scripts/init-db-user.sh",
+    "dev:build": "bash ./scripts/dev-build.sh",
     "dev": "pnpm i && pnpm run dev:up --pull always",
     "start": "pnpm i && pnpm run prod:up --pull always",
     "prepare": "husky"

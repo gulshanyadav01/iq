@@ -50,7 +50,7 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
     @extend_schema(
         summary="Upload commission document",
         description="Accepts multipart file upload (.eml/.pdf/.xlsx). Enqueues index→extract→validate chain. Returns immediately with status=initiated.",
-        tags=["Commission Intake"],
+        tags=["Commission Document"],
         request=CommissionDocumentCreateSerializer,
         responses={201: CommissionDocumentSerializer},
     )
@@ -64,7 +64,7 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
     @extend_schema(
         summary="List commission documents",
         description="Returns all documents (newest first) with current processing status.",
-        tags=["Commission Intake"],
+        tags=["Commission Document"],
         responses={200: CommissionDocumentSerializer(many=True)},
     )
     def list(self, request, *args, **kwargs):
@@ -75,7 +75,7 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
     @extend_schema(
         summary="Get commission document",
         description="Poll current processing status. Includes nested cics_result and validation_result when completed.",
-        tags=["Commission Intake"],
+        tags=["Commission Document"],
         responses={200: CommissionDocumentSerializer},
     )
     def retrieve(self, request, *args, **kwargs):
@@ -86,7 +86,7 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
     @extend_schema(
         summary="Retry failed document",
         description="Re-enqueues a FAILED document with optional processing mode override.",
-        tags=["Commission Intake"],
+        tags=["Commission Document"],
         request=ProcessingModeRequestSerializer,
         responses={200: CommissionDocumentSerializer},
     )
@@ -111,7 +111,7 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
     @extend_schema(
         summary="Re-index document",
         description="Runs indexing step only (index_only mode).",
-        tags=["Commission Intake"],
+        tags=["Commission Document"],
         responses={200: CommissionDocumentSerializer},
     )
     @action(detail=True, methods=["post"], url_path="index")
@@ -133,7 +133,7 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
     @extend_schema(
         summary="Re-run extraction",
         description="Requires document to be indexed. Runs LLM extraction passes.",
-        tags=["Commission Intake"],
+        tags=["Commission Document"],
         responses={200: CommissionDocumentSerializer},
     )
     @action(detail=True, methods=["post"], url_path="extract")
@@ -162,7 +162,7 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
     @extend_schema(
         summary="Re-run single extraction pass",
         description="Re-runs one of pass 1/2/3 for a specific sheet/attachment.",
-        tags=["Commission Intake"],
+        tags=["Commission Document"],
         request=RerunPassRequestSerializer,
         responses={200: CommissionDocumentSerializer},
     )
@@ -206,7 +206,7 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
     @extend_schema(
         summary="Re-run CICS transformation",
         description="Rebuilds CICS result from existing completed passes.",
-        tags=["Commission Intake"],
+        tags=["Commission Document"],
         responses={200: CommissionDocumentSerializer},
     )
     @action(detail=True, methods=["post"], url_path="transform")
@@ -233,7 +233,7 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
     @extend_schema(
         summary="Re-run validation",
         description="Runs schema + overlap validation on the existing CICS result.",
-        tags=["Commission Intake"],
+        tags=["Commission Document"],
         responses={200: CommissionDocumentSerializer},
     )
     @action(detail=True, methods=["post"], url_path="validate")
@@ -255,10 +255,14 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         run_validation.apply_async(args=[str(instance.id)], queue="commission_intake")
         return Response(CommissionDocumentSerializer(instance).data)
 
-    @extend_schema(responses={200: CommissionDocumentSerializer})
+    @extend_schema(
+        summary="Mark document as validated",
+        description="Mark a completed document as manually validated.",
+        tags=["Commission Document"],
+        responses={200: CommissionDocumentSerializer},
+    )
     @action(detail=True, methods=["post"], url_path="mark-validated")
     def mark_validated(self, request, *args, **kwargs):
-        """Mark a completed document as manually validated."""
         instance = self.get_object()
         if instance.status != CommissionDocument.Status.COMPLETED:
             return Response(
@@ -270,10 +274,14 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         instance.save(update_fields=["is_validated", "validated_at", "updated_at"])
         return Response(CommissionDocumentSerializer(instance).data)
 
-    @extend_schema(responses={200: CommissionDocumentSerializer})
+    @extend_schema(
+        summary="Remove validated flag",
+        description="Remove the validated flag from a document.",
+        tags=["Commission Document"],
+        responses={200: CommissionDocumentSerializer},
+    )
     @action(detail=True, methods=["post"], url_path="mark-invalidated")
     def mark_invalidated(self, request, *args, **kwargs):
-        """Remove the validated flag from a document."""
         instance = self.get_object()
         instance.is_validated = False
         instance.validated_at = None
