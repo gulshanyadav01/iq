@@ -79,6 +79,8 @@ export interface CommissionDocument {
   llm_model: string
   excel_mode: string
   error: string | null
+  is_validated: boolean
+  validated_at: string | null
   indexed_content: IndexedContent | null
   extraction_passes: ExtractionPass[]
   cics_result: CICSResult | null
@@ -528,6 +530,38 @@ export function useCommissionIntakeDetail() {
     }
   }
 
+  async function triggerMarkValidated() {
+    actionLoading.value = 'mark-validated'
+    actionError.value = null
+    try {
+      const headers = await getAuthHeaders()
+      doc.value = await $fetch<CommissionDocument>(
+        `${getBaseUrl()}/api/commission-intake/documents/${route.params.id}/mark-validated/`,
+        { method: 'POST', headers }
+      )
+    } catch (err: any) {
+      actionError.value = err?.data?.detail || 'Failed to mark document as validated'
+    } finally {
+      actionLoading.value = null
+    }
+  }
+
+  async function triggerMarkInvalidated() {
+    actionLoading.value = 'mark-invalidated'
+    actionError.value = null
+    try {
+      const headers = await getAuthHeaders()
+      doc.value = await $fetch<CommissionDocument>(
+        `${getBaseUrl()}/api/commission-intake/documents/${route.params.id}/mark-invalidated/`,
+        { method: 'POST', headers }
+      )
+    } catch (err: any) {
+      actionError.value = err?.data?.detail || 'Failed to remove validation'
+    } finally {
+      actionLoading.value = null
+    }
+  }
+
   onMounted(() => {
     loadDoc()
     pollTimer = setInterval(pollDoc, 3000)
@@ -547,5 +581,6 @@ export function useCommissionIntakeDetail() {
     getSheetClassification, getSheetClassBadge, formatCommissionValue, formatConditions,
     sheetPassStatus, copyJson, downloadJson, downloadExcel, loadDoc,
     triggerIndex, triggerExtract, triggerRerunPass, triggerTransform, triggerValidate,
+    triggerMarkValidated, triggerMarkInvalidated,
   }
 }

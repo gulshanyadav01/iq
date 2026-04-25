@@ -135,6 +135,8 @@ class CommissionDocumentSerializer(serializers.ModelSerializer):
             "excel_mode",
             "error",
             "index_progress",
+            "is_validated",
+            "validated_at",
             "indexed_content",
             "extraction_passes",
             "cics_result",

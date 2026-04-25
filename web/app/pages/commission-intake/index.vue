@@ -19,6 +19,24 @@
         </button>
       </div>
 
+      <!-- Tab bar -->
+      <div class="flex gap-1 border-b border-gray-200 dark:border-gray-800">
+        <NuxtLink
+          to="/commission-intake"
+          class="px-4 py-2 text-xs font-medium border-b-2 transition"
+          :class="$route.path === '/commission-intake' ? 'border-primary-500 text-primary-600 dark:text-primary-400' : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'"
+        >
+          Documents
+        </NuxtLink>
+        <NuxtLink
+          to="/commission-intake/dashboard"
+          class="px-4 py-2 text-xs font-medium border-b-2 transition"
+          :class="$route.path === '/commission-intake/dashboard' ? 'border-primary-500 text-primary-600 dark:text-primary-400' : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'"
+        >
+          Dashboard
+        </NuxtLink>
+      </div>
+
       <!-- Metric Cards -->
       <div v-if="!loading" class="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <div class="glass rounded-2xl p-5 space-y-1">

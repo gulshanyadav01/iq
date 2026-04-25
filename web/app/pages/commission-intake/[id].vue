@@ -18,10 +18,40 @@
             <span v-if="doc?.provider" class="text-xs text-gray-500 dark:text-gray-400">{{ doc.provider }}</span>
             <span v-if="doc?.source_type" class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 uppercase">{{ doc.source_type }}</span>
             <span v-if="doc?.llm_provider" class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">{{ doc.llm_provider }}</span>
+            <span v-if="doc?.is_validated" class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400">
+              <UIcon name="i-lucide-shield-check" class="w-3 h-3" />
+              Validated
+            </span>
           </div>
         </div>
-        <!-- Action buttons: Export Excel (primary, when complete) / Re-index / Extract -->
+        <!-- Action buttons: Export Excel (primary, when complete) / Re-index / Extract / Validate -->
         <div v-if="doc && !isInFlight(doc.status)" class="flex items-center gap-2">
+          <button
+            v-if="doc.status === 'completed' && !doc.is_validated"
+            :disabled="actionLoading !== null"
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-green-600 hover:bg-green-700 text-white transition disabled:opacity-50 disabled:cursor-not-allowed"
+            @click="triggerMarkValidated"
+          >
+            <UIcon
+              name="i-lucide-shield-check"
+              class="w-3.5 h-3.5"
+              :class="{ 'animate-spin': actionLoading === 'mark-validated' }"
+            />
+            Mark Validated
+          </button>
+          <button
+            v-if="doc.is_validated"
+            :disabled="actionLoading !== null"
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            @click="triggerMarkInvalidated"
+          >
+            <UIcon
+              name="i-lucide-shield-off"
+              class="w-3.5 h-3.5"
+              :class="{ 'animate-spin': actionLoading === 'mark-invalidated' }"
+            />
+            Remove Validation
+          </button>
           <button
             v-if="doc.cics_result"
             class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-primary-600 hover:bg-primary-700 text-white transition"
@@ -724,6 +754,7 @@ const {
   getSheetClassification, getSheetClassBadge, formatCommissionValue, formatConditions,
   sheetPassStatus, copyJson, downloadJson, downloadExcel,
   triggerIndex, triggerExtract, triggerRerunPass, triggerTransform, triggerValidate,
+  triggerMarkValidated, triggerMarkInvalidated,
 } = useCommissionIntakeDetail()
 
 function openOverlapRuleModal(overlap: OverlapIssue) {

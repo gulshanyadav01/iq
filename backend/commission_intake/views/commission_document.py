@@ -1,6 +1,8 @@
 import io
 
+from django.db.models import Count, Q
 from django.http import FileResponse
+from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
@@ -216,6 +218,63 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             )
         run_validation.apply_async(args=[str(instance.id)], queue="commission_intake")
         return Response(CommissionDocumentSerializer(instance).data)
+
+    @extend_schema(responses={200: CommissionDocumentSerializer})
+    @action(detail=True, methods=["post"], url_path="mark-validated")
+    def mark_validated(self, request, *args, **kwargs):
+        """Mark a completed document as manually validated."""
+        instance = self.get_object()
+        if instance.status != CommissionDocument.Status.COMPLETED:
+            return Response(
+                {"detail": "Only completed documents can be marked as validated."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        instance.is_validated = True
+        instance.validated_at = timezone.now()
+        instance.save(update_fields=["is_validated", "validated_at", "updated_at"])
+        return Response(CommissionDocumentSerializer(instance).data)
+
+    @extend_schema(responses={200: CommissionDocumentSerializer})
+    @action(detail=True, methods=["post"], url_path="mark-invalidated")
+    def mark_invalidated(self, request, *args, **kwargs):
+        """Remove the validated flag from a document."""
+        instance = self.get_object()
+        instance.is_validated = False
+        instance.validated_at = None
+        instance.save(update_fields=["is_validated", "validated_at", "updated_at"])
+        return Response(CommissionDocumentSerializer(instance).data)
+
+    @extend_schema(exclude=True)
+    @action(detail=False, methods=["get"], url_path="dashboard")
+    def dashboard(self, request, *args, **kwargs):
+        """Return document-level and provider-level extraction/validation stats."""
+        in_flight_statuses = [
+            CommissionDocument.Status.INITIATED,
+            CommissionDocument.Status.INDEXING,
+            CommissionDocument.Status.EXTRACTING,
+        ]
+        qs = self.get_queryset()
+        document_stats = qs.aggregate(
+            total=Count("id"),
+            extracted=Count("id", filter=Q(status=CommissionDocument.Status.COMPLETED)),
+            validated=Count("id", filter=Q(is_validated=True)),
+            in_progress=Count("id", filter=Q(status__in=in_flight_statuses)),
+            failed=Count("id", filter=Q(status=CommissionDocument.Status.FAILED)),
+        )
+        provider_stats = (
+            qs.filter(status=CommissionDocument.Status.COMPLETED)
+            .exclude(provider="")
+            .values("provider")
+            .annotate(
+                extracted=Count("id"),
+                validated=Count("id", filter=Q(is_validated=True)),
+            )
+            .order_by("-extracted")
+        )
+        return Response({
+            "document_stats": document_stats,
+            "provider_stats": list(provider_stats),
+        })
 
     @extend_schema(exclude=True)
     @action(detail=True, methods=["get"], url_path="export-excel")
