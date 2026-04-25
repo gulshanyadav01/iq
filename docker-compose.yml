@@ -37,8 +37,8 @@ services:
     build:
       dockerfile: ./backend/Dockerfile
       context: .
-    image: insure-iq-backend:latest    
-    command: ["prod"]
+    image: insure-iq-backend:latest
+    command: ["bash", "./entrypoint.sh", "prod"]
     ports:
       - "${API_PORT}:8000"
     volumes:
@@ -86,7 +86,7 @@ services:
 
   celery:
     image: insure-iq-backend:latest
-    command: ["celery"]
+    command: ["bash", "./entrypoint.sh", "celery"]
     environment:
       <<: *backend-env
     extra_hosts:
@@ -95,7 +95,7 @@ services:
 
   beat:
     image: insure-iq-backend:latest
-    command: ["beat"]
+    command: ["bash", "./entrypoint.sh", "beat"]
     environment:
       <<: *backend-env
     extra_hosts:

@@ -37,5 +37,6 @@ COPY ./backend /app
 EXPOSE 8000
 
 # Use dumb-init to handle PID 1 properly
-ENTRYPOINT ["dumb-init", "--", "bash", "./entrypoint.sh"]
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["bash", "./entrypoint.sh", "dev"]
     

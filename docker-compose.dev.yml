@@ -6,7 +6,7 @@ services:
     image: insure-iq-backend:latest
     volumes:
       - ./backend:/app
-    command: ["dev"]
+    command: ["bash", "./entrypoint.sh", "dev"]
     depends_on: &backend-depends-on
       postgres:
         condition: service_healthy
@@ -36,6 +36,7 @@ services:
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       MINERVA_API_URL: ${MINERVA_API_URL:-https://rhobots.pbpartners.com/api/mineru/file_parse}
+      POLICY_EXTRACT_CALLBACK_URL: ${POLICY_EXTRACT_CALLBACK_URL:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
@@ -58,7 +59,7 @@ services:
     image: insure-iq-backend:latest
     volumes:
       - ./backend:/app
-    command: ["celery"]
+    command: ["bash", "./entrypoint.sh", "celery"]
     environment:
       <<: *backend-env
     extra_hosts:
@@ -72,7 +73,7 @@ services:
     image: insure-iq-backend:latest
     volumes:
       - ./backend:/app
-    command: ["celery-policy-extract"]
+    command: ["bash", "./entrypoint.sh", "celery-policy-extract"]
     environment:
       <<: *backend-env
     extra_hosts:
@@ -86,7 +87,7 @@ services:
     image: insure-iq-backend:latest
     volumes:
       - ./backend:/app
-    command: ["celery-commission-intake"]
+    command: ["bash", "./entrypoint.sh", "celery-commission-intake"]
     environment:
       <<: *backend-env
     depends_on:
@@ -98,7 +99,7 @@ services:
     image: insure-iq-backend:latest
     volumes:
       - ./backend:/app
-    command: ["beat"]
+    command: ["bash", "./entrypoint.sh", "beat"]
     environment:
       <<: *backend-env
     extra_hosts:

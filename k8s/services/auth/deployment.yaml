@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth
+  namespace: insure-iq
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth
+  template:
+    metadata:
+      labels:
+        app: auth
+    spec:
+      initContainers:
+      - name: wait-for-db
+        image: busybox:1.35
+        command:
+        - sh
+        - -c
+        - until nc -z postgres 5432; do echo "waiting for postgres"; sleep 2; done
+      containers:
+      - name: auth
+        image: rhobotsai/auth:latest
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "./entrypoint.sh"]
+        args: ["start"]
+        ports:
+        - containerPort: 10000
+          name: http
+        env:
+        - name: NODE_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: insure-iq-config
+              key: NODE_ENV_AUTH
+        - name: PORT
+          valueFrom:
+            configMapKeyRef:
+              name: insure-iq-config
+              key: PORT
+        - name: BASE_DOMAIN
+          valueFrom:
+            configMapKeyRef:
+              name: insure-iq-config
+              key: BASE_DOMAIN
+        - name: DATABASE_STRING
+          valueFrom:
+            configMapKeyRef:
+              name: insure-iq-config
+              key: DATABASE_STRING
+        - name: TRUSTED_ORIGINS
+          valueFrom:
+            configMapKeyRef:
+              name: insure-iq-config
+              key: TRUSTED_ORIGINS
+        - name: AWS_S3_ENDPOINT_URL
+          valueFrom:
+            configMapKeyRef:
+              name: insure-iq-config
+              key: AWS_S3_ENDPOINT_URL
+        - name: AWS_STORAGE_BUCKET_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: insure-iq-config
+              key: AWS_STORAGE_BUCKET_NAME
+        - name: AWS_REGION
+          valueFrom:
+            configMapKeyRef:
+              name: insure-iq-config
+              key: AWS_REGION
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: backend-secrets
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: backend-secrets
+              key: AWS_SECRET_ACCESS_KEY
+        - name: WEBHOOK_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: backend-secrets
+              key: WEBHOOK_SECRET_KEY
+        - name: WEBHOOK_EP
+          value: "http://backend/api/auth/webhook/"
+        - name: BETTER_AUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: backend-secrets
+              key: BETTER_AUTH_SECRET
+        - name: GOOGLE_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: backend-secrets
+              key: GOOGLE_CLIENT_ID
+        - name: GOOGLE_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: backend-secrets
+              key: GOOGLE_CLIENT_SECRET
+        - name: GITHUB_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: backend-secrets
+              key: GITHUB_CLIENT_ID
+        - name: GITHUB_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: backend-secrets
+              key: GITHUB_CLIENT_SECRET
+        readinessProbe:
+          httpGet:
+            path: /api/auth/ok
+            port: 10000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /api/auth/ok
+            port: 10000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth
+  namespace: insure-iq
+spec:
+  type: ClusterIP
+  selector:
+    app: auth
+  ports:
+  - port: 80
+    targetPort: 10000
+    name: http

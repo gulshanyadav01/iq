@@ -1,12 +1,14 @@
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import extend_schema, OpenApiCallback
 from rest_framework import viewsets, status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from policy_extract.models import PolicyExtractionRequest
 from policy_extract.serializers import (
     PolicyExtractionRequestCreateSerializer,
+    PolicyExtractionRequestLinkCreateSerializer,
     PolicyExtractionRequestSerializer,
+    PolicyExtractCallbackSerializer,
 )
 from policy_extract.tasks import enqueue_processing_chain
 
@@ -23,7 +25,7 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
     GET /api/policy-extract/requests/{id}/
         - Poll current status and result
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     queryset = PolicyExtractionRequest.objects.all()
 
     def get_serializer_class(self):
@@ -32,28 +34,54 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
         return PolicyExtractionRequestSerializer
 
     @extend_schema(
+        summary="Submit policy extraction request",
+        description="Accept file upload (multipart) or file_link (JSON). Returns extraction request with status=initiated. "
+                    "On completion or failure, a POST callback is sent to the configured callback_url.",
+        tags=["Policy Extract"],
         request=PolicyExtractionRequestCreateSerializer,
         responses={201: PolicyExtractionRequestSerializer},
+        callbacks=[
+            OpenApiCallback(
+                name="policyExtractCallback",
+                path="{$request.body#/callback_url}",
+                decorator=extend_schema(
+                    summary="Policy extraction callback",
+                    description="POSTed by the server when extraction completes or fails.",
+                    request=PolicyExtractCallbackSerializer,
+                    responses={200: None},
+                ),
+            )
+        ],
     )
     def create(self, request, *args, **kwargs):
-        """POST /api/policy-extract/requests/ — accept multipart file, enqueue processing."""
-        serializer = PolicyExtractionRequestCreateSerializer(data=request.data)
+        if "file_link" in request.data:
+            serializer = PolicyExtractionRequestLinkCreateSerializer(data=request.data)
+        else:
+            serializer = PolicyExtractionRequestCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         extraction_request = serializer.save()
         enqueue_processing_chain(str(extraction_request.id))
         response_serializer = PolicyExtractionRequestSerializer(extraction_request)
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
-    @extend_schema(responses={200: PolicyExtractionRequestSerializer(many=True)})
+    @extend_schema(
+        summary="List extraction requests",
+        description="List all extraction requests (newest first) with current processing status.",
+        tags=["Policy Extract"],
+        responses={200: PolicyExtractionRequestSerializer(many=True)},
+    )
     def list(self, request, *args, **kwargs):
-        """GET /api/policy-extract/requests/ — list all requests, newest first."""
         queryset = self.get_queryset().order_by('-created_at')
         serializer = PolicyExtractionRequestSerializer(queryset, many=True)
         return Response(serializer.data)
 
-    @extend_schema(responses={200: PolicyExtractionRequestSerializer})
+    @extend_schema(
+        summary="Get extraction request",
+        description="Poll current processing status and extraction result.",
+        tags=["Policy Extract"],
+        responses={200: PolicyExtractionRequestSerializer},
+    )
     def retrieve(self, request, *args, **kwargs):
-        """GET /api/policy-extract/requests/{id}/ — poll current status and result."""
         instance = self.get_object()
         serializer = PolicyExtractionRequestSerializer(instance)
         return Response(serializer.data)

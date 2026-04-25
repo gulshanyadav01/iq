@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: insure-iq
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      initContainers:
+      - name: wait-for-db
+        image: busybox:1.35
+        command:
+        - sh
+        - -c
+        - |
+          echo "Waiting for postgres..."
+          until nc -z postgres 5432; do
+            echo "postgres is unavailable - sleeping"
+            sleep 2
+          done
+          echo "postgres is up"
+      - name: migrate
+        image: insure-iq-backend:latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - python
+        - manage.py
+        - migrate
+        - --noinput
+        envFrom:
+        - configMapRef:
+            name: insure-iq-config
+        - secretRef:
+            name: backend-secrets
+      containers:
+      - name: django
+        image: insure-iq-backend:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+        envFrom:
+        - configMapRef:
+            name: insure-iq-config
+        - secretRef:
+            name: backend-secrets
+        readinessProbe:
+          httpGet:
+            path: /api/health/
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /api/health/
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: insure-iq
+spec:
+  type: ClusterIP
+  selector:
+    app: backend
+  ports:
+  - port: 80
+    targetPort: 8000
+    name: http
