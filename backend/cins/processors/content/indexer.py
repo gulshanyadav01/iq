@@ -269,7 +269,8 @@ def _convert_excel_to_csv(excel_path: str, output_dir: Path, sheet_name: Optiona
 
 def _format_csv_with_metadata(csv_content: str, metadata: Dict) -> str:
     """Format CSV content with metadata context for LLM consumption."""
-    markdown_table = csv_to_markdown(csv_content)
+    header_row_count = len(metadata.get('formatting', {}).get('detected_header_rows', []))
+    markdown_table = csv_to_markdown(csv_content, header_row_count=header_row_count)
     sheet_name = metadata.get('sheet_name', 'Unknown')
     dimensions = metadata.get('dimensions', {})
     rows = dimensions.get('rows', 0)

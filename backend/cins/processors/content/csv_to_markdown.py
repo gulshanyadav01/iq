@@ -13,7 +13,7 @@ import io
 from typing import List
 
 
-def csv_to_markdown(csv_content: str) -> str:
+def csv_to_markdown(csv_content: str, header_row_count: int = 0) -> str:
     """
     Convert CSV string to markdown table format.
 
@@ -22,10 +22,16 @@ def csv_to_markdown(csv_content: str) -> str:
     - Escapes pipe characters in cell content (| → \\|)
     - Handles empty cells (rendered as empty)
     - Preserves all rows including empty ones
-    - No header detection (treats all rows equally)
+    - Deduplicates consecutive identical non-empty cells only in header rows
+      (Excel expands merged header cells by repeating the value — collapse them
+      to one). Data rows are never deduplicated; identical adjacent values in
+      data rows are real distinct commission rates that must be preserved.
 
     Args:
         csv_content: Raw CSV content as string
+        header_row_count: Number of leading rows to treat as headers for
+            deduplication purposes. Rows beyond this count are data rows and
+            are never deduplicated. Defaults to 0 (no deduplication).
 
     Returns:
         Markdown formatted table string
@@ -61,17 +67,24 @@ def csv_to_markdown(csv_content: str) -> str:
         # Pad row to match max columns (in case of jagged rows)
         padded_row = row + [''] * (max_cols - len(row))
 
-        # Deduplicate consecutive identical non-empty cells (Excel merged cells expand
-        # by repeating the same value across all covered columns — collapse them to one).
-        deduped = []
-        prev = None
-        for cell in padded_row:
-            val = str(cell) if cell else ''
-            if val and val == prev:
-                deduped.append('')
-            else:
-                deduped.append(val)
-                prev = val if val else prev
+        # Deduplicate consecutive identical non-empty cells only in header rows.
+        # Excel merged header cells are expanded by repeating the same value
+        # across all covered columns — collapse them back to one.
+        # Data rows are never deduplicated: identical adjacent values are real
+        # distinct commission rates for different sub-columns.
+        is_header_row = row_idx < header_row_count
+        if is_header_row:
+            deduped = []
+            prev = None
+            for cell in padded_row:
+                val = str(cell) if cell else ''
+                if val and val == prev:
+                    deduped.append('')
+                else:
+                    deduped.append(val)
+                    prev = val
+        else:
+            deduped = [str(cell) if cell else '' for cell in padded_row]
 
         # Escape pipe characters in cell content
         escaped_cells = [
