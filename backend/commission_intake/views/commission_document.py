@@ -370,6 +370,12 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                 return "Yes" if v else "No"
             return v
 
+        def cv_default(v, default):
+            """Like cv() but returns default string when value is None."""
+            if v is None:
+                return default
+            return cv(v)
+
         def outcome_percentages(outcome, deal_param):
             """
             Map a single CommissionOutcome to the 6 commission columns.
@@ -458,10 +464,10 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                     cv(conditions.get("school_bus_type")),
                     cv(conditions.get("booking_mode")),
                     cv(conditions.get("zero_dep")),
-                    cv(conditions.get("ncb")),
-                    cv(conditions.get("cpa")),
-                    cv(conditions.get("fuel_type")),
-                    cv(conditions.get("vehicle_age")),
+                    cv_default(conditions.get("ncb"), "Yes,No"),
+                    cv_default(conditions.get("cpa"), "With CPA,Without CPA"),
+                    cv_default(conditions.get("fuel_type"), "Petrol,Diesel,CNG,LPG,Electric"),
+                    cv_default(conditions.get("vehicle_age"), "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"),
                     cv(conditions.get("vehicle_make")),
                     cv(conditions.get("vehicle_model")),
                     cv(conditions.get("vehicle_carrier")),

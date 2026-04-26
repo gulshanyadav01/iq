@@ -1021,11 +1021,31 @@ class RawToCICSTransformer:
 
         # Integer range fields
         gvw_start, gvw_end = self._parse_range_field(entry_conditions.get("gvw"))
+        if gvw_start is None and gvw_end is None:
+            gvw_start, gvw_end = 0, 0
+        elif gvw_start is None:
+            gvw_start = 0
+        elif gvw_end is None:
+            gvw_end = 0
+
         cc_start, cc_end = self._parse_range_field(entry_conditions.get("cc"))
+        if cc_start is None and cc_end is None:
+            cc_start, cc_end = 0, 99999
+        elif cc_start is None:
+            cc_start = 0
+        elif cc_end is None:
+            cc_end = 99999
+
         seat_start, seat_end = self._parse_range_field(
             entry_conditions.get("seating_capacity")
             or getattr(raw, "global_seating_capacity_text", None)
         )
+        if seat_start is None and seat_end is None:
+            seat_start, seat_end = 0, 99
+        elif seat_start is None:
+            seat_start = 0
+        elif seat_end is None:
+            seat_end = 99
 
         # Vehicle age
         vehicle_age = self._parse_int_field(entry_conditions.get("vehicle_age"))
