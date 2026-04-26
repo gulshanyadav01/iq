@@ -625,7 +625,7 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
             commission_sheets=commission_sheets,
         )
 
-        service = get_llm_service(**({"model": doc.llm_model} if doc.llm_model else {}))
+        service = get_llm_service(provider=doc.llm_provider, **({"model": doc.llm_model} if doc.llm_model else {}))
 
         start = _time.monotonic()
         p2_codegen_code = ""
