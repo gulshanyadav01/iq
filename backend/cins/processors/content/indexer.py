@@ -763,6 +763,7 @@ class ContentIndexer:
 
             sheet_classifications = {}
             sheet_csv_paths = {}
+            sheet_header_row_counts = {}
             for sheet_result in csv_data.get("sheets", []):
                 sheet_name = sheet_result.get("sheet_name")
                 classification = sheet_result.get("classification")
@@ -776,6 +777,15 @@ class ContentIndexer:
 
                 if sheet_name and sheet_result.get("csv_path"):
                     sheet_csv_paths[sheet_name] = sheet_result["csv_path"]
+
+                if sheet_name and sheet_result.get("metadata_path"):
+                    try:
+                        meta_json = json.loads(Path(sheet_result["metadata_path"]).read_text(encoding="utf-8"))
+                        sheet_header_row_counts[sheet_name] = len(
+                            meta_json.get("formatting", {}).get("detected_header_rows", [])
+                        )
+                    except Exception:
+                        sheet_header_row_counts[sheet_name] = 0
         except Exception as e:
             logger.error(f"Failed to convert Excel to CSV: {e}")
             raise
@@ -913,7 +923,8 @@ class ContentIndexer:
                                                 note_lines.append(" ".join(seen))
                                         table_md = "\n".join(note_lines) if note_lines else "[Empty notes section]"
                                     else:
-                                        table_md = csv_to_markdown(table_info["table_csv_content"])
+                                        hrc = sheet_header_row_counts.get(sheet_name, 0)
+                                        table_md = csv_to_markdown(table_info["table_csv_content"], header_row_count=hrc)
                                     md_parts.append(
                                         f"## Table {table_info['table_index']}: {table_info['table_name']} [type: {table_type}]\n\n{table_md}"
                                     )

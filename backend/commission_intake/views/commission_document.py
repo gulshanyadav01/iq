@@ -288,6 +288,17 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         instance.save(update_fields=["is_validated", "validated_at", "updated_at"])
         return Response(CommissionDocumentSerializer(instance).data)
 
+    @extend_schema(
+        summary="Delete commission document",
+        description="Permanently deletes a commission document and all related data.",
+        tags=["Commission Document"],
+        responses={204: None},
+    )
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        instance.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     @extend_schema(exclude=True)
     @action(detail=False, methods=["get"], url_path="dashboard")
     def dashboard(self, request, *args, **kwargs):
