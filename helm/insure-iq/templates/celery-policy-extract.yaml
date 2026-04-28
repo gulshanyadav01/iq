@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-policy-extract
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "insure-iq.labels" . | nindent 4 }}
+    app: celery-policy-extract
+spec:
+  replicas: {{ .Values.celery.policyExtract.replicas }}
+  selector:
+    matchLabels:
+      app: celery-policy-extract
+  template:
+    metadata:
+      labels:
+        app: celery-policy-extract
+    spec:
+      containers:
+      - name: celery
+        image: "{{ .Values.global.imageRegistry }}{{ .Values.images.backend }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        command:
+        - celery
+        - -A
+        - config
+        - worker
+        - -Q
+        - policy_extract
+        - -l
+        - info
+        envFrom:
+        - configMapRef:
+            name: insure-iq-config
+        - secretRef:
+            name: backend-secrets
+        resources:
+          {{- toYaml .Values.celery.policyExtract.resources | nindent 12 }}

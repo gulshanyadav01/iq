@@ -1,0 +1,13 @@
+# Development overrides: enable in-cluster postgres, redis, minio
+
+postgres:
+  enabled: true
+
+redis:
+  enabled: true
+
+minio:
+  enabled: true
+
+ingress:
+  host: localhost

@@ -1,0 +1,157 @@
+global:
+  namespace: insure-iq
+  imageRegistry: ""
+  imagePullPolicy: IfNotPresent
+
+images:
+  backend: insure-iq-backend:latest
+  web: insure-iq-web:latest
+  auth: rhobotsai/auth:latest
+
+app:
+  debug: "true"
+  env: DEV
+  allowedHosts: "*"
+  csrfTrustedOrigins: "http://localhost"
+  hostName: "http://localhost"
+
+backend:
+  replicas: 1
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 250m
+    limits:
+      memory: 1Gi
+      cpu: 500m
+
+web:
+  replicas: 1
+  nuxtPublicAuthBaseUrl: "http://localhost/auth/api/auth"
+  nuxtPublicAppBaseUrl: "http://localhost"
+  nuxtPublicApiScheme: "http"
+  nuxtPublicApiBaseUrl: "localhost"
+  nuxtPublicEnabledSocialProviders: "google,github,microsoft"
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+auth:
+  baseDomain: "localhost"
+  trustedOrigins: "http://localhost"
+  webhookEp: "http://backend/api/auth/webhook/"
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+celery:
+  worker:
+    replicas: 1
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 250m
+      limits:
+        memory: 1Gi
+        cpu: 500m
+  beat:
+    replicas: 1
+    resources:
+      requests:
+        memory: 256Mi
+        cpu: 100m
+      limits:
+        memory: 512Mi
+        cpu: 250m
+  policyExtract:
+    replicas: 1
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 250m
+      limits:
+        memory: 1Gi
+        cpu: 500m
+
+db:
+  host: postgres
+  name: insur_iq
+  user: postgres
+
+postgres:
+  enabled: true
+  storageSize: 1Gi
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 250m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+redis:
+  enabled: true
+  brokerUrl: "redis://redis:6379/0"
+  resultBackend: "redis://redis:6379/1"
+  cacheBackend: "redis://redis:6379/2"
+  storageSize: 100Mi
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 100m
+    limits:
+      memory: 256Mi
+      cpu: 200m
+
+minio:
+  enabled: true
+  s3EndpointUrl: "http://minio:9000"
+  s3PublicEndpointUrl: "http://localhost:9900"
+  bucketName: insure-iq
+  region: ap-south-1
+  storageSize: 1Gi
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 200m
+
+ingress:
+  host: localhost
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/websocket-enabled: "true"
+
+# Placeholder for secrets — user provides values.secrets.yaml at install time
+secrets:
+  secretKey: ""
+  webhookSecretKey: ""
+  dbPassword: ""
+  betterAuthSecret: ""
+  awsAccessKeyId: ""
+  awsSecretAccessKey: ""
+  googleClientId: ""
+  googleClientSecret: ""
+  githubClientId: ""
+  githubClientSecret: ""
+  microsoftClientId: ""
+  microsoftClientSecret: ""
+  googleApiKey: ""
+  minervaApiUrl: ""
+  policyExtractCallbackUrl: ""
+  postgresSecretUsername: postgres
+  postgresSecretPassword: postgres
+  minioSecretUsername: minio
+  minioSecretPassword: miniosecret
