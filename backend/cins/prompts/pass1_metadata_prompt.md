@@ -53,7 +53,7 @@ Populate only if the condition applies to **every commission rule in the documen
 Examples of valid global settings:
 
 * GST percentage applicable to all commissions
-* Commission applied on OD premium (if universal)
+* Commission applied on (e.g., "Net Premium", "OD Premium") — only if stated universally for all rules
 * Vehicle type restriction (if entire document is for one type)
 * State restriction (if entire document applies to same geography)
 * Universal deductions

@@ -78,6 +78,7 @@ POLICY_TYPE_MAPPINGS = {
     "third party": "third-party",
     "tp": "third-party",
     "tp only": "third-party",
+    "satp": "third-party",
     "act": "third-party",          # Cholamandalam: ACT = third-party (act-only)
     "saod": "saod",
     "sa od": "saod",
@@ -966,9 +967,15 @@ class RawToCICSTransformer:
             "school_bus_type",
         )
 
-        # Deal parameter
+        # Deal parameter — fall back to applied_on_text or global_applied_on
+        # so every rule has one of: od, net, regular-tp, tp-with-vehicle-age, flat-amount, ape
+        deal_parameter_text = (
+            entry_conditions.get("deal_parameter")
+            or entry.applied_on_text
+            or getattr(raw, "global_applied_on", None)
+        )
         deal_parameter = self._normalize_list_field(
-            entry_conditions.get("deal_parameter"),
+            deal_parameter_text,
             DEAL_PARAMETER_MAPPINGS,
             "deal_parameter",
         )
@@ -1232,11 +1239,15 @@ class RawToCICSTransformer:
                 if excluded_names:
                     return sorted(VALID_STATE_NAMES - set(excluded_names))
 
-        # Proactive master data expansion
+        # Proactive master data expansion — only for state-grouping entries.
+        # Skip 'declined' and other non-state entries whose values may contain
+        # exclusion phrases that would over-expand to all states.
         if master_data:
             upper_text = state_text.upper()
             for m in master_data:
                 if not m.key:
+                    continue
+                if m.entry_type not in ("state_mapping", "rto_mapping"):
                     continue
                 key_upper = m.key.upper()
                 if re.search(rf"\b{re.escape(key_upper)}\b", upper_text):

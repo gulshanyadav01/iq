@@ -25,13 +25,6 @@ from cins.schema.extraction_passes import (
 )
 from cins.validators.raw_extraction_validator import RawExtractionValidator
 
-# Thresholds for proactive code-gen mode selection in Pass 3.
-# Tune these if the heuristics fire too early or too late.
-CODEGEN_INPUT_SIZE_THRESHOLD_BYTES = 30_000  # commission_data_content > 30 KB
-CODEGEN_ROW_COUNT_THRESHOLD = 15  # total commission-table rows > 300
-CODEGEN_CELL_COUNT_THRESHOLD = 200  # total cells threshold for density check
-CODEGEN_DIMENSION_THRESHOLD = 15    # rows or columns per table for density check
-
 # Threshold for proactive code-gen mode selection in Pass 2 (master data).
 CODEGEN_INPUT_SIZE_THRESHOLD_BYTES_PASS2 = 30_000  # master_data_content > 30 KB
 
@@ -106,11 +99,6 @@ def get_pass2_master_data_schema():
     return MasterDataExtraction.model_json_schema()
 
 
-def get_pass3_rules_schema():
-    """Get the RulesExtraction JSON schema from Pydantic model."""
-    return RulesExtraction.model_json_schema()
-
-
 def get_pass1_metadata_prompt():
     """Get the Pass 1 metadata extraction prompt."""
     try:
@@ -156,24 +144,6 @@ def get_pass2_master_data_codegen_prompt():
         )
 
 
-def get_pass3_rules_prompt():
-    """
-    Get the Pass 3 products and rules extraction prompt.
-
-    Returns:
-        str: Prompt for extracting all products and their rules
-    """
-    try:
-        prompt_path = (
-            Path(__file__).parent.parent.parent / "prompts" / "pass3_rules_prompt.md"
-        )
-        with open(prompt_path, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception as e:
-        print(f"Warning: Could not load Pass 3 prompt: {e}", file=sys.stderr)
-        return "Extract all products and their commission rules from the document."
-
-
 def get_pass3_rules_codegen_prompt():
     """Get the Pass 3 code-generation fallback prompt."""
     try:
@@ -213,71 +183,6 @@ def _is_truncated_json(raw_json: str, provider: str) -> bool:
     ends_clean = tail.endswith("}")
     return len(raw_json) >= max_chars * 0.90 or not ends_clean
 
-
-def _should_use_codegen_for_pass3(
-    commission_data_content: str,
-    table_detections=None,
-) -> bool:
-    """
-    Proactive heuristic: decide whether Pass 3 should use code generation instead
-    of JSON extraction before making any LLM call.
-
-    Three signals are checked (any alone triggers code-gen mode):
-    1. Input size > CODEGEN_INPUT_SIZE_THRESHOLD_BYTES
-    2. Total commission-table row count > CODEGEN_ROW_COUNT_THRESHOLD
-    3. Total cells > CODEGEN_CELL_COUNT_THRESHOLD and any table has rows or columns > CODEGEN_DIMENSION_THRESHOLD
-
-    Args:
-        commission_data_content: The commission data text that will be sent to Pass 3
-        table_detections: Optional list of CSVTableDetectionExtraction objects from Pass 0C.
-                          Each has a .tables attribute with DetectedTable items having
-                          .table_type, .start_row, .end_row, .start_col, .end_col fields.
-
-    Returns:
-        True if code-gen mode should be used proactively
-    """
-    content_bytes = len(commission_data_content.encode("utf-8"))
-    if content_bytes > CODEGEN_INPUT_SIZE_THRESHOLD_BYTES:
-        print(
-            f"#   → Proactive code-gen: content size {content_bytes:,} bytes "
-            f"> threshold {CODEGEN_INPUT_SIZE_THRESHOLD_BYTES:,} bytes",
-            file=sys.stderr,
-        )
-        return True
-
-    if table_detections:
-        total_rows = 0
-        total_cells = 0
-        wide_or_tall = False
-        for detection in table_detections:
-            for table in detection.tables:
-                if getattr(table, "table_type", "") != "commission":
-                    continue
-                rows = max(0, table.end_row - table.start_row)
-                cols = max(0, (table.end_col or 0) - (table.start_col or 0))
-                total_rows += rows
-                total_cells += rows * cols
-                if rows > CODEGEN_DIMENSION_THRESHOLD or cols > CODEGEN_DIMENSION_THRESHOLD:
-                    wide_or_tall = True
-
-        if total_rows > CODEGEN_ROW_COUNT_THRESHOLD:
-            print(
-                f"#   → Proactive code-gen: estimated commission rows {total_rows} "
-                f"> threshold {CODEGEN_ROW_COUNT_THRESHOLD}",
-                file=sys.stderr,
-            )
-            return True
-
-        if total_cells > CODEGEN_CELL_COUNT_THRESHOLD and wide_or_tall:
-            print(
-                f"#   → Proactive code-gen: total cells {total_cells} "
-                f"> threshold {CODEGEN_CELL_COUNT_THRESHOLD} with wide/tall table "
-                f"(dimension > {CODEGEN_DIMENSION_THRESHOLD})",
-                file=sys.stderr,
-            )
-            return True
-
-    return False
 
 
 def _should_use_codegen_for_pass2(master_data_content: str) -> bool:
@@ -1180,221 +1085,6 @@ def _extract_pass3_via_codegen(
     ), code, user_prompt
 
 
-def _extract_pass3_products_and_rules(
-    commission_data_content,
-    service,
-    metadata,
-    master_data_extraction,
-    output_dir=None,
-    filename_prefix="",
-):
-    """
-    Pass 3: Extract all products and their commission rules.
-
-    Args:
-        commission_data_content: Commission data sections only (no master data or email headers)
-        service: LLM service instance
-        metadata: MetadataExtraction from Pass 1
-        master_data_extraction: MasterDataExtraction from Pass 2
-        output_dir: Directory to save user prompt (optional)
-        filename_prefix: Prefix for output filenames (e.g., sheet name)
-
-    Returns:
-        RulesExtraction: Validated products with their rules
-    """
-    print("=" * 70, file=sys.stderr)
-    print("# PASS 3: Extracting Products and Rules", file=sys.stderr)
-    print("=" * 70, file=sys.stderr)
-
-    schema = get_pass3_rules_schema()
-    prompt = get_pass3_rules_prompt()
-
-    if not schema:
-        raise Exception("Could not load Pass 3 schema")
-
-    print(
-        f"# Using commission data only ({len(commission_data_content)} chars)",
-        file=sys.stderr,
-    )
-
-    # Build context header with metadata and master data (already extracted in Pass 1 & 2)
-    context_parts = [
-        f"**Provider**: {metadata.provider_name}",
-        f"**Period**: {metadata.period_label}",
-    ]
-
-    # Only include global settings if any are present
-    global_settings = []
-    if metadata.global_gst_percentage:
-        global_settings.append(f"- GST: {metadata.global_gst_percentage}")
-    if metadata.global_applied_on:
-        global_settings.append(f"- Applied On: {metadata.global_applied_on}")
-    if metadata.global_deductions:
-        global_settings.append(f"- Deductions: {metadata.global_deductions}")
-    if metadata.global_vehicle_type_text:
-        global_settings.append(f"- Vehicle Type: {metadata.global_vehicle_type_text}")
-    if metadata.global_state_text:
-        global_settings.append(f"- States: {metadata.global_state_text}")
-
-    if global_settings:
-        context_parts.append("**Global Settings**:")
-        context_parts.extend(global_settings)
-
-    # Add context from Pass 2 - format master data as concise text
-    master_data_text = _format_master_data_as_text(master_data_extraction)
-    if master_data_text:
-        context_parts.append("")  # Empty line before master data
-        context_parts.append(master_data_text)
-
-    context_parts.append("")  # Empty line
-    context_parts.append("---")
-    context_parts.append("")  # Empty line after separator
-
-    context_header = "\n".join(context_parts)
-
-    user_prompt = context_header + commission_data_content
-
-    # Build config
-    config = get_config_for_extraction()
-    config.response_json_schema = schema
-    config.system_instruction = prompt
-
-    # Save user prompt before calling LLM
-    if output_dir:
-        prompt_filename = (
-            f"{filename_prefix}pass3_user_prompt.txt"
-            if filename_prefix
-            else "pass3_user_prompt.txt"
-        )
-        prompt_file = output_dir / prompt_filename
-        with open(prompt_file, "w", encoding="utf-8") as f:
-            f.write(user_prompt)
-        print(f"#   → Saved user prompt to {prompt_file}", file=sys.stderr)
-
-    # Call LLM
-    result_json = None
-    try:
-        result_json = service.generate_content(user_prompt, config=config)
-
-        # Save raw LLM response immediately before any parsing
-        if output_dir:
-            raw_filename = (
-                f"{filename_prefix}pass3_raw_response.json"
-                if filename_prefix
-                else "pass3_raw_response.json"
-            )
-            raw_file = output_dir / raw_filename
-            with open(raw_file, "w", encoding="utf-8") as f:
-                f.write(result_json)
-            print(f"#   → Saved raw LLM response to {raw_file}", file=sys.stderr)
-
-        # Check output size before parsing
-        if len(result_json) > 200_000:  # 200KB threshold for all products
-            print(
-                f"#   ⚠ Warning: LLM output is large ({len(result_json):,} bytes), possible repetition",
-                file=sys.stderr,
-            )
-            # Save oversized output for debugging
-            if output_dir:
-                error_filename = (
-                    f"{filename_prefix}pass3_OVERSIZED.txt"
-                    if filename_prefix
-                    else "pass3_OVERSIZED.txt"
-                )
-                error_file = output_dir / error_filename
-                with open(error_file, "w") as f:
-                    f.write(result_json[:10000])  # Save first 10KB
-                print(
-                    f"#   → Saved truncated oversized output to {error_file}",
-                    file=sys.stderr,
-                )
-
-        # Attempt to parse
-        result_dict = json.loads(result_json)
-
-    except json.JSONDecodeError as e:
-        print(f"#   ⚠ Pass 3 JSON parse failed: {e}", file=sys.stderr)
-
-        # Show preview of problematic output
-        if result_json:
-            print(
-                f"#   → Output preview (first 500 chars): {result_json[:500]}",
-                file=sys.stderr,
-            )
-            print(f"#   → Output size: {len(result_json):,} bytes", file=sys.stderr)
-
-            # Save the failed JSON output for debugging
-            if output_dir:
-                error_filename = (
-                    f"{filename_prefix}pass3_PARSE_ERROR.json"
-                    if filename_prefix
-                    else "pass3_PARSE_ERROR.json"
-                )
-                error_file = output_dir / error_filename
-                with open(error_file, "w") as f:
-                    f.write(result_json)
-                print(
-                    f"#   → Saved failed JSON output to {error_file}", file=sys.stderr
-                )
-
-        print("#   Check saved output file for details.", file=sys.stderr)
-
-        # Reactive fallback: if output looks truncated at token limit, try code generation
-        if result_json:
-            provider = getattr(service, "provider", "gemini")
-            if _is_truncated_json(result_json, provider):
-                print(
-                    "#   → Token-limit truncation detected → falling back to code generation",
-                    file=sys.stderr,
-                )
-                codegen_result, _codegen_code, _codegen_prompt = _extract_pass3_via_codegen(
-                    commission_data_content,
-                    service,
-                    metadata,
-                    master_data_extraction,
-                    output_dir,
-                    filename_prefix,
-                )
-                return codegen_result, _codegen_prompt
-
-        raise  # Re-raise for non-truncation parse errors
-
-    # Save raw JSON for debugging
-    if output_dir:
-        debug_filename = (
-            f"{filename_prefix}pass3_products_and_rules.json"
-            if filename_prefix
-            else "pass3_products_and_rules.json"
-        )
-        debug_file = output_dir / debug_filename
-        with open(debug_file, "w") as f:
-            f.write(result_json)
-        print(f"#   → Saved raw JSON to {debug_file}", file=sys.stderr)
-
-        # Log output statistics
-        output_size_kb = len(result_json) / 1024
-        approx_tokens = len(result_json) // 4
-        print(
-            f"#   → Pass 3 output: {output_size_kb:.1f} KB, ~{approx_tokens:,} tokens",
-            file=sys.stderr,
-        )
-
-    # Validate with Pydantic (result_dict already parsed above)
-    rules_extraction = RulesExtraction.model_validate(result_dict)
-
-    # Log summary
-    total_rules = sum(len(p.rules) for p in rules_extraction.products)
-    print(
-        f"# Pass 3 complete: {len(rules_extraction.products)} products, {total_rules} total rules",
-        file=sys.stderr,
-    )
-    for product in rules_extraction.products:
-        print(
-            f"#   → {product.product_name}: {len(product.rules)} rules", file=sys.stderr
-        )
-
-    return rules_extraction, user_prompt
-
 
 def extract_multi_pass(
     prompt_text,
@@ -1568,7 +1258,7 @@ def extract_multi_pass(
             cics_doc, transform_warnings, transform_errors = transformer.transform(
                 raw_extraction
             )
-            cics_json = cics_doc.model_dump(exclude_none=True)
+            cics_json = cics_doc.model_dump(exclude_none=False)
             pretty_cics = json.dumps(cics_json, indent=2)
 
             print("# No-change extraction complete.", file=sys.stderr)
@@ -1637,36 +1327,25 @@ def extract_multi_pass(
             })
 
         # Pass 3: Products and Rules (commission data sections only)
-        # Proactive check: use code-gen mode if content is too large for JSON output
+        # Always use code-gen mode for Pass 3
         if on_pass_start:
             on_pass_start(3)
         _pass3_start = time.monotonic()
         _pass3_codegen_code = ""
-        _pass3_extraction_method = "llm"
+        _pass3_extraction_method = "codegen"
         _pass3_user_prompt = pass3_content
-        if _should_use_codegen_for_pass3(pass3_content):
-            print(
-                "# Pass 3: Using code-gen mode (proactive threshold triggered)",
-                file=sys.stderr,
-            )
-            rules_extraction, _pass3_codegen_code, _pass3_user_prompt = _extract_pass3_via_codegen(
-                pass3_content,
-                service,
-                metadata,
-                master_data_extraction,
-                output_dir=out_path,
-                filename_prefix=filename_prefix,
-            )
-            _pass3_extraction_method = "codegen"
-        else:
-            rules_extraction, _pass3_user_prompt = _extract_pass3_products_and_rules(
-                pass3_content,
-                service,
-                metadata,
-                master_data_extraction,
-                output_dir=out_path,
-                filename_prefix=filename_prefix,
-            )
+        print(
+            "# Pass 3: Using code-gen mode (default)",
+            file=sys.stderr,
+        )
+        rules_extraction, _pass3_codegen_code, _pass3_user_prompt = _extract_pass3_via_codegen(
+            pass3_content,
+            service,
+            metadata,
+            master_data_extraction,
+            output_dir=out_path,
+            filename_prefix=filename_prefix,
+        )
         _pass3_duration = time.monotonic() - _pass3_start
 
         if out_path:
@@ -1725,7 +1404,7 @@ def extract_multi_pass(
         if transform_errors:
             print(f"# Transform errors: {len(transform_errors)}", file=sys.stderr)
 
-        cics_json = cics_doc.model_dump(exclude_none=True)
+        cics_json = cics_doc.model_dump(exclude_none=False)
         pretty_cics = json.dumps(cics_json, indent=2)
 
         print("=" * 70, file=sys.stderr)

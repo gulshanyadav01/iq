@@ -415,7 +415,7 @@ class Pipeline:
 
         from cins.schema.extraction_passes import MetadataExtraction, MasterDataExtraction
         from cins.schema.raw_extraction import RawExtraction
-        from cins.processors.core.llm_extract import _extract_pass3_products_and_rules
+        from cins.processors.core.llm_extract import _extract_pass3_via_codegen
         from cins.processors.llm_services.factory import get_llm_service
         from cins.processors.core.raw_to_cics_transformer import RawToCICSTransformer
 
@@ -454,7 +454,7 @@ class Pipeline:
         logger.info("Running Pass 3 (products & rules extraction)")
         commission_data_content = pass3_prompt_file.read_text(encoding="utf-8")
         service = get_llm_service(provider=self.llm_provider)
-        rules_extraction, _ = _extract_pass3_products_and_rules(
+        rules_extraction, _, _ = _extract_pass3_via_codegen(
             commission_data_content,
             service,
             metadata,
@@ -477,7 +477,7 @@ class Pipeline:
         logger.info("Transforming to CICS")
         transformer = RawToCICSTransformer()
         cics_doc, transform_warnings, transform_errors = transformer.transform(raw_extraction)
-        cics_json = cics_doc.model_dump(exclude_none=True)
+        cics_json = cics_doc.model_dump(exclude_none=False)
 
         # Determine output file name from the folder (use folder name + .json)
         output_path = output_folder / f"{output_folder.name}.json"
@@ -517,7 +517,7 @@ class Pipeline:
             extract_multi_pass,
             get_pass1_metadata_prompt,
             get_pass2_master_data_prompt,
-            get_pass3_rules_prompt,
+            get_pass3_rules_codegen_prompt,
         )
         from cins.processors.llm_services.factory import get_llm_service
 
@@ -540,7 +540,7 @@ class Pipeline:
         system_instructions = {
             1: get_pass1_metadata_prompt(),
             2: get_pass2_master_data_prompt(),
-            3: get_pass3_rules_prompt(),
+            3: get_pass3_rules_codegen_prompt(),
         }
 
         def _on_pass_done(pass_num, result_dict, duration, extra=None):
@@ -623,13 +623,13 @@ class Pipeline:
             extract_multi_pass,
             get_pass1_metadata_prompt,
             get_pass2_master_data_prompt,
-            get_pass3_rules_prompt,
+            get_pass3_rules_codegen_prompt,
         )
 
         system_instructions = {
             1: get_pass1_metadata_prompt(),
             2: get_pass2_master_data_prompt(),
-            3: get_pass3_rules_prompt(),
+            3: get_pass3_rules_codegen_prompt(),
         }
 
         start_time = datetime.now()

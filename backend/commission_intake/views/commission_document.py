@@ -104,7 +104,11 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         instance.status = CommissionDocument.Status.INITIATED
         instance.error = None
         instance.processing_mode = mode
-        instance.save(update_fields=["status", "error", "processing_mode", "updated_at"])
+        instance.is_validated = False
+        instance.validated_at = None
+        instance.save(update_fields=[
+            "status", "error", "processing_mode", "is_validated", "validated_at", "updated_at",
+        ])
         enqueue_processing_chain(str(instance.id), mode=mode)
         return Response(CommissionDocumentSerializer(instance).data)
 
@@ -126,7 +130,11 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         instance.status = CommissionDocument.Status.INITIATED
         instance.error = None
         instance.processing_mode = CommissionDocument.ProcessingMode.INDEX_ONLY
-        instance.save(update_fields=["status", "error", "processing_mode", "updated_at"])
+        instance.is_validated = False
+        instance.validated_at = None
+        instance.save(update_fields=[
+            "status", "error", "processing_mode", "is_validated", "validated_at", "updated_at",
+        ])
         enqueue_processing_chain(str(instance.id), mode="index_only")
         return Response(CommissionDocumentSerializer(instance).data)
 
@@ -155,7 +163,11 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         instance.status = CommissionDocument.Status.INITIATED
         instance.error = None
         instance.processing_mode = CommissionDocument.ProcessingMode.EXTRACT_ONLY
-        instance.save(update_fields=["status", "error", "processing_mode", "updated_at"])
+        instance.is_validated = False
+        instance.validated_at = None
+        instance.save(update_fields=[
+            "status", "error", "processing_mode", "is_validated", "validated_at", "updated_at",
+        ])
         enqueue_processing_chain(str(instance.id), mode="extract_only")
         return Response(CommissionDocumentSerializer(instance).data)
 
@@ -196,6 +208,11 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             attachment_name=attachment_name,
             defaults={"status": ExtractionPass.Status.PENDING, "error": ""},
         )
+
+        if instance.is_validated:
+            instance.is_validated = False
+            instance.validated_at = None
+            instance.save(update_fields=["is_validated", "validated_at", "updated_at"])
 
         rerun_single_pass.apply_async(
             args=[str(instance.id), pass_number, sheet_name, attachment_name],
