@@ -1418,10 +1418,23 @@ class RawToCICSTransformer:
         if pct_match:
             pct_value = float(pct_match.group(1))
             if pct_value > 100:
+                # An explicit '%' sign means percentage. Values > 100 are almost
+                # always upstream bugs (e.g. fraction multiplied by 100 twice:
+                # 0.65 -> 65 -> "6500%"). Flag for manual review instead of
+                # silently flipping units to flat INR.
                 self.warnings.append(
-                    f"Commission value '{value}' exceeds 100% — interpreting as flat INR amount"
+                    f"Commission value '{value}' exceeds 100% — likely an upstream "
+                    f"unit error; flagging for manual review"
                 )
-                return "flat", {"flat_value": pct_value, "flat_currency": "INR"}
+                self.errors.append(
+                    f"Commission value '{value}' > 100% requires manual review"
+                )
+                return "percentage", {
+                    "percentage_value": None,
+                    "calculation_notes": (
+                        f"UNPARSED: {value} exceeds 100% - REQUIRES MANUAL REVIEW"
+                    ),
+                }
             return "percentage", {"percentage_value": pct_value}
 
         # Plain decimal/number without % sign (e.g., "0.26" means 26%, "26" means 26%)
@@ -1432,12 +1445,23 @@ class RawToCICSTransformer:
             # If value < 1, assume it's a decimal representation (0.26 = 26%)
             if num_value < 1:
                 return "percentage", {"percentage_value": num_value * 100}
-            # If value > 100, it can't be a percentage — treat as flat amount (INR)
+            # Plain number > 100 with no currency marker is ambiguous — could be
+            # a flat INR amount or a unit error. Flag for manual review rather
+            # than guessing a currency.
             elif num_value > 100:
                 self.warnings.append(
-                    f"Commission value '{value}' exceeds 100 — interpreting as flat INR amount"
+                    f"Commission value '{value}' exceeds 100 with no currency or "
+                    f"% marker — flagging for manual review"
                 )
-                return "flat", {"flat_value": num_value, "flat_currency": "INR"}
+                self.errors.append(
+                    f"Ambiguous commission value '{value}' requires manual review"
+                )
+                return "percentage", {
+                    "percentage_value": None,
+                    "calculation_notes": (
+                        f"UNPARSED: {value} ambiguous (>100, no unit) - REQUIRES MANUAL REVIEW"
+                    ),
+                }
             else:
                 return "percentage", {"percentage_value": num_value}
 

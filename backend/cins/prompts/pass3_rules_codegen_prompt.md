@@ -128,12 +128,23 @@ def parse_md_row(line):
     return [c.strip() for c in line.strip("|").split("|")]
 
 def to_pct(v):
-    """Convert raw float string like '0.325' to '32.5%'. Returns '' for empty/zero."""
+    """
+    Convert a raw cell value to a percentage string.
+
+    Cells may be stored as fractions ('0.325' = 32.5%) OR as already-percent
+    numbers ('32.5' = 32.5%, '65' = 65%). Detect by magnitude:
+      - 0 < |f| <= 1   -> fraction, multiply by 100
+      - |f| > 1        -> already a percentage, do not multiply
+
+    Values > 100 are returned as-is so they surface as obvious anomalies
+    downstream rather than being silently mangled.
+    Returns '' for empty/non-numeric, '0%' for zero.
+    """
     try:
         f = float(v)
         if f == 0:
             return "0%"
-        pct = f * 100
+        pct = f * 100 if abs(f) <= 1 else f
         s = f"{pct:.4g}%"
         return s
     except (ValueError, TypeError):

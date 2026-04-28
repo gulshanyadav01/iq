@@ -567,10 +567,8 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
         _extract_pass1_metadata,
         _extract_pass2_master_data,
         _extract_pass2_via_codegen,
-        _extract_pass3_products_and_rules,
         _extract_pass3_via_codegen,
         _should_use_codegen_for_pass2,
-        _should_use_codegen_for_pass3,
     )
     from cins.schema.extraction_passes import MetadataExtraction, MasterDataExtraction
 
@@ -672,13 +670,11 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
                     f"\n\n---\n\n{pass3_prompt}"
                 )
 
-            p3_codegen_code = ""
-            p3_extraction_method = "llm"
-            if _should_use_codegen_for_pass3(pass3_prompt):
-                result_obj, p3_codegen_code, _ = _extract_pass3_via_codegen(pass3_prompt, service, metadata_obj, master_data_obj)
-                p3_extraction_method = "codegen"
-            else:
-                result_obj, _ = _extract_pass3_products_and_rules(pass3_prompt, service, metadata_obj, master_data_obj)
+            # Pass 3 always runs via codegen (matches the main pipeline).
+            result_obj, p3_codegen_code, _ = _extract_pass3_via_codegen(
+                pass3_prompt, service, metadata_obj, master_data_obj
+            )
+            p3_extraction_method = "codegen"
             result_dict = result_obj.model_dump()
 
         duration = _time.monotonic() - start
