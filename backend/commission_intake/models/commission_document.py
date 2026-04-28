@@ -45,6 +45,8 @@ class CommissionDocument(TimeStampedUUIDModel):
         default=ProcessingMode.FULL,
     )
     index_progress = models.JSONField(default=dict, blank=True)
+    is_validated = models.BooleanField(default=False, db_index=True)
+    validated_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-created_at"]

@@ -23,7 +23,7 @@ class CICSResultViewSet(viewsets.GenericViewSet):
     @extend_schema(
         summary="Get CICS result",
         description="Returns the full CICS document, raw extraction JSON, and per-sheet breakdown.",
-        tags=["Commission Intake"],
+        tags=["Commission Document"],
         responses={200: CICSResultSerializer},
     )
     def retrieve(self, request, *args, **kwargs):

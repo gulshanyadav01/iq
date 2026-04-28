@@ -80,6 +80,11 @@ Extract from table headers, section names, column labels. Standard values: `"com
 - `"Pvt Comp"` → `"comprehensive"`
 - `"SAOD Grid"` → `"saod"`
 
+Some insurers use short codes for policy type as column headers — map them:
+- `"ACT"` → `"third party"` (act-only / TP)
+- `"PACK"` → `"comprehensive"` (package / comprehensive)
+- `"SOD"` → `"saod"` (standalone OD)
+
 ### `state_text`
 
 If a rule references a **city name** instead of a state, resolve it to the state.
@@ -90,16 +95,26 @@ If a rule references a **city name** instead of a state, resolve it to the state
 
 Never leave `state_text` empty because a city was used.
 
+### `conditions["cc"]`
+
+Use for engine CC / cubic capacity ranges. These appear as grid row/column headers like "UPTO 1000 CC", "1000 TO 1500 CC", "ABOVE 1500 CC", ">1500cc", "150cc", "350cc" etc. Copy the label verbatim — the transformer parses the range.
+
+- `"UPTO 1000 CC"` → `conditions["cc"] = "UPTO 1000 CC"`
+- `"1000 TO 1500 CC"` → `conditions["cc"] = "1000 TO 1500 CC"`
+- `"ABOVE 1500 CC"` → `conditions["cc"] = "ABOVE 1500 CC"`
+
+**Never** put CC ranges in `conditions["vehicle_sub_class"]` — vehicle sub-class is a body/usage type, not engine size.
+
 ### `conditions["vehicle_sub_class"]`
 
-Populate when section or product name explicitly identifies a sub-class.
+Populate when section or product name explicitly identifies a body/usage sub-class.
 
 - `"TW SATP Scooter"` → `"scooter"`
 - `"School Bus Commission"` → `"school bus"`
 - `"PCV Comp Staff Bus"` → `"staff bus"`
 - `"Agri Tractor Comp."` → `"agricultural tractor"`
 
-Only populate if explicitly stated or unambiguously implied.
+Only populate if explicitly stated or unambiguously implied. Never use for engine CC ranges.
 
 ### `commission_value`
 

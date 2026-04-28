@@ -269,7 +269,8 @@ def _convert_excel_to_csv(excel_path: str, output_dir: Path, sheet_name: Optiona
 
 def _format_csv_with_metadata(csv_content: str, metadata: Dict) -> str:
     """Format CSV content with metadata context for LLM consumption."""
-    markdown_table = csv_to_markdown(csv_content)
+    header_row_count = len(metadata.get('formatting', {}).get('detected_header_rows', []))
+    markdown_table = csv_to_markdown(csv_content, header_row_count=header_row_count)
     sheet_name = metadata.get('sheet_name', 'Unknown')
     dimensions = metadata.get('dimensions', {})
     rows = dimensions.get('rows', 0)
@@ -762,6 +763,7 @@ class ContentIndexer:
 
             sheet_classifications = {}
             sheet_csv_paths = {}
+            sheet_header_row_counts = {}
             for sheet_result in csv_data.get("sheets", []):
                 sheet_name = sheet_result.get("sheet_name")
                 classification = sheet_result.get("classification")
@@ -775,6 +777,15 @@ class ContentIndexer:
 
                 if sheet_name and sheet_result.get("csv_path"):
                     sheet_csv_paths[sheet_name] = sheet_result["csv_path"]
+
+                if sheet_name and sheet_result.get("metadata_path"):
+                    try:
+                        meta_json = json.loads(Path(sheet_result["metadata_path"]).read_text(encoding="utf-8"))
+                        sheet_header_row_counts[sheet_name] = len(
+                            meta_json.get("formatting", {}).get("detected_header_rows", [])
+                        )
+                    except Exception:
+                        sheet_header_row_counts[sheet_name] = 0
         except Exception as e:
             logger.error(f"Failed to convert Excel to CSV: {e}")
             raise
@@ -912,7 +923,8 @@ class ContentIndexer:
                                                 note_lines.append(" ".join(seen))
                                         table_md = "\n".join(note_lines) if note_lines else "[Empty notes section]"
                                     else:
-                                        table_md = csv_to_markdown(table_info["table_csv_content"])
+                                        hrc = sheet_header_row_counts.get(sheet_name, 0)
+                                        table_md = csv_to_markdown(table_info["table_csv_content"], header_row_count=hrc)
                                     md_parts.append(
                                         f"## Table {table_info['table_index']}: {table_info['table_name']} [type: {table_type}]\n\n{table_md}"
                                     )

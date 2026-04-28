@@ -19,6 +19,24 @@
         </button>
       </div>
 
+      <!-- Tab bar -->
+      <div class="flex gap-1 border-b border-gray-200 dark:border-gray-800">
+        <NuxtLink
+          to="/commission-intake"
+          class="px-4 py-2 text-xs font-medium border-b-2 transition"
+          :class="$route.path === '/commission-intake' ? 'border-primary-500 text-primary-600 dark:text-primary-400' : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'"
+        >
+          Documents
+        </NuxtLink>
+        <NuxtLink
+          to="/commission-intake/dashboard"
+          class="px-4 py-2 text-xs font-medium border-b-2 transition"
+          :class="$route.path === '/commission-intake/dashboard' ? 'border-primary-500 text-primary-600 dark:text-primary-400' : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'"
+        >
+          Dashboard
+        </NuxtLink>
+      </div>
+
       <!-- Metric Cards -->
       <div v-if="!loading" class="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <div class="glass rounded-2xl p-5 space-y-1">
@@ -154,6 +172,14 @@
                     >
                       <UIcon name="i-lucide-eye" class="w-4 h-4" />
                     </button>
+                    <button
+                      class="p-1.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="Delete document"
+                      :disabled="deletingIds.has(doc.id)"
+                      @click="confirmDelete(doc)"
+                    >
+                      <UIcon name="i-lucide-trash-2" class="w-4 h-4" />
+                    </button>
                   </div>
                 </td>
               </tr>
@@ -162,6 +188,36 @@
         </div>
       </div>
     </div>
+
+    <!-- Delete Confirm Modal -->
+    <UModal v-model:open="isDeleteModalOpen" title="Delete Document">
+      <template #body>
+        <p class="text-sm text-gray-600 dark:text-gray-400">
+          Are you sure you want to delete <span class="font-medium text-gray-900 dark:text-white">{{ documentToDelete?.original_filename }}</span>? This action cannot be undone.
+        </p>
+      </template>
+      <template #footer>
+        <div class="flex justify-end gap-3">
+          <button
+            class="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 transition duration-200"
+            @click="isDeleteModalOpen = false"
+          >
+            Cancel
+          </button>
+          <button
+            class="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white transition duration-200"
+            :disabled="documentToDelete ? deletingIds.has(documentToDelete.id) : false"
+            @click="deleteDocument"
+          >
+            <span v-if="!documentToDelete || !deletingIds.has(documentToDelete.id)">Delete</span>
+            <span v-else class="flex items-center gap-2">
+              <span class="inline-block animate-spin">⟳</span>
+              Deleting...
+            </span>
+          </button>
+        </div>
+      </template>
+    </UModal>
 
     <!-- New Upload Modal -->
     <UModal v-model:open="isModalOpen" title="New Commission Upload" :dismissible="!uploading">
@@ -346,6 +402,9 @@ const processingModeOptions = [
 ]
 
 const retryingIds = ref<Set<string>>(new Set())
+const deletingIds = ref<Set<string>>(new Set())
+const isDeleteModalOpen = ref(false)
+const documentToDelete = ref<CommissionDocument | null>(null)
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -425,6 +484,31 @@ async function retryDocument(id: string) {
     console.error('Retry failed:', err)
   } finally {
     retryingIds.value = new Set([...retryingIds.value].filter(x => x !== id))
+  }
+}
+
+function confirmDelete(doc: CommissionDocument) {
+  documentToDelete.value = doc
+  isDeleteModalOpen.value = true
+}
+
+async function deleteDocument() {
+  if (!documentToDelete.value) return
+  const id = documentToDelete.value.id
+  deletingIds.value = new Set([...deletingIds.value, id])
+  try {
+    const headers = await getAuthHeaders()
+    await $fetch(
+      `${getBaseUrl()}/api/commission-intake/documents/${id}/`,
+      { method: 'DELETE', headers }
+    )
+    documents.value = documents.value.filter(d => d.id !== id)
+    isDeleteModalOpen.value = false
+    documentToDelete.value = null
+  } catch (err) {
+    console.error('Delete failed:', err)
+  } finally {
+    deletingIds.value = new Set([...deletingIds.value].filter(x => x !== id))
   }
 }
 

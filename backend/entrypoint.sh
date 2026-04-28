@@ -23,8 +23,8 @@ elif [ "$1" = "celery-policy-extract" ]; then
   echo "📄 Starting Celery policy-extract worker (concurrency=10)..."
   exec celery -A config worker --queues=policy_extract --concurrency=10 --loglevel=INFO --hostname=policy-extract@%h
 elif [ "$1" = "celery-commission-intake" ]; then
-  echo "📄 Starting Celery commission-intake worker (concurrency=4)..."
-  exec celery -A config worker --queues=commission_intake --concurrency=4 --loglevel=INFO --hostname=commission-intake@%h
+  echo "📄 Starting Celery commission-intake worker (concurrency=1)..."
+  exec celery -A config worker --queues=commission_intake --concurrency=1 --loglevel=INFO --hostname=commission-intake@%h
 elif [ "$1" = "beat" ]; then
   echo "⏰ Starting Celery beat..."
   exec celery -A config beat --loglevel=INFO

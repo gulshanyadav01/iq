@@ -104,6 +104,7 @@ export const useUserStore = defineStore('user', () => {
     const stored = localStorage.getItem(STORAGE_KEY)
     if (stored) {
       profile.value = JSON.parse(stored)
+      isLoggedIn.value = true
     }
     isLoaded.value = true
   }

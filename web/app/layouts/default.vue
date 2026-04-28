@@ -5,20 +5,24 @@
   >
 
     <!-- Sidebar -->
-    <LayoutSidebar ref="sideBarRef" :is-sidebar-open="isSidebarOpen" :is-dark="isDark" @update:is-dark="isDark = $event"
-      @update:is-sidebar-open="isSidebarOpen = $event" />
+    <ClientOnly>
+      <LayoutSidebar ref="sideBarRef" :is-sidebar-open="isSidebarOpen" :is-dark="isDark" @update:is-dark="isDark = $event"
+        @update:is-sidebar-open="isSidebarOpen = $event" />
 
-    <!-- Floating sidebar toggle (visible when sidebar is closed) -->
-    <button
-      v-show="!isSidebarOpen"
-      class="fixed top-3 left-3 z-30 p-1.5 rounded-lg bg-white/70 dark:bg-gray-950/70 backdrop-blur-xl border border-gray-200/60 dark:border-white/[0.07] shadow-sm hover:bg-white dark:hover:bg-gray-900 transition-colors duration-200"
-      @click="isSidebarOpen = true">
-      <PanelLeft class="h-4 w-4 text-gray-500 dark:text-gray-400" />
-    </button>
+      <!-- Floating sidebar toggle (visible when sidebar is closed) -->
+      <button
+        v-show="!isSidebarOpen"
+        class="fixed top-3 left-3 z-30 p-1.5 rounded-lg bg-white/70 dark:bg-gray-950/70 backdrop-blur-xl border border-gray-200/60 dark:border-white/[0.07] shadow-sm hover:bg-white dark:hover:bg-gray-900 transition-colors duration-200"
+        @click="isSidebarOpen = true">
+        <PanelLeft class="h-4 w-4 text-gray-500 dark:text-gray-400" />
+      </button>
+    </ClientOnly>
 
     <!-- Main Content -->
     <main class="transition-[padding] duration-500" :class="{ 'lg:pl-[17rem]': isSidebarOpen }">
-      <div v-if="isSidebarOpen && isMobile" class="fixed z-10 inset-0 bg-black/25 backdrop-blur-sm"></div>
+      <ClientOnly>
+        <div v-if="isSidebarOpen && isMobile" class="fixed z-10 inset-0 bg-black/25 backdrop-blur-sm"></div>
+      </ClientOnly>
       <div class="relative z-[1]">
         <slot />
       </div>

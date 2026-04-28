@@ -73,14 +73,17 @@ POLICY_TYPE_MAPPINGS = {
     "comp": "comprehensive",
     "full": "comprehensive",
     "package": "comprehensive",
+    "pack": "comprehensive",       # Cholamandalam: PACK = comprehensive
     "third-party": "third-party",
     "third party": "third-party",
     "tp": "third-party",
     "tp only": "third-party",
+    "act": "third-party",          # Cholamandalam: ACT = third-party (act-only)
     "saod": "saod",
     "sa od": "saod",
     "stand alone od": "saod",
     "standalone od": "saod",
+    "sod": "saod",                 # Cholamandalam: SOD = standalone OD
     "od-only": "saod",
     "od only": "saod",
     "own damage": "saod",
@@ -1167,8 +1170,8 @@ class RawToCICSTransformer:
         if above_match:
             return int(above_match.group(1)), None
 
-        # Pattern: "< 12" or "<= 12"
-        below_match = re.search(r"(?:<|<=|below|less than)\s*(\d+)", text_str, re.IGNORECASE)
+        # Pattern: "< 12" or "<= 12" or "upto 12" or "up to 12"
+        below_match = re.search(r"(?:<|<=|below|less than|upto|up to)\s*(\d+)", text_str, re.IGNORECASE)
         if below_match:
             return None, int(below_match.group(1))
 

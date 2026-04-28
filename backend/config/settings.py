@@ -311,7 +311,7 @@ SPECTACULAR_SETTINGS = {
         {"url": f"{HOST_NAME}/service-api", "description": "Server"}
     ],
     'TAGS': [
-        {'name': 'Commission Intake', 'description': 'Upload and process commission schedule documents.'},
+        {'name': 'Commission Document', 'description': 'Upload and process commission schedule documents.'},
         {'name': 'Policy Extract', 'description': 'Submit and poll insurance policy extraction requests.'},
         {'name': 'Health', 'description': 'System health check.'},
     ],

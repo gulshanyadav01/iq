@@ -339,10 +339,18 @@ class ExcelToCSVConverter:
         visible_cols: List[int]
     ) -> List[int]:
         """
-        Heuristic header detection based on:
-        - Bold formatting in first 10 rows
-        - Merged cells in first 10 rows
-        - Position (typically rows 1-5)
+        Heuristic header detection using two signals:
+
+        1. Horizontal merged cells (multi-column spans in a single row) — these are
+           the structural column-group title rows (e.g. "Hero OEM" spanning 4 columns).
+           Vertical merges (data cells grouped across rows) are excluded.
+
+        2. Non-numeric rows that immediately follow a merged-cell header row — these
+           are the label rows (e.g. "150cc", "SCOOTER") that have no merge but also
+           carry no commission numbers.
+
+        The bold-cell heuristic is intentionally omitted: many commission grids format
+        the entire table (including data rows) as bold, making it an unreliable signal.
 
         Args:
             sheet: openpyxl worksheet object
@@ -350,27 +358,46 @@ class ExcelToCSVConverter:
             visible_cols: List of visible column indices
 
         Returns:
-            List of row numbers detected as headers
+            List of 1-indexed row numbers detected as headers, sorted ascending.
         """
+        import re
+
         header_candidates = set()
-        num_cols = len(visible_cols)
 
-        # Check first 10 rows for bold cells
-        for row in range(1, min(11, sheet.max_row + 1)):
-            bold_count = 0
-            for col in visible_cols:
-                cell = sheet.cell(row, col)
-                if cell.font and cell.font.bold:
-                    bold_count += 1
-
-            # If >30% of row is bold, likely a header
-            if num_cols > 0 and bold_count / num_cols > 0.3:
-                header_candidates.add(row)
-
-        # Check for merged cells in first 10 rows (common in headers)
+        # Signal 1: horizontal merged cells in the first 10 rows
         for mr in merged_ranges:
-            if mr.start[0] <= 10:
+            if mr.start[0] <= 10 and mr.start[0] == mr.end[0] and mr.end[1] > mr.start[1]:
                 header_candidates.add(mr.start[0])
+
+        if not header_candidates:
+            return []
+
+        # Signal 2: rows following the last merged-cell header that contain only
+        # non-numeric values (label rows like "150cc", "ACT", "SCOOTER").
+        # Empty rows are skipped (they appear between merged title rows and label rows).
+        # Scanning stops when numeric data is found or we've gone 8 rows past the last merge.
+        last_merged_header = max(header_candidates)
+        number_re = re.compile(r'^\s*-?\d+(\.\d+)?\s*$')
+        row = last_merged_header + 1
+        scan_limit = min(last_merged_header + 8, sheet.max_row)
+        while row <= scan_limit:
+            values = [
+                sheet.cell(row, col).value
+                for col in visible_cols
+                if sheet.cell(row, col).value is not None
+            ]
+            if not values:
+                # Empty row — skip it, don't stop scanning
+                row += 1
+                continue
+            all_non_numeric = all(
+                not number_re.match(str(v)) for v in values
+            )
+            if all_non_numeric:
+                header_candidates.add(row)
+                row += 1
+            else:
+                break
 
         return sorted(list(header_candidates))
 

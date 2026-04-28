@@ -18,10 +18,40 @@
             <span v-if="doc?.provider" class="text-xs text-gray-500 dark:text-gray-400">{{ doc.provider }}</span>
             <span v-if="doc?.source_type" class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 uppercase">{{ doc.source_type }}</span>
             <span v-if="doc?.llm_provider" class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">{{ doc.llm_provider }}</span>
+            <span v-if="doc?.is_validated" class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400">
+              <UIcon name="i-lucide-shield-check" class="w-3 h-3" />
+              Validated
+            </span>
           </div>
         </div>
-        <!-- Action buttons: Export Excel (primary, when complete) / Re-index / Extract -->
+        <!-- Action buttons: Export Excel (primary, when complete) / Re-index / Extract / Validate -->
         <div v-if="doc && !isInFlight(doc.status)" class="flex items-center gap-2">
+          <button
+            v-if="doc.status === 'completed' && !doc.is_validated"
+            :disabled="actionLoading !== null"
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-green-600 hover:bg-green-700 text-white transition disabled:opacity-50 disabled:cursor-not-allowed"
+            @click="triggerMarkValidated"
+          >
+            <UIcon
+              name="i-lucide-shield-check"
+              class="w-3.5 h-3.5"
+              :class="{ 'animate-spin': actionLoading === 'mark-validated' }"
+            />
+            Mark Validated
+          </button>
+          <button
+            v-if="doc.is_validated"
+            :disabled="actionLoading !== null"
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            @click="triggerMarkInvalidated"
+          >
+            <UIcon
+              name="i-lucide-shield-off"
+              class="w-3.5 h-3.5"
+              :class="{ 'animate-spin': actionLoading === 'mark-invalidated' }"
+            />
+            Remove Validation
+          </button>
           <button
             v-if="doc.cics_result"
             class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-primary-600 hover:bg-primary-700 text-white transition"
@@ -142,7 +172,7 @@
                     </summary>
                     <div class="mt-2 overflow-x-auto max-h-64 overflow-y-auto rounded-lg bg-gray-50 dark:bg-gray-900 p-4">
                       <!-- eslint-disable-next-line vue/no-v-html -->
-                      <div class="prose prose-xs dark:prose-invert max-w-none text-xs whitespace-nowrap [&_table]:border-collapse [&_td]:border [&_td]:border-gray-200 [&_td]:dark:border-gray-700 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-200 [&_th]:dark:border-gray-700 [&_th]:px-2 [&_th]:py-1 [&_th]:bg-gray-100 [&_th]:dark:bg-gray-800" v-html="renderMd((content as string).slice(0, 3000) + ((content as string).length > 3000 ? '\n…(truncated)' : ''))" />
+                      <div class="prose prose-xs dark:prose-invert max-w-none text-xs whitespace-nowrap [&_table]:border-collapse [&_td]:border [&_td]:border-gray-200 [&_td]:dark:border-gray-700 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-200 [&_th]:dark:border-gray-700 [&_th]:px-2 [&_th]:py-1 [&_th]:bg-gray-100 [&_th]:dark:bg-gray-800" v-html="renderMd(content as string)" />
                     </div>
                   </details>
                 </div>
@@ -159,7 +189,7 @@
                   <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest">Body</p>
                   <details class="group" open>
                     <summary class="text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 cursor-pointer select-none">Show content</summary>
-                    <pre class="mt-2 text-xs bg-gray-50 dark:bg-gray-900 p-4 rounded-lg overflow-auto max-h-96 leading-relaxed whitespace-pre-wrap">{{ doc.indexed_content.primary_content.slice(0, 5000) }}{{ doc.indexed_content.primary_content.length > 5000 ? '\n…(truncated)' : '' }}</pre>
+                    <pre class="mt-2 text-xs bg-gray-50 dark:bg-gray-900 p-4 rounded-lg overflow-auto max-h-96 leading-relaxed whitespace-pre-wrap">{{ doc.indexed_content.primary_content }}</pre>
                   </details>
                 </div>
                 <!-- Excel attachments extracted from email -->
@@ -179,7 +209,7 @@
                         </summary>
                         <div class="mt-2 overflow-x-auto max-h-64 overflow-y-auto rounded-lg bg-gray-50 dark:bg-gray-900 p-4">
                           <!-- eslint-disable-next-line vue/no-v-html -->
-                          <div class="prose prose-xs dark:prose-invert max-w-none text-xs whitespace-nowrap [&_table]:border-collapse [&_td]:border [&_td]:border-gray-200 [&_td]:dark:border-gray-700 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-200 [&_th]:dark:border-gray-700 [&_th]:px-2 [&_th]:py-1 [&_th]:bg-gray-100 [&_th]:dark:bg-gray-800" v-html="renderMd((content as string).slice(0, 3000) + ((content as string).length > 3000 ? '\n…(truncated)' : ''))" />
+                          <div class="prose prose-xs dark:prose-invert max-w-none text-xs whitespace-nowrap [&_table]:border-collapse [&_td]:border [&_td]:border-gray-200 [&_td]:dark:border-gray-700 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-200 [&_th]:dark:border-gray-700 [&_th]:px-2 [&_th]:py-1 [&_th]:bg-gray-100 [&_th]:dark:bg-gray-800" v-html="renderMd(content as string)" />
                         </div>
                       </details>
                     </div>
@@ -190,7 +220,7 @@
               <template v-else>
                 <details class="group">
                   <summary class="text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 cursor-pointer select-none">Show extracted text</summary>
-                  <pre class="mt-2 text-xs bg-gray-50 dark:bg-gray-900 p-4 rounded-lg overflow-auto max-h-96 leading-relaxed whitespace-pre-wrap">{{ doc.indexed_content.primary_content.slice(0, 5000) }}{{ doc.indexed_content.primary_content.length > 5000 ? '\n…(truncated)' : '' }}</pre>
+                  <pre class="mt-2 text-xs bg-gray-50 dark:bg-gray-900 p-4 rounded-lg overflow-auto max-h-96 leading-relaxed whitespace-pre-wrap">{{ doc.indexed_content.primary_content }}</pre>
                 </details>
               </template>
 
@@ -408,16 +438,44 @@
                           <th class="pb-2 pr-4 font-semibold">Value</th>
                           <th class="pb-2 pr-4 font-semibold">Conditions</th>
                           <th class="pb-2 font-semibold">Priority</th>
+                          <th class="pb-2 w-4" />
                         </tr>
                       </thead>
-                      <tbody class="divide-y divide-gray-100 dark:divide-gray-800">
-                        <tr v-for="rule in product.commission_rules" :key="rule.rule_id" class="align-top">
-                          <td class="py-2 pr-4 font-mono text-gray-500">{{ rule.rule_id }}</td>
-                          <td class="py-2 pr-4 text-gray-700 dark:text-gray-300">{{ rule.outcome?.commission_type || '—' }}</td>
-                          <td class="py-2 pr-4 text-gray-900 dark:text-gray-100 font-medium">{{ formatCommissionValue(rule.outcome) }}</td>
-                          <td class="py-2 pr-4 text-gray-500 dark:text-gray-400 max-w-xs">{{ formatConditions(rule.conditions) }}</td>
-                          <td class="py-2 text-gray-500">{{ rule.priority ?? '—' }}</td>
-                        </tr>
+                      <tbody>
+                        <template v-for="rule in product.commission_rules" :key="rule.rule_id">
+                          <tr
+                            class="align-top border-t border-gray-100 dark:border-gray-800 cursor-pointer hover:bg-white/60 dark:hover:bg-gray-700/30 transition"
+                            @click="expandedRuleId = expandedRuleId === rule.rule_id ? null : rule.rule_id"
+                          >
+                            <td class="py-2 pr-4 font-mono text-gray-500">{{ rule.rule_id }}</td>
+                            <td class="py-2 pr-4 text-gray-700 dark:text-gray-300">{{ rule.outcome?.commission_type || '—' }}</td>
+                            <td class="py-2 pr-4 text-gray-900 dark:text-gray-100 font-medium">{{ formatCommissionValue(rule.outcome) }}</td>
+                            <td class="py-2 pr-4 text-gray-500 dark:text-gray-400 max-w-xs truncate">{{ formatConditions(rule.conditions) }}</td>
+                            <td class="py-2 text-gray-500">{{ rule.priority ?? '—' }}</td>
+                            <td class="py-2 text-right">
+                              <UIcon
+                                :name="expandedRuleId === rule.rule_id ? 'i-lucide-chevron-up' : 'i-lucide-chevron-down'"
+                                class="w-3.5 h-3.5 text-gray-400"
+                              />
+                            </td>
+                          </tr>
+                          <tr v-if="expandedRuleId === rule.rule_id" class="bg-white/70 dark:bg-gray-800/40 border-t border-gray-100 dark:border-gray-800">
+                            <td colspan="6" class="px-4 py-3">
+                              <p class="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-2">Conditions</p>
+                              <div v-if="rule.conditions && Object.keys(rule.conditions).length" class="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-1.5">
+                                <div
+                                  v-for="(val, field) in rule.conditions"
+                                  :key="field"
+                                  class="flex items-start gap-2 text-xs"
+                                >
+                                  <span class="font-mono text-blue-500 dark:text-blue-400 whitespace-nowrap flex-shrink-0">{{ String(field).replace(/_/g, ' ') }}</span>
+                                  <span class="text-gray-700 dark:text-gray-300 break-all">{{ Array.isArray(val) ? val.join(', ') : typeof val === 'boolean' ? (val ? 'yes' : 'no') : val }}</span>
+                                </div>
+                              </div>
+                              <span v-else class="text-xs text-gray-400 italic">No conditions (catch-all rule)</span>
+                            </td>
+                          </tr>
+                        </template>
                       </tbody>
                     </table>
                     <p v-else class="text-xs text-gray-400 mt-2">No rules</p>
@@ -712,6 +770,7 @@ const promptModalOpen = ref(false)
 const promptModalTab = ref<'system' | 'user'>('system')
 
 const expandedOverlap = ref<number | null>(null)
+const expandedRuleId = ref<string | null>(null)
 const overlapRuleModalOpen = ref(false)
 const overlapRuleModalData = ref<OverlapIssue | null>(null)
 
@@ -724,6 +783,7 @@ const {
   getSheetClassification, getSheetClassBadge, formatCommissionValue, formatConditions,
   sheetPassStatus, copyJson, downloadJson, downloadExcel,
   triggerIndex, triggerExtract, triggerRerunPass, triggerTransform, triggerValidate,
+  triggerMarkValidated, triggerMarkInvalidated,
 } = useCommissionIntakeDetail()
 
 function openOverlapRuleModal(overlap: OverlapIssue) {
