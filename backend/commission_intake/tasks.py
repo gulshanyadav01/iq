@@ -222,30 +222,31 @@ def run_extraction(document_id: str):
         CICSResult.objects.filter(document=doc).delete()
         ValidationResult.objects.filter(document=doc).delete()
 
-        # Pre-create ExtractionPass rows as PENDING for each known sheet × 3 passes.
-        # This lets the UI display pending state before extraction starts.
+        # Pre-create ExtractionPass rows as PENDING for each sheet × 3 passes the
+        # pipeline will actually run. Use the pipeline's own routing helper so
+        # the (sheet_name, attachment_name) keys exactly match what the pipeline
+        # writes during execution — otherwise pre-created rows orphan as PENDING
+        # and the UI sees an inconsistent pass set.
         if indexed.sheet_contents:
+            from cins.processors.core.pipeline import derive_pipeline_routing
+
             sheet_metadata = indexed.sheet_metadata or {}
-            classifications = sheet_metadata.get("classifications", {})
-            # Determine attachment grouping: for email source types, attachment_keys hints at the
-            # original filenames. For direct Excel the attachment_name stays blank.
-            attachment_names = _derive_attachment_names(indexed)
-            for att_name in attachment_names:
-                sheet_names = list(indexed.sheet_contents.keys())
-                for sheet_name in sheet_names:
-                    cls_entry = classifications.get(sheet_name, {})
-                    classification = cls_entry.get("classification") or cls_entry.get("sheet_type", "unknown")
-                    # Only pre-create for commission_data sheets (master_data is not run through passes)
-                    if classification not in ("commission_data", "unknown"):
-                        continue
-                    for pass_num in ExtractionPass.PassNumber.values:
-                        ExtractionPass.objects.get_or_create(
-                            document=doc,
-                            pass_number=pass_num,
-                            sheet_name=sheet_name,
-                            attachment_name=att_name,
-                            defaults={"status": ExtractionPass.Status.PENDING},
-                        )
+            source_meta = sheet_metadata.get("source_metadata", {})
+            sheets_to_process, attachment_name = derive_pipeline_routing(
+                source_type=indexed.source_type,
+                sheet_classifications=sheet_metadata.get("classifications", {}),
+                sheet_names=list(indexed.sheet_contents.keys()),
+                excel_attachments=source_meta.get("excel_attachments", []),
+            )
+            for sheet_name in sheets_to_process:
+                for pass_num in ExtractionPass.PassNumber.values:
+                    ExtractionPass.objects.get_or_create(
+                        document=doc,
+                        pass_number=pass_num,
+                        sheet_name=sheet_name,
+                        attachment_name=attachment_name,
+                        defaults={"status": ExtractionPass.Status.PENDING},
+                    )
 
         # Reconstruct an IndexedDocument dataclass populated from DB
         # (no disk reads — content is pre-loaded from DB fields)
@@ -361,25 +362,6 @@ def _save_extraction_passes(doc, result) -> None:
     """Final upsert of any sheet_pass_results not already persisted by the callback."""
     if result.sheet_pass_results:
         _upsert_extraction_passes(doc, result.sheet_pass_results)
-
-
-def _derive_attachment_names(indexed) -> list:
-    """
-    Return the list of attachment identifiers for pre-creating ExtractionPass rows.
-
-    For email source types with a single Excel attachment: process_from_indexed runs
-    _process_sheets with that attachment name.  Use excel_attachments from source_metadata
-    (populated by the indexer) as the authoritative list.
-    For direct Excel/PDF: return [""] so passes are keyed with blank attachment_name.
-    """
-    if indexed.source_type != "email":
-        return [""]
-    sheet_metadata = indexed.sheet_metadata or {}
-    source_meta = sheet_metadata.get("source_metadata", {})
-    excel_attachments = source_meta.get("excel_attachments", [])
-    if excel_attachments:
-        return list(excel_attachments)
-    return [""]
 
 
 # ---------------------------------------------------------------------------
@@ -769,7 +751,7 @@ def rerun_transform(document_id: str):
 
         transformer = RawToCICSTransformer()
         cics_doc, transform_warnings, transform_errors = transformer.transform(merged_raw)
-        cics_json = cics_doc.model_dump(exclude_none=True)
+        cics_json = cics_doc.model_dump(exclude_none=False)
 
         CICSResult.objects.update_or_create(
             document=doc,

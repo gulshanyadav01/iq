@@ -1237,6 +1237,27 @@ def extract_multi_pass(
             empty_master_data = MasterDataExtraction(master_data=[])
             empty_rules = RulesExtraction(products=[])
 
+            # Notify the orchestrator that pass 2 and pass 3 were intentionally
+            # skipped. Without this, any pre-created PENDING ExtractionPass rows
+            # for p2/p3 stay PENDING forever and the UI shows them as in-progress.
+            _skipped_note = (
+                f"Skipped: Pass 1 reported inherits_from_previous=True. "
+                f"{metadata.inheritance_note or ''}".strip()
+            )
+            if on_pass_complete:
+                on_pass_complete(
+                    2,
+                    empty_master_data.model_dump(),
+                    0.0,
+                    {"skipped": True, "skip_reason": _skipped_note},
+                )
+                on_pass_complete(
+                    3,
+                    empty_rules.model_dump(),
+                    0.0,
+                    {"skipped": True, "skip_reason": _skipped_note},
+                )
+
             raw_extraction = RawExtraction.from_passes(
                 metadata, empty_master_data, empty_rules
             )

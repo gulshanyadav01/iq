@@ -12,7 +12,9 @@ You do not repeat input data in your code.
 ## YOUR INPUTS (pre-loaded, available as Python variables)
 
 **`commission_markdown`** — a string containing the full commission document formatted as
-markdown. It contains one or more table sections, each starting with a header line:
+markdown. Two layouts are possible:
+
+1. **Sheet-derived layout** — one or more typed table sections:
 
 ```
 ## Table N: Table Name [type: commission]
@@ -25,6 +27,18 @@ Each table is followed by pipe-delimited markdown rows.
 **`[type: commission]`** tables contain actual commission rates — extract rules from these.
 **`[type: master]`** tables are reference/lookup tables — use to expand state lists, RTO codes, etc.
 **`[type: notes]`** tables are free-text conditions/deductions that apply globally.
+
+2. **Email-derived layout** — when the commission grid is embedded in an email body,
+   the section is a single `## Email Commission Data` heading (no `[type:]` marker)
+   followed by free text and a pipe-delimited table. `parse_md_tables` returns this
+   with `type="unknown"`. Treat the rows under it the same way you would
+   `[type: commission]`.
+
+In BOTH layouts, any context that appears BEFORE the first `## ` heading
+(provider name, period, global settings, master-data block such as RTO mappings)
+is preserved by `parse_md_tables` as a leading entry with `name=None` and
+`type="unknown"`. Inspect `tables[0]` for that context — for example, RTO
+category → RTO code mappings live there in the email layout.
 
 You do NOT need to load any file. `commission_markdown` is already available.
 
@@ -104,22 +118,43 @@ Always define and use these helpers:
 
 ```python
 def parse_md_tables(md):
-    """Split markdown string into ordered list of (name, table_type, lines)."""
+    """
+    Split markdown string into ordered list of (name, table_type, lines).
+
+    Recognises two heading styles:
+      1. Sheet-derived tables tagged with type:
+         "## Table 1: Foo [type: commission]"  -> name="Table 1: Foo", type="commission"
+      2. Section headings without a type marker (e.g. inlined email content):
+         "## Email Commission Data"            -> name="Email Commission Data", type="unknown"
+
+    Any content appearing BEFORE the first heading (provider info, global
+    settings, master-data block such as RTO mappings) is preserved as a
+    leading entry with name=None, type="unknown". Always check tables[0]
+    when you need that context.
+    """
     tables = []
     current_name = None
     current_type = "unknown"
     current_lines = []
     for line in md.splitlines():
-        if line.startswith("## Table") and "[type:" in line:
-            if current_name is not None:
+        stripped = line.strip()
+        is_section_heading = stripped.startswith("## ")
+        if is_section_heading and "[type:" in stripped:
+            if current_name is not None or current_lines:
                 tables.append((current_name, current_type, current_lines))
-            parts = line.split("[type:")
+            parts = stripped.split("[type:")
             current_name = parts[0].strip().lstrip("#").strip()
             current_type = parts[1].rstrip("]").strip()
             current_lines = []
-        elif current_name is not None:
+        elif is_section_heading:
+            if current_name is not None or current_lines:
+                tables.append((current_name, current_type, current_lines))
+            current_name = stripped.lstrip("#").strip()
+            current_type = "unknown"
+            current_lines = []
+        else:
             current_lines.append(line)
-    if current_name is not None:
+    if current_name is not None or current_lines:
         tables.append((current_name, current_type, current_lines))
     return tables
 
@@ -229,8 +264,15 @@ tables = parse_md_tables(commission_markdown)
 notes_text = extract_notes(tables)
 result = []
 
+# Pull leading context (RTO mappings, global settings) — appears as the
+# tables[0] entry with name=None when present.
+context_lines = []
+if tables and tables[0][0] is None:
+    context_lines = tables[0][2]
+
 for table_name, ttype, lines in tables:
-    if ttype != "commission":
+    # Treat email-embedded grids (type="unknown") the same as commission tables.
+    if ttype != "commission" and not (ttype == "unknown" and table_name and "Commission" in table_name):
         continue
 
     # Get all pipe rows, excluding separator lines

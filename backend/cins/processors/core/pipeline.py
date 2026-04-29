@@ -57,6 +57,43 @@ def get_safe_sheet_name(sheet_name: str) -> str:
     return safe_name[:50]
 
 
+def derive_pipeline_routing(
+    source_type: str,
+    sheet_classifications: dict,
+    sheet_names: list,
+    excel_attachments: list,
+) -> tuple:
+    """
+    Compute the (sheets_to_process, attachment_name) the pipeline will use.
+
+    Single source of truth shared by `_process_sheets` and the pre-create loop
+    in `commission_intake.tasks.run_extraction`. Keep these in lockstep so the
+    pre-created PENDING ExtractionPass rows match the rows the pipeline writes.
+
+    Args:
+        source_type: indexed_doc.source_type ("email", "excel", "pdf", ...)
+        sheet_classifications: {sheet_name: {"sheet_type": "commission_data"|...}}
+        sheet_names: ordered list of all sheet names available
+        excel_attachments: list of attachment filenames (email source only)
+
+    Returns:
+        (sheets_to_process, attachment_name)
+    """
+    commission_sheets = [
+        name for name, info in (sheet_classifications or {}).items()
+        if (info or {}).get("sheet_type") == "commission_data"
+    ]
+    sheets_to_process = commission_sheets if commission_sheets else list(sheet_names)
+
+    # Mirrors process_from_indexed: use the attachment name only when there is
+    # exactly one attachment for an email source — otherwise blank.
+    attachment_name = ""
+    if source_type == "email" and len(excel_attachments or []) == 1:
+        attachment_name = excel_attachments[0]
+
+    return sheets_to_process, attachment_name
+
+
 def build_pass_contents(
     sheet_name: str,
     sheet_content: str,
@@ -379,14 +416,13 @@ class Pipeline:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         if indexed_doc.has_sheets:
-            # For email sources with a single Excel attachment, pass the attachment name
-            # so ExtractionPass rows are keyed correctly.
-            attachment_name = ""
-            if indexed_doc.is_email:
-                source_meta = indexed_doc.metadata.get("source_metadata", {})
-                excel_attachments = source_meta.get("excel_attachments", [])
-                if len(excel_attachments) == 1:
-                    attachment_name = excel_attachments[0]
+            source_meta = indexed_doc.metadata.get("source_metadata", {})
+            _, attachment_name = derive_pipeline_routing(
+                source_type=indexed_doc.source_type,
+                sheet_classifications=indexed_doc.get_sheet_classifications(),
+                sheet_names=list(indexed_doc.get_all_sheet_contents().keys()),
+                excel_attachments=source_meta.get("excel_attachments", []),
+            )
             return self._process_sheets(
                 indexed_doc,
                 output_path,
@@ -653,7 +689,13 @@ class Pipeline:
             if content:
                 master_context += f"\n\n## Master Data Reference: {sheet_name}\n\n{content}"
 
-        sheets_to_process = commission_sheets if commission_sheets else list(sheet_contents.keys())
+        source_meta = indexed_doc.metadata.get("source_metadata", {})
+        sheets_to_process, _ = derive_pipeline_routing(
+            source_type=indexed_doc.source_type,
+            sheet_classifications=indexed_doc.get_sheet_classifications(),
+            sheet_names=list(sheet_contents.keys()),
+            excel_attachments=source_meta.get("excel_attachments", []),
+        )
         total_sheets = len(sheets_to_process)
 
         email_body_for_pass3 = ""
@@ -726,7 +768,7 @@ class Pipeline:
                         "model": model_used,
                         "duration": duration,
                         "status": "completed",
-                        "error": "",
+                        "error": _extra.get("skip_reason", "") if _extra.get("skipped") else "",
                         "extraction_method": _extra.get("extraction_method", "llm"),
                         "codegen_code": _extra.get("codegen_code", ""),
                     }

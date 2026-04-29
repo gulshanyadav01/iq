@@ -1075,12 +1075,19 @@ class ContentIndexer:
 
     def _clean_email_body(self, body: str) -> str:
         """
-        Clean email body by removing caution warnings, disclaimers, and other boilerplate.
+        Clean email body by removing caution warnings, disclaimers, quoted/forwarded
+        chains, and other boilerplate. Preserves markdown table structure
+        (separator rows like `| --- | --- |` and blank table rows).
         """
         import re
 
         if not body:
             return body
+
+        # Strip the quoted/forwarded trail first — only the latest message body
+        # is relevant for commission extraction. Replied-to / forwarded-from
+        # content is duplicate noise that confuses Pass 1 metadata detection.
+        body = self._strip_quoted_trail(body)
 
         lines = body.split("\n")
         cleaned_lines = []
@@ -1122,18 +1129,27 @@ class ContentIndexer:
 
         all_patterns = caution_patterns + disclaimer_patterns
 
+        # Markdown table separator rows: `| --- | --- |`, `|---|---|`, etc.
+        # These MUST be preserved — without them downstream parsers (Pass 0c,
+        # codegen helpers, etc.) cannot identify table boundaries.
+        sep_row_re = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+
         for line in lines:
+            if sep_row_re.match(line):
+                cleaned_lines.append(line)
+                continue
+
             is_boilerplate = False
             for pattern in all_patterns:
                 if re.search(pattern, line, re.IGNORECASE):
                     is_boilerplate = True
                     break
 
-            if "|" in line:
-                content = line.replace("|", "").replace("-", "").strip()
-                if not content or any(
-                    re.search(p, line, re.IGNORECASE) for p in caution_patterns
-                ):
+            # Drop pipe-rows that are caution banners rendered as a 1-cell table
+            # (e.g. `| CAUTION: external email |`). Keep all other pipe-rows —
+            # an empty data row may still be meaningful row-positioning.
+            if not is_boilerplate and "|" in line:
+                if any(re.search(p, line, re.IGNORECASE) for p in caution_patterns):
                     is_boilerplate = True
 
             if not is_boilerplate:
@@ -1143,6 +1159,78 @@ class ContentIndexer:
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
 
         return cleaned.strip()
+
+    def _strip_quoted_trail(self, body: str) -> str:
+        """
+        Drop everything from the first quoted-reply / forwarded-message marker.
+
+        Email clients use a variety of conventions to mark the boundary between
+        the new message and the prior thread. We scan for the earliest match of
+        any of these and truncate.
+
+        Conservative on purpose: only well-known unambiguous markers; never trim
+        on `From:` alone (that header appears legitimately in some bodies).
+        """
+        import re
+
+        if not body:
+            return body
+
+        markers = [
+            # Outlook / Exchange explicit reply boundary
+            r"^\s*-{3,}\s*Original Message\s*-{3,}\s*$",
+            # Outlook / Exchange forward boundary
+            r"^\s*-{3,}\s*Forwarded by .+\s*-{3,}\s*$",
+            r"^\s*Begin forwarded message:\s*$",
+            # Underscored separator (Outlook web)
+            r"^_{5,}\s*$",
+            # Outlook header block: "From: ... Sent: ... To: ... Subject: ..."
+            # Matched as a *line* containing both "From:" at start and another
+            # quoted header on subsequent lines is too noisy; instead only trim
+            # when a "From:" line is followed immediately by "Sent:" or "Date:".
+            # Handled below as a 2-line lookahead.
+            # Gmail / Apple reply: "On <date>, <name> wrote:"
+            r"^\s*On .+ wrote:\s*$",
+            r"^\s*On .+ at .+ wrote:\s*$",
+        ]
+        compiled = [re.compile(p, re.IGNORECASE) for p in markers]
+        # Outlook quoted-header tokens. We treat a `From:` line as a quoted
+        # boundary only when it's followed (within a small window) by both a
+        # `Sent:` (or `Date:`) and a `Subject:` line, since some HTML→text
+        # conversions split the header into one label per line:
+        #
+        #   From:
+        #   Hemant Kumar
+        #   Sent:
+        #   Friday, June 20, 2025
+        #   Subject:
+        #   ...
+        #
+        # Matching only `From:`+`Sent:` adjacency misses this layout.
+        from_re = re.compile(r"^\s*from\s*:", re.IGNORECASE)
+        sent_or_date_re = re.compile(r"^\s*(sent|date)\s*:", re.IGNORECASE)
+        subject_re = re.compile(r"^\s*subject\s*:", re.IGNORECASE)
+
+        lines = body.split("\n")
+        cut_at = None
+        for idx, line in enumerate(lines):
+            if any(rx.match(line) for rx in compiled):
+                cut_at = idx
+                break
+            if from_re.match(line):
+                # Window must be wide enough to cover the Outlook split-line
+                # layout where label and value alternate:
+                #   From: / <name> / Sent: / <date> / To: / <addr> / Cc: / <addr> / Subject: / <subject>
+                window = lines[idx + 1 : idx + 14]
+                has_sent = any(sent_or_date_re.match(w) for w in window)
+                has_subject = any(subject_re.match(w) for w in window)
+                if has_sent and has_subject:
+                    cut_at = idx
+                    break
+
+        if cut_at is None:
+            return body
+        return "\n".join(lines[:cut_at]).rstrip()
 
     def _format_email_context(self, email_data: Dict) -> str:
         """Format email metadata and body for prepending to sheets."""
