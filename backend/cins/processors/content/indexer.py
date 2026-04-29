@@ -701,7 +701,146 @@ class ContentIndexer:
             if all_indexing_errors:
                 metadata["indexing_errors"] = all_indexing_errors
 
+        # --- Inline-image commission grids ---------------------------------
+        # Some senders attach the actual commission table as a screenshot
+        # (PNG/JPG inside the email body). Convert qualifying images to
+        # markdown via vision-LLM so they flow through the per-sheet pass
+        # loop the same way Excel sheets do.
+        self._extract_image_table_sheets(
+            email_data=email_data,
+            cleaned_body=body,
+            output_dir=output_dir,
+            metadata=metadata,
+            progress=_p,
+        )
+
         return metadata
+
+    def _extract_image_table_sheets(
+        self,
+        email_data: Dict,
+        cleaned_body: str,
+        output_dir: Path,
+        metadata: Dict,
+        progress,
+    ) -> None:
+        """
+        For each image attachment that (a) is referenced from the latest
+        message body via a `cid:` token and (b) passes the table-likelihood
+        size heuristic, run vision-LLM to extract a markdown table and inject
+        it as a pseudo-sheet into the indexer's metadata.
+
+        Mutates `metadata` in place. Side-effect free for non-image emails.
+        """
+        from cins.processors.extractors.extract_eml import extract_cid_refs_from_body
+        from cins.processors.extractors.image_to_markdown import extract_table_markdown
+        try:
+            from cins.processors.extractors.sheet_classifier import SheetClassifier
+        except ImportError:
+            SheetClassifier = None  # type: ignore
+
+        image_attachments = [
+            att for att in email_data.get("attachments", [])
+            if att.get("image_path")
+        ]
+        if not image_attachments:
+            return
+
+        # Step 1: cid whitelist from the *latest* message body. The cleaned
+        # text body already had its quoted/forwarded trail stripped (and our
+        # `[cid:...]` sweep removes stale tokens), so we collect cids from the
+        # raw HTML parts instead — but trim each HTML to its pre-quoted-block
+        # prefix first, otherwise the whitelist would include images that only
+        # appear in older messages further down the thread.
+        cid_whitelist = set()
+        for raw_html_part in email_data.get("raw_html_parts", []) or []:
+            latest_html = self._strip_quoted_trail_html(raw_html_part)
+            cid_whitelist |= extract_cid_refs_from_body(latest_html)
+
+        # Step 2: filter to images that (a) live in the latest message and
+        # (b) look like grids. Older quoted images and tiny logos are dropped
+        # before any LLM call.
+        surviving = [
+            att for att in image_attachments
+            if att.get("is_likely_table")
+            and att.get("content_id")
+            and att["content_id"] in cid_whitelist
+        ]
+
+        logger.info(
+            "Image attachment routing: %d total, %d in latest body, %d look like tables",
+            len(image_attachments),
+            sum(1 for a in image_attachments if a.get("content_id") in cid_whitelist),
+            len(surviving),
+        )
+
+        if not surviving:
+            return
+
+        llm_service = self._get_llm_service()
+        if not llm_service:
+            logger.warning(
+                "Image attachments present but no LLM service available; skipping vision extraction"
+            )
+            return
+
+        sheets_dir = output_dir / "sheets"
+        sheets_dir.mkdir(exist_ok=True)
+
+        existing_sheet_files = list(
+            metadata.get("content_files", {}).get("sheets", []) or []
+        )
+        existing_sheet_names = list(
+            metadata.get("source_metadata", {}).get("sheet_names", []) or []
+        )
+        existing_classifications = dict(metadata.get("sheet_classifications", {}) or {})
+
+        classifier = SheetClassifier() if SheetClassifier else None
+
+        added_any = False
+        for att in surviving:
+            filename = att.get("filename", "image")
+            stem = Path(filename).stem or "image"
+            sheet_key = f"image::{stem}"
+            # IndexedDocument.get_sheet_content() looks up by passing the
+            # sheet name through `re.sub(r"[^\w\-_]", "_", name)`, which turns
+            # "image::imageNNN" into "image__imageNNN". Use the same sanitiser
+            # here so the file we write matches what the loader reads.
+            safe_name = self._sanitize_filename(sheet_key)
+
+            progress("extracting_image_table", f"Vision: {filename}")
+            md = extract_table_markdown(Path(att["image_path"]), llm_service)
+            if not md or not md.strip():
+                logger.info("Vision returned empty markdown for %s; skipping", filename)
+                continue
+
+            md_path = sheets_dir / f"{safe_name}.md"
+            md_path.write_text(md, encoding="utf-8")
+
+            existing_sheet_files.append(safe_name)
+            existing_sheet_names.append(sheet_key)
+            added_any = True
+
+            if classifier:
+                try:
+                    classification = classifier.classify_sheet(
+                        sheet_name=sheet_key,
+                        csv_preview=md[:4000],
+                        metadata={"source": "image", "filename": filename},
+                    )
+                    existing_classifications[sheet_key] = classification.to_dict()
+                except Exception as exc:
+                    logger.warning(
+                        "Sheet classification failed for image '%s': %s", sheet_key, exc
+                    )
+
+        if not added_any:
+            return
+
+        metadata.setdefault("content_files", {})["sheets"] = existing_sheet_files
+        metadata.setdefault("source_metadata", {})["sheet_names"] = existing_sheet_names
+        if existing_classifications:
+            metadata["sheet_classifications"] = existing_classifications
 
     def _index_pdf(self, file_path: str, output_dir: Path, progress=None) -> dict:
         """Index PDF file."""
@@ -1156,6 +1295,13 @@ class ContentIndexer:
                 cleaned_lines.append(line)
 
         cleaned = "\n".join(cleaned_lines)
+
+        # Strip stale `[cid:imageNNN.ext@<hash>]` placeholders. They confuse
+        # Pass 1 metadata extraction and add no signal — the underlying images
+        # (when they're commission grids) are surfaced as proper sheets via
+        # _extract_image_table_sheets, so the body reference is redundant.
+        cleaned = re.sub(r"\[cid:[^\]\s]+\]\s*", "", cleaned)
+
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
 
         return cleaned.strip()
@@ -1231,6 +1377,39 @@ class ContentIndexer:
         if cut_at is None:
             return body
         return "\n".join(lines[:cut_at]).rstrip()
+
+    def _strip_quoted_trail_html(self, html: str) -> str:
+        """
+        Trim raw HTML to everything before the first quoted-header block.
+
+        Used by image-attachment routing: we need the cid-reference set from
+        the LATEST message only, but `extract_eml_content` returns the full
+        HTML body (which contains every quoted reply). Cutting on the first
+        `<b>From:` / `<b>Sent:` / `-----Original Message-----` boundary keeps
+        only the new message's cid: references in scope.
+
+        Conservative: if no boundary is found, returns the input unchanged.
+        """
+        import re
+        if not html:
+            return html
+        boundary_patterns = [
+            # Outlook bold-header reply block (any inline HTML between <b> and From:)
+            r"<b[^>]*>(?:\s|<[^>]+>)*From\s*:",
+            # Plain HTML "Original Message" / "Forwarded by" markers
+            r"-{3,}\s*Original Message\s*-{3,}",
+            r"-{3,}\s*Forwarded by",
+            # Gmail reply line ("On <date>, <name> wrote:")
+            r"On [^<]+wrote:",
+        ]
+        earliest = None
+        for pat in boundary_patterns:
+            m = re.search(pat, html, re.IGNORECASE)
+            if m and (earliest is None or m.start() < earliest):
+                earliest = m.start()
+        if earliest is None:
+            return html
+        return html[:earliest]
 
     def _format_email_context(self, email_data: Dict) -> str:
         """Format email metadata and body for prepending to sheets."""

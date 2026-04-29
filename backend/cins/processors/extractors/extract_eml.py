@@ -261,6 +261,105 @@ def process_excel_attachment(attachment_data, filename, api_key=None):
     }
 
 
+def _image_is_likely_table(width: int, height: int, file_size_bytes: int) -> bool:
+    """
+    Heuristic gate before sending an image to a vision LLM. Returns True only
+    if the image's geometry looks like a screenshot of a commission grid.
+
+    Drops:
+      - signature/logo icons (small dimensions or tiny file size)
+      - separator gifs (extreme aspect ratios)
+      - decorative thumbnails (low total pixel count)
+      - oversized animations / banner ads (real grid screenshots are
+        ~50–500 KB; multi-MB files are almost always animated gifs)
+    """
+    if width < 500 or height < 200:
+        return False
+    if width * height < 150_000:
+        return False
+    aspect = width / height if height else 0
+    if not (0.3 <= aspect <= 6.0):
+        return False
+    if file_size_bytes < 8 * 1024:
+        return False
+    if file_size_bytes > 2 * 1024 * 1024:
+        return False
+    return True
+
+
+def process_image_attachment(
+    attachment_data, filename, output_dir=None, content_type=""
+):
+    """
+    Save an image attachment and decide whether it's plausibly a commission
+    table. Vision-LLM extraction is driven by the indexer (not here) so this
+    function stays pure and re-usable.
+
+    Returns a dict with:
+      filename, content_type, size, image_path, is_likely_table, width, height
+    """
+    from pathlib import Path
+    try:
+        from PIL import Image
+    except ImportError:
+        return {
+            "filename": filename,
+            "content_type": content_type,
+            "size": len(attachment_data),
+            "image_path": "",
+            "is_likely_table": False,
+            "width": 0,
+            "height": 0,
+            "error": "Pillow not installed; cannot inspect image",
+        }
+
+    safe_filename = Path(filename).name.replace(" ", "_") or "attachment"
+    if output_dir:
+        attachments_dir = Path(output_dir) / "attachments"
+        attachments_dir.mkdir(parents=True, exist_ok=True)
+        image_path = attachments_dir / safe_filename
+        image_path.write_bytes(attachment_data)
+    else:
+        suffix = Path(filename).suffix or ".bin"
+        tmp_file = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp_file.write(attachment_data)
+        tmp_file.close()
+        image_path = Path(tmp_file.name)
+
+    width = height = 0
+    try:
+        with Image.open(image_path) as im:
+            width, height = im.size
+    except Exception:
+        pass
+
+    return {
+        "filename": filename,
+        "content_type": content_type,
+        "size": len(attachment_data),
+        "image_path": str(image_path),
+        "is_likely_table": _image_is_likely_table(width, height, len(attachment_data)),
+        "width": width,
+        "height": height,
+    }
+
+
+def extract_cid_refs_from_body(body_text_or_html: str) -> set:
+    """
+    Return the set of cid: identifiers referenced from a body string.
+
+    Matches both the raw HTML form (`src="cid:foo@hash"`) and the textual form
+    that html2text-style converters leave behind (`[cid:foo@hash]`). Used by
+    the indexer to keep image-attachment processing scoped to images that
+    actually appear in the *latest* email — older quoted messages reference
+    images that should be ignored even if their MIME parts still exist.
+    """
+    import re
+    if not body_text_or_html:
+        return set()
+    return set(re.findall(r"cid:([^\s\"'>\)\]]+)", body_text_or_html))
+
+
 def extract_eml_content(eml_path, output_dir=None):
     """
     Extract content from an .eml email file, including attachments.
@@ -328,6 +427,19 @@ def extract_eml_content(eml_path, output_dir=None):
                                         payload, filename
                                     )
                                     attachment_info.update(excel_info)
+                                elif content_type.startswith("image/") or filename.lower().endswith(
+                                    (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
+                                ):
+                                    image_info = process_image_attachment(
+                                        payload,
+                                        filename,
+                                        output_dir=output_dir,
+                                        content_type=content_type,
+                                    )
+                                    attachment_info.update(image_info)
+                                    cid = part.get("Content-ID", "").strip("<>")
+                                    if cid:
+                                        attachment_info["content_id"] = cid
                                 else:
                                     # Try to extract as text if it's a text file
                                     if content_type.startswith("text/"):
@@ -421,6 +533,9 @@ def extract_eml_content(eml_path, output_dir=None):
             "date": date,
             "body": body,
             "attachments": attachments,
+            # Raw HTML parts retained so the indexer can grep for `cid:` image
+            # references that html_table_to_markdown drops when extracting text.
+            "raw_html_parts": html_parts if msg.is_multipart() else [],
         }
 
     except Exception as e:

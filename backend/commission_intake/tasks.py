@@ -67,6 +67,12 @@ def index_document(document_id: str):
         set_trace_context(session_id=document_id)
         doc = CommissionDocument.objects.get(id=document_id)
 
+        # Re-indexing supersedes everything downstream (the freshly indexed
+        # content/sheets won't match the prior extraction's rules or validation
+        # output). Wipe stale artefacts BEFORE indexing so the UI doesn't keep
+        # showing old CICS rules against new sheets.
+        _purge_extraction_artifacts(doc)
+
         # Download file from S3/MinIO to a local temp file
         suffix = os.path.splitext(doc.original_filename)[-1] or ".bin"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
@@ -332,6 +338,58 @@ def _build_content_files(indexed: "IndexedContent") -> dict:
     if indexed.sheet_contents:
         content_files["sheets"] = list(indexed.sheet_contents.keys())
     return content_files
+
+
+def _purge_extraction_artifacts(doc) -> None:
+    """
+    Drop everything downstream of indexing for `doc`: the prior CICS result,
+    validation result, every ExtractionPass row, the cached provider name,
+    and any attachment objects we previously uploaded to S3 (the new index
+    run will re-upload only the attachments it actually emits).
+
+    Safe to call before any (re-)indexing run. The IndexedContent row itself
+    is left alone — `index_document` will overwrite it via update_or_create.
+    """
+    from django.core.files.storage import default_storage
+
+    from commission_intake.models import (
+        CICSResult,
+        ExtractionPass,
+        IndexedContent,
+        ValidationResult,
+    )
+
+    ExtractionPass.objects.filter(document=doc).delete()
+    CICSResult.objects.filter(document=doc).delete()
+    ValidationResult.objects.filter(document=doc).delete()
+
+    # Stale attachments uploaded by a prior index run can have different
+    # filenames than what the new run will produce (e.g. image attachment
+    # support added later, or a re-indexed email with a fresh image set).
+    indexed = IndexedContent.objects.filter(document=doc).first()
+    if indexed:
+        for key in indexed.attachment_keys or []:
+            try:
+                default_storage.delete(key)
+            except Exception as exc:
+                logger.warning("Could not delete stale attachment %s: %s", key, exc)
+
+    update_fields = []
+    if doc.is_validated:
+        doc.is_validated = False
+        doc.validated_at = None
+        update_fields += ["is_validated", "validated_at"]
+    if doc.provider:
+        # Provider name is recomputed from the next extraction; clearing here
+        # avoids a stale provider sticking on the doc card during re-index.
+        doc.provider = ""
+        update_fields.append("provider")
+    if doc.error:
+        doc.error = None
+        update_fields.append("error")
+    if update_fields:
+        update_fields.append("updated_at")
+        doc.save(update_fields=update_fields)
 
 
 def _upsert_extraction_passes(doc, entries: list) -> None:
