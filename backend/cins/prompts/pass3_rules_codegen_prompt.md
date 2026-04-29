@@ -56,17 +56,7 @@ You do NOT need to load any file. `commission_markdown` is already available.
 
 ## APPROVED FIELDS (string unless noted)
 
-### product_name
-
-Motor products — use exactly one of:
-
-- `"Private Car"` — car, PVT CAR, 4W, four-wheeler, taxi, pvt
-- `"Two Wheeler"` — TW, 2W, bike, scooter, motorcycle, moped
-- `"Commercial Vehicle"` — GCV, GCCV, PCV, PCCV, MSV, bus, tractor, misc D, CV, agri tractor
-
-Non-motor: use name as written in document.
-Set `product_name` as a **string constant** in your code, not a variable read from a column header.
-Vehicle makes (Hero, TVS, Honda, Bajaj, etc.) are NOT separate products.
+{product_taxonomy}
 
 ```
 rule_text          (str, required) - human-readable description of the rule
@@ -95,140 +85,40 @@ Do NOT invent new keys. Do NOT nest dicts inside dicts (except `conditions`).
 
 ---
 
-## CODING RULES
-
-Allowed builtins: `range`, `len`, `list`, `dict`, `str`, `int`, `float`, `bool`, `tuple`,
-`set`, `enumerate`, `zip`, `sorted`, `min`, `max`, `sum`, `abs`, `round`, `any`, `all`,
-`isinstance`, `print`.
-
-String methods are allowed on string instances (`.split()`, `.strip()`, `.startswith()`, etc.)
-
-FORBIDDEN:
-
-- `import`, `from ... import`
-- `exec`, `eval`, `compile`, `open`, `__import__`
-- `getattr`, `setattr`, `globals`, `locals`, `vars`
-- Any attribute starting and ending with `__`
+{codegen_sandbox_rules}
 
 ---
 
-## REQUIRED HELPER FUNCTIONS
+## PRE-LOADED HELPER FUNCTIONS
 
-Always define and use these helpers:
+These helpers are **already injected into your namespace**. Call them directly — do NOT redefine them, and do NOT include their source in your output.
 
-```python
-def parse_md_tables(md):
-    """
-    Split markdown string into ordered list of (name, table_type, lines).
+```text
+parse_md_tables(md) -> [(name, type, lines)]
+    Splits markdown into table sections. Recognises typed tables
+    ("## Table 1: Foo [type: commission]"), master refs
+    ("## Master Data Reference: …" -> type "master"), commission sheets
+    ("## Commission Data Sheet: …" / "## Email Commission Data" -> type
+    "commission") and other "## …" headings (-> type "unknown"). Any text
+    BEFORE the first heading (provider info, RTO maps, global settings) is
+    preserved as the FIRST entry with name=None, type="unknown" — inspect
+    tables[0] when you need that context.
 
-    Recognises two heading styles:
-      1. Sheet-derived tables tagged with type:
-         "## Table 1: Foo [type: commission]"  -> name="Table 1: Foo", type="commission"
-      2. Section headings without a type marker (e.g. inlined email content):
-         "## Email Commission Data"            -> name="Email Commission Data", type="unknown"
+parse_md_row(line) -> [str]
+    Splits a "| a | b | c |" pipe-row into ["a", "b", "c"].
 
-    Any content appearing BEFORE the first heading (provider info, global
-    settings, master-data block such as RTO mappings) is preserved as a
-    leading entry with name=None, type="unknown". Always check tables[0]
-    when you need that context.
-    """
-    tables = []
-    current_name = None
-    current_type = "unknown"
-    current_lines = []
-    for line in md.splitlines():
-        stripped = line.strip()
-        is_section_heading = stripped.startswith("## ")
-        if is_section_heading and "[type:" in stripped:
-            if current_name is not None or current_lines:
-                tables.append((current_name, current_type, current_lines))
-            parts = stripped.split("[type:")
-            current_name = parts[0].strip().lstrip("#").strip()
-            current_type = parts[1].rstrip("]").strip()
-            current_lines = []
-        elif is_section_heading:
-            if current_name is not None or current_lines:
-                tables.append((current_name, current_type, current_lines))
-            current_name = stripped.lstrip("#").strip()
-            current_type = "unknown"
-            current_lines = []
-        else:
-            current_lines.append(line)
-    if current_name is not None or current_lines:
-        tables.append((current_name, current_type, current_lines))
-    return tables
+to_pct(v) -> str
+    "0.325" -> "32.5%", "65" -> "65%", "" -> "", 0 -> "0%". Magnitude-aware:
+    values <= 1 are treated as fractions and multiplied by 100; values > 1
+    are kept as-is. Values > 100 are returned verbatim so anomalies surface.
 
-def parse_md_row(line):
-    """Split a markdown pipe-row into a list of stripped cell strings."""
-    return [c.strip() for c in line.strip("|").split("|")]
+extract_notes(tables) -> str
+    Concatenates text from every notes/master table into one space-separated
+    string for use as `other_conditions`.
 
-def to_pct(v):
-    """
-    Convert a raw cell value to a percentage string.
-
-    Cells may be stored as fractions ('0.325' = 32.5%) OR as already-percent
-    numbers ('32.5' = 32.5%, '65' = 65%). Detect by magnitude:
-      - 0 < |f| <= 1   -> fraction, multiply by 100
-      - |f| > 1        -> already a percentage, do not multiply
-
-    Values > 100 are returned as-is so they surface as obvious anomalies
-    downstream rather than being silently mangled.
-    Returns '' for empty/non-numeric, '0%' for zero.
-    """
-    try:
-        f = float(v)
-        if f == 0:
-            return "0%"
-        pct = f * 100 if abs(f) <= 1 else f
-        s = f"{pct:.4g}%"
-        return s
-    except (ValueError, TypeError):
-        return ""
-
-def extract_notes(tables):
-    """Concatenate all notes/master table text into a single string."""
-    parts = []
-    for name, ttype, lines in tables:
-        if ttype in ("notes", "master"):
-            parts.append(" ".join(
-                line.strip().strip("|").strip("*").strip()
-                for line in lines if line.strip() and "---" not in line
-            ))
-    return " ".join(parts).strip()
-
-def parse_cc_range(header):
-    """
-    Extract a CC or KW range string from a column header.
-    Returns a normalized range string if the header encodes a numeric engine range, else "".
-    Examples:
-      "150cc"       -> "150"
-      "150_350cc"   -> "150-350"
-      "150-350cc"   -> "150-350"
-      "> 16 KW"     -> ">16"
-      "7 KW Bike"   -> "7"
-      "SCOOTER"     -> ""
-      "Hero OEM"    -> ""
-    """
-    h = header.strip().upper()
-    # Remove unit suffixes to isolate numbers
-    for unit in ("CC", "KW"):
-        h = h.replace(unit, " ")
-    h = h.strip()
-    # above/greater-than pattern
-    for prefix in (">", ">=", "ABOVE", "GREATER THAN", "MORE THAN"):
-        if h.startswith(prefix):
-            rest = h[len(prefix):].strip().split()[0] if h[len(prefix):].strip() else ""
-            digits = "".join(c for c in rest if c.isdigit() or c == ".")
-            if digits:
-                return ">" + digits
-    # range pattern: two numbers separated by _, -, or space
-    parts = h.replace("_", " ").replace("-", " ").split()
-    nums = ["".join(c for c in p if c.isdigit() or c == ".") for p in parts if any(c.isdigit() for c in p)]
-    if len(nums) >= 2:
-        return nums[0] + "-" + nums[1]
-    if len(nums) == 1:
-        return nums[0]
-    return ""
+parse_cc_range(header) -> str
+    "150cc" -> "150", "150-350cc" -> "150-350", "> 16 KW" -> ">16",
+    "7 KW Bike" -> "7", "SCOOTER" -> "", "Hero OEM" -> "".
 ```
 
 ---

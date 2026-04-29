@@ -22,6 +22,7 @@ Usage:
         print(f"Commission data sheet: {classification.reasoning}")
 """
 
+import functools
 import os
 import re
 from enum import Enum
@@ -29,6 +30,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
+
+
+@functools.lru_cache(maxsize=1)
+def _load_classification_prompt() -> Optional[str]:
+    """Cached read of the sheet-classification prompt template.
+
+    Returns None if the file is missing so the caller can fall back gracefully.
+    """
+    prompt_path = (
+        Path(__file__).parent.parent.parent / "prompts" / "sheet_classification_prompt.md"
+    )
+    if not prompt_path.exists():
+        return None
+    return prompt_path.read_text(encoding="utf-8")
 
 # Import centralized Gemini service
 try:
@@ -216,10 +231,9 @@ class SheetClassifier:
                 indicators=["GeminiService not initialized"]
             )
 
-        # Load prompt template
-        prompt_path = Path(__file__).parent.parent.parent / "prompts" / "sheet_classification_prompt.md"
-
-        if not prompt_path.exists():
+        # Load prompt template (cached at module level)
+        prompt_template = _load_classification_prompt()
+        if prompt_template is None:
             # Fallback classification - default to commission_data
             return SheetClassification(
                 sheet_name=sheet_name,
@@ -228,9 +242,6 @@ class SheetClassifier:
                 reasoning="Classification prompt template not found, defaulting to commission_data",
                 indicators=["Missing prompt template"]
             )
-
-        with open(prompt_path, 'r', encoding='utf-8') as f:
-            prompt_template = f.read()
 
         # Extract metadata info
         dims = metadata.get('dimensions', {}) if metadata else {}

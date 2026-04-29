@@ -605,10 +605,8 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
     from cins.processors.llm_services.factory import get_llm_service
     from cins.processors.core.llm_extract import (
         _extract_pass1_metadata,
-        _extract_pass2_master_data,
         _extract_pass2_via_codegen,
         _extract_pass3_via_codegen,
-        _should_use_codegen_for_pass2,
     )
     from cins.schema.extraction_passes import MetadataExtraction, MasterDataExtraction
 
@@ -680,15 +678,12 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
                 sheet_name=sheet_name, attachment_name=attachment_name,
             ).first()
             metadata_obj = MetadataExtraction.model_validate(pass1_row.result) if pass1_row and pass1_row.result else MetadataExtraction()
-            p2_codegen_code = ""
-            p2_extraction_method = "llm"
-            if _should_use_codegen_for_pass2(pass2_prompt):
-                result_obj, p2_codegen_code, _user_prompt = _extract_pass2_via_codegen(pass2_prompt, service, metadata_obj)
-                p2_extraction_method = "codegen"
-            else:
-                result_obj, p2_codegen_code, _user_prompt = _extract_pass2_master_data(pass2_prompt, service, metadata_obj)
-                if p2_codegen_code:
-                    p2_extraction_method = "codegen"
+            # Pass 2 always runs via codegen (matches main pipeline; the JSON
+            # path was removed for perf reasons — see plan A1).
+            result_obj, p2_codegen_code, _user_prompt = _extract_pass2_via_codegen(
+                pass2_prompt, service, metadata_obj
+            )
+            p2_extraction_method = "codegen"
             result_dict = result_obj.model_dump()
         else:  # pass 3
             pass1_row = ExtractionPass.objects.filter(

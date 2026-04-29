@@ -57,19 +57,7 @@ Do NOT invent new keys.
 
 ---
 
-## CODING RULES
-
-Allowed builtins: `range`, `len`, `list`, `dict`, `str`, `int`, `float`, `bool`, `tuple`,
-`set`, `enumerate`, `zip`, `sorted`, `min`, `max`, `sum`, `abs`, `round`, `any`, `all`,
-`isinstance`, `print`.
-
-String methods are allowed on string instances (`.split()`, `.strip()`, `.startswith()`, etc.)
-
-FORBIDDEN:
-- `import`, `from ... import`
-- `exec`, `eval`, `compile`, `open`, `__import__`
-- `getattr`, `setattr`, `globals`, `locals`, `vars`
-- Any attribute starting and ending with `__`
+{codegen_sandbox_rules}
 
 ---
 

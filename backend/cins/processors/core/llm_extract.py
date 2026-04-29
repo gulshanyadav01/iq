@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Commission Data Extractor — multi-pass LLM extraction pipeline for insurance commission documents."""
 
+import functools
 import json
 import sys
 import time
@@ -25,15 +26,29 @@ from cins.schema.extraction_passes import (
 )
 from cins.validators.raw_extraction_validator import RawExtractionValidator
 
-# Threshold for proactive code-gen mode selection in Pass 2 (master data).
-CODEGEN_INPUT_SIZE_THRESHOLD_BYTES_PASS2 = 30_000  # master_data_content > 30 KB
+def _render_template(text: str) -> str:
+    """
+    Substitute shared prompt fragments (`{codegen_sandbox_rules}`,
+    `{product_taxonomy}`) into a prompt body. Plain str.replace is used
+    deliberately — many prompt bodies contain `{` in code samples and
+    str.format would mangle them.
+    """
+    from cins.prompts import _shared  # local import to avoid Django boot order
+
+    return (
+        text
+        .replace("{codegen_sandbox_rules}", _shared.CODEGEN_SANDBOX_RULES)
+        .replace("{product_taxonomy}", _shared.PRODUCT_TAXONOMY)
+    )
 
 
+@functools.lru_cache(maxsize=None)
 def get_pass0a_email_cleaning_schema():
     """Get the EmailCleaningExtraction JSON schema from Pydantic model."""
     return EmailCleaningExtraction.model_json_schema()
 
 
+@functools.lru_cache(maxsize=None)
 def get_pass0a_email_cleaning_prompt():
     """Get the Pass 0A email cleaning prompt."""
     try:
@@ -49,11 +64,13 @@ def get_pass0a_email_cleaning_prompt():
         return "Clean email content by removing headers, signatures, disclaimers, and thread history. Preserve commission data and tables."
 
 
+@functools.lru_cache(maxsize=None)
 def get_pass0b_master_data_cleaning_schema():
     """Get the MasterDataCleaningExtraction JSON schema from Pydantic model."""
     return MasterDataCleaningExtraction.model_json_schema()
 
 
+@functools.lru_cache(maxsize=None)
 def get_pass0b_master_data_cleaning_prompt():
     """Get the Pass 0B master data cleaning prompt."""
     try:
@@ -69,11 +86,13 @@ def get_pass0b_master_data_cleaning_prompt():
         return "Clean and normalize master data sections. Separate master data from commission rules."
 
 
+@functools.lru_cache(maxsize=None)
 def get_pass0c_table_detection_schema():
     """Get the CSVTableDetectionExtraction JSON schema from Pydantic model."""
     return CSVTableDetectionExtraction.model_json_schema()
 
 
+@functools.lru_cache(maxsize=None)
 def get_pass0c_table_detection_prompt():
     """Get the Pass 0C CSV table detection prompt."""
     try:
@@ -89,16 +108,19 @@ def get_pass0c_table_detection_prompt():
         return "Detect distinct commission table boundaries within the CSV sheet. Return start_row and end_row for each table."
 
 
+@functools.lru_cache(maxsize=None)
 def get_pass1_metadata_schema():
     """Get the MetadataExtraction JSON schema from Pydantic model."""
     return MetadataExtraction.model_json_schema()
 
 
+@functools.lru_cache(maxsize=None)
 def get_pass2_master_data_schema():
     """Get the MasterDataExtraction JSON schema from Pydantic model."""
     return MasterDataExtraction.model_json_schema()
 
 
+@functools.lru_cache(maxsize=None)
 def get_pass1_metadata_prompt():
     """Get the Pass 1 metadata extraction prompt."""
     try:
@@ -112,21 +134,9 @@ def get_pass1_metadata_prompt():
         return "Extract document metadata, provider info, period, and global settings only."
 
 
-def get_pass2_master_data_prompt():
-    """Get the Pass 2 master data extraction prompt."""
-    try:
-        prompt_path = (
-            Path(__file__).parent.parent.parent / "prompts" / "pass2_products_prompt.md"
-        )
-        with open(prompt_path, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception as e:
-        print(f"Warning: Could not load Pass 2 prompt: {e}", file=sys.stderr)
-        return "Extract master data only. Do not extract products or commission rules."
-
-
+@functools.lru_cache(maxsize=None)
 def get_pass2_master_data_codegen_prompt():
-    """Get the Pass 2 code-generation fallback prompt for master data."""
+    """Get the Pass 2 code-generation prompt for master data."""
     try:
         prompt_path = (
             Path(__file__).parent.parent.parent
@@ -134,7 +144,7 @@ def get_pass2_master_data_codegen_prompt():
             / "pass2_master_data_codegen_prompt.md"
         )
         with open(prompt_path, "r", encoding="utf-8") as f:
-            return f.read()
+            return _render_template(f.read())
     except Exception as e:
         print(f"Warning: Could not load Pass 2 codegen prompt: {e}", file=sys.stderr)
         return (
@@ -144,8 +154,9 @@ def get_pass2_master_data_codegen_prompt():
         )
 
 
+@functools.lru_cache(maxsize=None)
 def get_pass3_rules_codegen_prompt():
-    """Get the Pass 3 code-generation fallback prompt."""
+    """Get the Pass 3 code-generation prompt."""
     try:
         prompt_path = (
             Path(__file__).parent.parent.parent
@@ -153,7 +164,7 @@ def get_pass3_rules_codegen_prompt():
             / "pass3_rules_codegen_prompt.md"
         )
         with open(prompt_path, "r", encoding="utf-8") as f:
-            return f.read()
+            return _render_template(f.read())
     except Exception as e:
         print(f"Warning: Could not load Pass 3 codegen prompt: {e}", file=sys.stderr)
         return (
@@ -183,30 +194,6 @@ def _is_truncated_json(raw_json: str, provider: str) -> bool:
     ends_clean = tail.endswith("}")
     return len(raw_json) >= max_chars * 0.90 or not ends_clean
 
-
-
-def _should_use_codegen_for_pass2(master_data_content: str) -> bool:
-    """
-    Proactive heuristic: decide whether Pass 2 should use code generation instead
-    of JSON extraction before making any LLM call.
-
-    Signal checked: input size > CODEGEN_INPUT_SIZE_THRESHOLD_BYTES_PASS2
-
-    Args:
-        master_data_content: The master data text that will be sent to Pass 2
-
-    Returns:
-        True if code-gen mode should be used proactively
-    """
-    content_bytes = len(master_data_content.encode("utf-8"))
-    if content_bytes > CODEGEN_INPUT_SIZE_THRESHOLD_BYTES_PASS2:
-        print(
-            f"#   → Proactive code-gen: pass2 content size {content_bytes:,} bytes "
-            f"> threshold {CODEGEN_INPUT_SIZE_THRESHOLD_BYTES_PASS2:,} bytes",
-            file=sys.stderr,
-        )
-        return True
-    return False
 
 
 def _extract_pass1_metadata(
@@ -537,148 +524,6 @@ def _extract_pass2_via_codegen(
         master_data=[],
         document_structure_notes=f"Code-gen failed after {MAX_CODEGEN_ATTEMPTS} attempts: {last_error}",
     ), last_generated_code, user_prompt
-
-
-def _extract_pass2_master_data(
-    master_data_content, service, metadata, output_dir=None, filename_prefix=""
-):
-    """
-    Pass 2: Extract master data only.
-
-    Args:
-        master_data_content: Master data/metadata sections only (from Pass 1 or Pass 0B)
-        service: LLM service instance
-        metadata: MetadataExtraction from Pass 1
-        output_dir: Directory to save user prompt (optional)
-        filename_prefix: Prefix for output filenames (e.g., sheet name)
-
-    Returns:
-        MasterDataExtraction: Validated master data extraction
-    """
-    print("=" * 70, file=sys.stderr)
-    print("# PASS 2: Extracting Master Data", file=sys.stderr)
-    print("=" * 70, file=sys.stderr)
-
-    schema = get_pass2_master_data_schema()
-    prompt = get_pass2_master_data_prompt()
-
-    if not schema:
-        raise Exception("Could not load Pass 2 schema")
-
-    # Add metadata context to user prompt - only include available fields
-    context_parts = [
-        f"**Provider**: {metadata.provider_name}",
-        f"**Period**: {metadata.period_label} ({metadata.start_date} to {metadata.end_date or 'ongoing'})",
-    ]
-
-    # Only include global settings if any are present
-    global_settings = []
-    if metadata.global_vehicle_type_text:
-        global_settings.append(f"- Vehicle Type: {metadata.global_vehicle_type_text}")
-    if metadata.global_state_text:
-        global_settings.append(f"- States: {metadata.global_state_text}")
-    if metadata.global_applied_on:
-        global_settings.append(f"- Applied On: {metadata.global_applied_on}")
-
-    if global_settings:
-        context_parts.append("**Global Settings**:")
-        context_parts.extend(global_settings)
-
-    context_parts.append("")  # Empty line
-    context_parts.append("---")
-    context_parts.append("")  # Empty line after separator
-
-    context_header = "\n".join(context_parts)
-
-    user_prompt = context_header + master_data_content
-
-    # Build config
-    config = get_config_for_extraction()
-    config.response_json_schema = schema
-    config.system_instruction = prompt
-
-    # Save user prompt before calling LLM
-    if output_dir:
-        prompt_filename = (
-            f"{filename_prefix}pass2_user_prompt.txt"
-            if filename_prefix
-            else "pass2_user_prompt.txt"
-        )
-        prompt_file = output_dir / prompt_filename
-        with open(prompt_file, "w", encoding="utf-8") as f:
-            f.write(user_prompt)
-        print(f"#   → Saved user prompt to {prompt_file}", file=sys.stderr)
-
-    # Call LLM
-    result_json = service.generate_content(user_prompt, config=config)
-
-    # Save raw LLM response before parsing
-    if output_dir:
-        raw_filename = (
-            f"{filename_prefix}pass2_raw_response.json"
-            if filename_prefix
-            else "pass2_raw_response.json"
-        )
-        raw_file = output_dir / raw_filename
-        with open(raw_file, "w", encoding="utf-8") as f:
-            f.write(result_json)
-        print(f"#   → Saved raw LLM response to {raw_file}", file=sys.stderr)
-
-    # Parse and validate
-    try:
-        result_dict = json.loads(result_json)
-        master_data_extraction = MasterDataExtraction.model_validate(result_dict)
-    except json.JSONDecodeError as e:
-        print(f"#   ⚠ Pass 2 JSON parse failed: {e}", file=sys.stderr)
-
-        # Show preview of problematic output
-        if result_json:
-            print(
-                f"#   → Output preview (first 500 chars): {result_json[:500]}",
-                file=sys.stderr,
-            )
-            print(f"#   → Output size: {len(result_json):,} bytes", file=sys.stderr)
-
-            # Save the failed JSON output for debugging (additional copy with error marker)
-            if output_dir:
-                error_filename = (
-                    f"{filename_prefix}pass2_PARSE_ERROR.json"
-                    if filename_prefix
-                    else "pass2_PARSE_ERROR.json"
-                )
-                error_file = output_dir / error_filename
-                with open(error_file, "w") as f:
-                    f.write(result_json)
-                print(
-                    f"#   → Saved failed JSON output to {error_file}", file=sys.stderr
-                )
-
-        print("#   Check saved output file for details.", file=sys.stderr)
-
-        # Reactive fallback: if output looks truncated, try code-gen before giving up
-        if result_json and _is_truncated_json(
-            result_json, getattr(service, "provider", "gemini")
-        ):
-            print(
-                "#   → Output appears truncated; falling back to code-gen",
-                file=sys.stderr,
-            )
-            extraction, codegen_code, codegen_prompt = _extract_pass2_via_codegen(
-                master_data_content,
-                service,
-                metadata,
-                output_dir=output_dir,
-                filename_prefix=filename_prefix,
-            )
-            return extraction, codegen_code, codegen_prompt
-
-        raise  # Re-raise to propagate error
-
-    print(
-        f"# Pass 2 complete: {len(master_data_extraction.master_data)} master data entries",
-        file=sys.stderr,
-    )
-    return master_data_extraction, "", user_prompt
 
 
 def _format_master_data_as_text(master_data_extraction):
@@ -1298,37 +1143,21 @@ def extract_multi_pass(
 
             return pretty_cics
 
-        # Pass 2: Master Data (master data/metadata sections only)
-        # Proactive check: use code-gen mode if content is too large for JSON output
+        # Pass 2: Master Data — always via code-gen. The JSON path was the
+        # main perf bottleneck (e.g. 747s emitting 349 entries one-by-one);
+        # codegen produces the same output as a Python list literal in
+        # seconds. See plan: lets-plan-to-enhance-sunny-hamming.md (A1).
         if on_pass_start:
             on_pass_start(2)
         _pass2_start = time.monotonic()
-        _pass2_codegen_code = ""
-        _pass2_extraction_method = "llm"
-        _pass2_user_prompt = pass2_content
-        if _should_use_codegen_for_pass2(pass2_content):
-            print(
-                "# Pass 2: Using code-gen mode (proactive threshold triggered)",
-                file=sys.stderr,
-            )
-            master_data_extraction, _pass2_codegen_code, _pass2_user_prompt = _extract_pass2_via_codegen(
-                pass2_content,
-                service,
-                metadata,
-                output_dir=out_path,
-                filename_prefix=filename_prefix,
-            )
-            _pass2_extraction_method = "codegen"
-        else:
-            master_data_extraction, _pass2_codegen_code, _pass2_user_prompt = _extract_pass2_master_data(
-                pass2_content,
-                service,
-                metadata,
-                output_dir=out_path,
-                filename_prefix=filename_prefix,
-            )
-            if _pass2_codegen_code:
-                _pass2_extraction_method = "codegen"
+        _pass2_extraction_method = "codegen"
+        master_data_extraction, _pass2_codegen_code, _pass2_user_prompt = _extract_pass2_via_codegen(
+            pass2_content,
+            service,
+            metadata,
+            output_dir=out_path,
+            filename_prefix=filename_prefix,
+        )
         _pass2_duration = time.monotonic() - _pass2_start
 
         if out_path:

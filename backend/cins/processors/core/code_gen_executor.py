@@ -17,43 +17,119 @@ import threading
 from typing import List, Tuple
 
 # Helper functions pre-injected into the codegen sandbox.
-# The LLM does not need to write these — they are always available.
+# The LLM does not need to (and SHOULD NOT) redefine these — they are always
+# available. Keeping them here in one place means:
+#   - Pass 2 + Pass 3 prompts shrink (no inlined helper source).
+#   - When a helper bug is found we fix it once, in code, not in two .md files.
+#   - The exact same `to_pct` semantics apply to every codegen run.
 _SANDBOX_HELPERS = """
 def parse_md_tables(md):
+    \"\"\"
+    Split a markdown string into ordered (name, table_type, lines) tuples.
+
+    Recognises:
+      - Typed tables:   `## Table 1: Foo [type: commission]` -> type from marker
+      - Master refs:    `## Master Data Reference: Foo`      -> type "master"
+      - Commission:     `## Commission Data Sheet: Foo`      -> type "commission"
+                        `## Email Commission Data`           -> type "commission"
+      - Other `## ...`  -> type "unknown"
+
+    Any content appearing BEFORE the first heading (provider info, RTO maps,
+    global settings) is preserved as a leading entry with name=None,
+    type="unknown". Inspect tables[0] for that context.
+    \"\"\"
     tables = []
     current_name = None
     current_type = "unknown"
     current_lines = []
     for line in md.splitlines():
         stripped = line.strip()
-        if stripped.startswith("##"):
-            if "[type:" in stripped:
-                if current_name is not None:
-                    tables.append((current_name, current_type, current_lines))
-                parts = stripped.split("[type:")
-                current_name = parts[0].strip().lstrip("#").strip()
-                current_type = parts[1].rstrip("]").strip()
-                current_lines = []
-            elif "Master Data Reference:" in stripped or "Master Data" in stripped:
-                if current_name is not None:
-                    tables.append((current_name, current_type, current_lines))
-                current_name = stripped.lstrip("#").strip()
+        is_heading = stripped.startswith("## ")
+        if is_heading and "[type:" in stripped:
+            if current_name is not None or current_lines:
+                tables.append((current_name, current_type, current_lines))
+            parts = stripped.split("[type:")
+            current_name = parts[0].strip().lstrip("#").strip()
+            current_type = parts[1].rstrip("]").strip()
+            current_lines = []
+        elif is_heading:
+            if current_name is not None or current_lines:
+                tables.append((current_name, current_type, current_lines))
+            current_name = stripped.lstrip("#").strip()
+            if "Master Data Reference:" in stripped or "Master Data" in stripped:
                 current_type = "master"
-                current_lines = []
             elif "Commission Data Sheet:" in stripped or "Email Commission Data" in stripped:
-                if current_name is not None:
-                    tables.append((current_name, current_type, current_lines))
-                current_name = stripped.lstrip("#").strip()
                 current_type = "commission"
-                current_lines = []
-        elif current_name is not None:
+            else:
+                current_type = "unknown"
+            current_lines = []
+        else:
             current_lines.append(line)
-    if current_name is not None:
+    if current_name is not None or current_lines:
         tables.append((current_name, current_type, current_lines))
     return tables
 
 def parse_md_row(line):
+    \"\"\"Split a markdown pipe-row into a list of stripped cell strings.\"\"\"
     return [c.strip() for c in line.strip("|").split("|")]
+
+def to_pct(v):
+    \"\"\"
+    Convert a raw cell value to a percentage string.
+
+    Cells may be stored as fractions ('0.325' = 32.5%) OR as already-percent
+    numbers ('32.5' = 32.5%, '65' = 65%). Detect by magnitude:
+      - 0 < |f| <= 1   -> fraction, multiply by 100
+      - |f| > 1        -> already a percentage, do not multiply
+
+    Values > 100 are returned as-is so they surface as obvious anomalies
+    downstream rather than being silently mangled. Returns '' for empty/
+    non-numeric, '0%' for zero.
+    \"\"\"
+    try:
+        f = float(v)
+        if f == 0:
+            return "0%"
+        pct = f * 100 if abs(f) <= 1 else f
+        s = "{:.4g}%".format(pct)
+        return s
+    except (ValueError, TypeError):
+        return ""
+
+def extract_notes(tables):
+    \"\"\"Concatenate text from every notes/master table into one string.\"\"\"
+    parts = []
+    for name, ttype, lines in tables:
+        if ttype in ("notes", "master"):
+            parts.append(" ".join(
+                line.strip().strip("|").strip("*").strip()
+                for line in lines if line.strip() and "---" not in line
+            ))
+    return " ".join(parts).strip()
+
+def parse_cc_range(header):
+    \"\"\"
+    Extract a normalised CC or KW range string from a column header.
+    Examples: '150cc' -> '150', '150-350cc' -> '150-350', '> 16 KW' -> '>16',
+              '7 KW Bike' -> '7', 'SCOOTER' -> '', 'Hero OEM' -> ''.
+    \"\"\"
+    h = header.strip().upper()
+    for unit in ("CC", "KW"):
+        h = h.replace(unit, " ")
+    h = h.strip()
+    for prefix in (">", ">=", "ABOVE", "GREATER THAN", "MORE THAN"):
+        if h.startswith(prefix):
+            rest = h[len(prefix):].strip().split()[0] if h[len(prefix):].strip() else ""
+            digits = "".join(c for c in rest if c.isdigit() or c == ".")
+            if digits:
+                return ">" + digits
+    parts = h.replace("_", " ").replace("-", " ").split()
+    nums = ["".join(c for c in p if c.isdigit() or c == ".") for p in parts if any(c.isdigit() for c in p)]
+    if len(nums) >= 2:
+        return nums[0] + "-" + nums[1]
+    if len(nums) == 1:
+        return nums[0]
+    return ""
 
 def get_entry_type(table_name, header):
     tl = table_name.lower()
