@@ -1,0 +1,36 @@
+{{- if .Values.minio.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-init
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "insure-iq.labels" . | nindent 4 }}
+spec:
+  template:
+    metadata:
+      name: minio-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: mc
+        image: minio/mc
+        command:
+        - /bin/sh
+        - -c
+        - |
+          mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}
+          mc mb --ignore-existing myminio/{{ .Values.minio.bucketName }}
+          mc anonymous set download myminio/{{ .Values.minio.bucketName }}
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: minio-secrets
+              key: username
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: minio-secrets
+              key: password
+{{- end }}

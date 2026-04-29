@@ -53,6 +53,37 @@ Services in dev:
 - MinIO console: `http://localhost:9090`
 - Postgres: port 5432, DB `insure_iq`
 
+## Kubernetes Deployment (Helm)
+
+Helm chart at `helm/insure-iq/` replaces the old Kustomize setup (`k8s/`, now deleted).
+
+**Setup:**
+1. Copy `helm/insure-iq/values.secrets.yaml.example` → `helm/insure-iq/values.secrets.yaml`
+2. Edit `values.secrets.yaml` with real credentials (ignored by git)
+
+**Deploy:**
+
+```bash
+# Dev (in-cluster postgres/redis/minio)
+helm install insure-iq ./helm/insure-iq \
+  -f helm/insure-iq/values.dev.yaml \
+  -f helm/insure-iq/values.secrets.yaml
+
+# Prod (external DB, higher replicas, real domain)
+helm install insure-iq ./helm/insure-iq \
+  -f helm/insure-iq/values.prod.yaml \
+  -f helm/insure-iq/values.secrets.yaml
+
+# Upgrade
+helm upgrade insure-iq ./helm/insure-iq -f <values files>
+```
+
+**Chart structure:**
+- `values.yaml` — shared defaults (dev-safe, no secrets)
+- `values.dev.yaml` — dev overrides (in-cluster infra)
+- `values.prod.yaml` — prod overrides (external DB, 2 replicas)
+- `templates/` — all k8s manifests, templated from values
+
 ## Environment Variables
 
 Copy `.env.example` → `.env` at project root. Key vars:

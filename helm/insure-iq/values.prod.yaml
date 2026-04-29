@@ -1,0 +1,23 @@
+# Production overrides: external DB, higher replicas, real domain
+
+app:
+  debug: "false"
+  env: PROD
+
+backend:
+  replicas: 2
+
+web:
+  replicas: 2
+
+postgres:
+  enabled: false
+
+redis:
+  enabled: false
+
+minio:
+  enabled: false
+
+ingress:
+  host: rhobots.ai

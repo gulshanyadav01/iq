@@ -42,8 +42,16 @@ const updateSession = async () => {
 }
 
 onMounted(async () => {
-  await updateSession()
-  isLoading.value = false
+  try {
+    await Promise.race([
+      updateSession(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Session timeout')), 3000))
+    ])
+  } catch (error) {
+    console.error('Failed to load session:', error)
+  } finally {
+    isLoading.value = false
+  }
 });
 
 useHead({

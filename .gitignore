@@ -40,6 +40,9 @@ yarn-error.log*
 .env*
 !.env.example
 
+# helm secrets
+helm/*/values.secrets.yaml
+
 # vercel
 .vercel
 
