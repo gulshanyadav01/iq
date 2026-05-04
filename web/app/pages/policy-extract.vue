@@ -11,12 +11,23 @@
             Upload policy documents and monitor extraction status
           </p>
         </div>
-        <button
-          class="bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200"
-          @click="isModalOpen = true"
-        >
-          New Request
-        </button>
+        <div class="flex items-center gap-2 shrink-0">
+          <button
+            class="flex items-center gap-2 border border-gray-300 dark:border-gray-700 bg-white/70 dark:bg-gray-900/70 hover:bg-white dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 px-4 py-2 rounded-lg text-sm font-medium transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+            :disabled="loading"
+            :title="loading ? 'Refreshing…' : 'Refresh'"
+            @click="loadRequests"
+          >
+            <UIcon name="i-lucide-refresh-cw" :class="['w-4 h-4', loading && 'animate-spin']" />
+            <span>Refresh</span>
+          </button>
+          <button
+            class="bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200"
+            @click="isModalOpen = true"
+          >
+            New Request
+          </button>
+        </div>
       </div>
 
       <!-- Metric Cards -->
@@ -279,7 +290,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 
 interface ExtractionRequest {
   id: string
@@ -321,7 +332,6 @@ const uploadError = ref('')
 // Detail slide-over state
 const selectedRequest = ref<ExtractionRequest | null>(null)
 const detailOpen = ref(false)
-let pollTimer: ReturnType<typeof setInterval> | null = null
 
 const views: { id: 'fields' | 'json'; label: string }[] = [
   { id: 'fields', label: 'Extracted Fields' },
@@ -501,35 +511,7 @@ async function copyContent() {
   setTimeout(() => { copied.value = false }, 2000)
 }
 
-async function pollInFlight() {
-  const inFlight = requests.value.filter(
-    r => r.status === 'initiated' || r.status === 'processing'
-  )
-
-  if (inFlight.length === 0) return
-
-  try {
-    const headers = await getAuthHeaders()
-    await Promise.all(inFlight.map(async (req) => {
-      const fresh = await $fetch<ExtractionRequest>(
-        `${getBaseUrl()}/api/policy-extract/requests/${req.id}/`,
-        { headers }
-      )
-      const idx = requests.value.findIndex(r => r.id === req.id)
-      if (idx !== -1) requests.value[idx] = fresh
-      if (selectedRequest.value?.id === req.id) selectedRequest.value = fresh
-    }))
-  } catch (err) {
-    console.error('Polling error:', err)
-  }
-}
-
 onMounted(() => {
   loadRequests()
-  pollTimer = setInterval(pollInFlight, 4000)
-})
-
-onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
 })
 </script>
