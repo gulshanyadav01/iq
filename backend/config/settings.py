@@ -329,15 +329,30 @@ AUTH_USER_MODEL = 'accounts.User'
 
 CORS_ALLOW_ALL_ORIGINS = True
 
-AWS_S3_ENDPOINT_URL = env('AWS_S3_ENDPOINT_URL')
-AWS_S3_PUBLIC_ENDPOINT_URL = env('AWS_S3_PUBLIC_ENDPOINT_URL')
-AWS_ACCESS_KEY_ID = env('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = env('AWS_SECRET_ACCESS_KEY')
-AWS_STORAGE_BUCKET_NAME = env('AWS_STORAGE_BUCKET_NAME')
-AWS_REGION = env('AWS_REGION')
-# AWS_S3_CUSTOM_DOMAIN = f'{AWS_STORAGE_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com'
+def _normalize_s3_endpoint(value):
+    """Strip whitespace and auto-prefix scheme so boto3 doesn't reject bare hosts."""
+    value = (value or '').strip()
+    if not value:
+        return ''
+    if '://' not in value:
+        value = f'https://{value}'
+    return value
+
+
+AWS_ACCESS_KEY_ID = env('AWS_ACCESS_KEY_ID', default='')
+AWS_SECRET_ACCESS_KEY = env('AWS_SECRET_ACCESS_KEY', default='')
+AWS_STORAGE_BUCKET_NAME = env('AWS_STORAGE_BUCKET_NAME', default='')
+AWS_REGION = env('AWS_REGION', default='ap-south-1')
+AWS_S3_REGION_NAME = AWS_REGION
+AWS_S3_SIGNATURE_VERSION = env('AWS_S3_SIGNATURE_VERSION', default='s3v4')
+AWS_S3_ADDRESSING_STYLE = env('AWS_S3_ADDRESSING_STYLE', default='virtual')
 AWS_DEFAULT_ACL = 'public-read'
-AWS_S3_ADDRESSING_STYLE = 'path'
+
+_endpoint = _normalize_s3_endpoint(env('AWS_S3_ENDPOINT_URL', default=''))
+if _endpoint:
+    AWS_S3_ENDPOINT_URL = _endpoint
+
+AWS_S3_PUBLIC_ENDPOINT_URL = _normalize_s3_endpoint(env('AWS_S3_PUBLIC_ENDPOINT_URL', default=''))
 
 CELERY_RESULT_BACKEND = env('CELERY_RESULT_BACKEND')
 CELERY_CACHE_BACKEND = env('CELERY_CACHE_BACKEND')
