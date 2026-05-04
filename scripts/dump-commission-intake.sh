@@ -12,6 +12,27 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/../.env}"
+
+# Load AWS creds from .env if not already in environment.
+# Explicitly ignore AWS_S3_ENDPOINT_URL (it points at MinIO for app storage,
+# not real S3) so the AWS CLI talks to AWS.
+if [ -f "$ENV_FILE" ]; then
+  while IFS='=' read -r key value; do
+    case "$key" in
+      AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AWS_REGION|AWS_DEFAULT_REGION)
+        value="${value%\"}"; value="${value#\"}"
+        value="${value%\'}"; value="${value#\'}"
+        if [ -z "${!key:-}" ]; then
+          export "$key=$value"
+        fi
+        ;;
+    esac
+  done < <(grep -E '^(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AWS_REGION|AWS_DEFAULT_REGION)=' "$ENV_FILE" || true)
+fi
+unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 AWS_S3_ENDPOINT_URL
+
 POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-insur-iq-postgres-1}"
 DB_USER="${DB_USER:-postgres}"
 DB_NAME="${DB_NAME:-insure_iq}"
