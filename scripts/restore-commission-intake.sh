@@ -182,10 +182,53 @@ elif [ "${TRUNCATE:-0}" = "1" ]; then
 fi
 
 # ----------------------------------------------------------------------------
+# Drop cross-app FK on uploaded_by_id so rows referencing users that don't
+# exist on this DB can still be inserted. The FK is recreated after restore
+# (with orphans nulled out).
+# ----------------------------------------------------------------------------
+UPLOADED_BY_FK_NAME=$(run_psql "
+SELECT conname FROM pg_constraint
+WHERE conrelid = 'public.commission_intake_commissiondocument'::regclass
+  AND contype = 'f'
+  AND conkey = (
+    SELECT array_agg(attnum)
+    FROM pg_attribute
+    WHERE attrelid = 'public.commission_intake_commissiondocument'::regclass
+      AND attname = 'uploaded_by_id'
+  );
+" 2>/dev/null | awk 'NR==3 {gsub(/^ +| +$/,"",$0); print}')
+
+if [ -n "$UPLOADED_BY_FK_NAME" ]; then
+  echo "==> Dropping FK $UPLOADED_BY_FK_NAME (will recreate after restore)"
+  run_psql "ALTER TABLE public.commission_intake_commissiondocument DROP CONSTRAINT ${UPLOADED_BY_FK_NAME};"
+fi
+
+# ----------------------------------------------------------------------------
 # Restore
 # ----------------------------------------------------------------------------
 echo "==> Restoring dump into $DB_NAME"
 run_pg_restore "$DUMP_PATH"
+
+# ----------------------------------------------------------------------------
+# Null out uploaded_by_id rows that reference missing users, then recreate FK
+# ----------------------------------------------------------------------------
+echo "==> Nulling orphaned uploaded_by_id references"
+run_psql "
+UPDATE public.commission_intake_commissiondocument
+SET uploaded_by_id = NULL
+WHERE uploaded_by_id IS NOT NULL
+  AND uploaded_by_id NOT IN (SELECT id FROM public.accounts_user);
+"
+
+if [ -n "$UPLOADED_BY_FK_NAME" ]; then
+  echo "==> Recreating FK $UPLOADED_BY_FK_NAME"
+  run_psql "
+ALTER TABLE public.commission_intake_commissiondocument
+ADD CONSTRAINT ${UPLOADED_BY_FK_NAME}
+FOREIGN KEY (uploaded_by_id) REFERENCES public.accounts_user(id)
+ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
+"
+fi
 
 echo ""
 echo "Done."
