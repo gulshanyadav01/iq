@@ -15,6 +15,7 @@ from rest_framework.response import Response
 from commission_intake.models import CommissionDocument
 from commission_intake.serializers import (
     CommissionDocumentCreateSerializer,
+    CommissionDocumentListSerializer,
     CommissionDocumentSerializer,
     ProcessingModeRequestSerializer,
     RerunPassRequestSerializer,
@@ -45,6 +46,8 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
     def get_serializer_class(self):
         if self.action == "create":
             return CommissionDocumentCreateSerializer
+        if self.action == "list":
+            return CommissionDocumentListSerializer
         return CommissionDocumentSerializer
 
     @extend_schema(
@@ -63,13 +66,17 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
 
     @extend_schema(
         summary="List commission documents",
-        description="Returns all documents (newest first) with current processing status.",
+        description="Returns all documents (newest first) with current processing status. Excludes heavy nested extraction/indexing payloads — fetch the detail endpoint for those.",
         tags=["Commission Document"],
-        responses={200: CommissionDocumentSerializer(many=True)},
+        responses={200: CommissionDocumentListSerializer(many=True)},
     )
     def list(self, request, *args, **kwargs):
-        queryset = self.get_queryset().order_by("-created_at")
-        serializer = CommissionDocumentSerializer(queryset, many=True)
+        queryset = (
+            self.get_queryset()
+            .only(*CommissionDocumentListSerializer.Meta.fields)
+            .order_by("-created_at")
+        )
+        serializer = CommissionDocumentListSerializer(queryset, many=True)
         return Response(serializer.data)
 
     @extend_schema(

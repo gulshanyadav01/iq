@@ -11,11 +11,15 @@ RUN echo "Acquire::http::Pipeline-Depth 0;" > /etc/apt/apt.conf.d/99custom && \
     echo "Acquire::BrokenProxy    true;" >> /etc/apt/apt.conf.d/99custom
 
 # Install system dependencies
+# libreoffice-calc is used to convert .xlsb (Excel binary) attachments to .xlsx
+# at intake time, since openpyxl cannot read the .xlsb format directly.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
     dumb-init \
-    libpq-dev && \
+    libpq-dev \
+    libreoffice-calc \
+    libreoffice-core && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

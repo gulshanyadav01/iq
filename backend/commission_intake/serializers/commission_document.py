@@ -115,6 +115,31 @@ class RerunPassRequestSerializer(serializers.Serializer):
     attachment_name = serializers.CharField(required=False, default="", allow_blank=True)
 
 
+class CommissionDocumentListSerializer(serializers.ModelSerializer):
+    """Lean serializer for list views — excludes heavy nested extraction/indexing payloads."""
+
+    class Meta:
+        model = CommissionDocument
+        fields = [
+            "id",
+            "status",
+            "processing_mode",
+            "original_filename",
+            "source_type",
+            "provider",
+            "llm_provider",
+            "llm_model",
+            "excel_mode",
+            "error",
+            "index_progress",
+            "is_validated",
+            "validated_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
 class CommissionDocumentSerializer(serializers.ModelSerializer):
     cics_result = CICSResultSerializer(read_only=True)
     validation_result = ValidationResultSerializer(read_only=True)

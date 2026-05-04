@@ -108,9 +108,11 @@ parse_md_row(line) -> [str]
     Splits a "| a | b | c |" pipe-row into ["a", "b", "c"].
 
 to_pct(v) -> str
-    "0.325" -> "32.5%", "65" -> "65%", "" -> "", 0 -> "0%". Magnitude-aware:
-    values <= 1 are treated as fractions and multiplied by 100; values > 1
-    are kept as-is. Values > 100 are returned verbatim so anomalies surface.
+    "0.325" -> "32.5%", "65" -> "65%", "30%" -> "30%", "" -> "", 0 -> "0%".
+    Accepts a trailing "%" (stripped before parsing). Magnitude-aware:
+    bare values <= 1 are treated as fractions and multiplied by 100; bare
+    values > 1 are kept as-is. Values > 100 are returned verbatim so
+    anomalies surface.
 
 extract_notes(tables) -> str
     Concatenates text from every notes/master table into one space-separated

@@ -15,6 +15,10 @@ from datetime import datetime
 from cins.processors.extractors.extract_eml import extract_eml_content
 from cins.processors.extractors.extract_pdf import extract_pdf_text
 from cins.processors.extractors.excel_to_csv import ExcelToCSVConverter
+from cins.processors.extractors.convert_xlsb import (
+    convert_xlsb_to_xlsx,
+    XlsbConversionError,
+)
 from cins.processors.content.csv_to_markdown import csv_to_markdown
 from cins.processors.content.content_cleaning import (
     clean_email_content,
@@ -27,6 +31,30 @@ logger = logging.getLogger("content_indexer")
 
 # Current indexer version for cache invalidation
 INDEXER_VERSION = "1.3"
+
+
+def _retag_single_commission_table(content_str: str, sheet_name: str) -> str:
+    """Rewrite a single-table commission sheet's leading `## Sheet: ...` header
+    to the typed `## Table 1: ... [type: commission]` form that the multi-table
+    branch produces.
+
+    Pass 3 codegen filters tables on `ttype == "commission"`. Without this
+    retag, single-table commission sheets are tagged "unknown" by
+    `parse_md_tables` and the generated extractor skips every row.
+    """
+    lines = content_str.splitlines()
+    typed_header = f"## Table 1: {sheet_name} [type: commission]"
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("## "):
+            if "[type:" in stripped:
+                return content_str
+            lines[i] = typed_header
+            return "\n".join(lines)
+        return typed_header + "\n\n" + content_str
+    return typed_header + "\n"
 
 
 @dataclass
@@ -383,6 +411,24 @@ class ContentIndexer:
                 metadata = self._index_pdf(file_path, output_dir, _progress)
             elif file_ext in [".xlsx", ".xls", ".xlsm"]:
                 metadata = self._index_excel(file_path, output_dir, excel_mode, progress=_progress)
+            elif file_ext == ".xlsb":
+                # openpyxl can't read .xlsb; convert via LibreOffice first.
+                converted_path = None
+                try:
+                    converted_path = convert_xlsb_to_xlsx(file_path)
+                    metadata = self._index_excel(
+                        converted_path, output_dir, excel_mode, progress=_progress,
+                    )
+                    metadata.setdefault("source_metadata", {})["converted_from"] = "xlsb"
+                    metadata["source_metadata"]["original_filename"] = file_path_obj.name
+                except XlsbConversionError as e:
+                    raise ValueError(f"Failed to convert .xlsb file: {e}") from e
+                finally:
+                    if converted_path:
+                        try:
+                            os.unlink(converted_path)
+                        except Exception:
+                            pass
             else:
                 raise ValueError(f"Unsupported file type: {file_ext}")
 
@@ -1009,7 +1055,10 @@ class ContentIndexer:
                                     f"  Pass 0C returned no tables for '{sheet_name}', writing full sheet"
                                 )
                                 md_path = sheets_dir / f"{safe_name}.md"
-                                md_path.write_text(content_str, encoding="utf-8")
+                                md_path.write_text(
+                                    _retag_single_commission_table(content_str, sheet_name),
+                                    encoding="utf-8",
+                                )
                                 sheet_files.append(safe_name)
                                 table_split_info = {
                                     "split_applied": False,
@@ -1026,7 +1075,10 @@ class ContentIndexer:
                                 "sheet_has_multiple_tables", False
                             ):
                                 md_path = sheets_dir / f"{safe_name}.md"
-                                md_path.write_text(content_str, encoding="utf-8")
+                                md_path.write_text(
+                                    _retag_single_commission_table(content_str, sheet_name),
+                                    encoding="utf-8",
+                                )
                                 sheet_files.append(safe_name)
                                 logger.info(
                                     f"  Pass 0C: single table in '{sheet_name}', no split needed"
