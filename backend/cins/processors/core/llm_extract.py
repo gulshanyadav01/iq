@@ -9,8 +9,6 @@ from pathlib import Path
 
 from cins.processors.llm_services.factory import (
     get_llm_service,
-    get_config_for_extraction,
-    get_config_for_code_generation,
 )
 from cins.schema.raw_extraction import RawExtraction
 from cins.schema.extraction_passes import (
@@ -221,8 +219,9 @@ def _extract_pass1_metadata(
     if not schema:
         raise Exception("Could not load Pass 1 schema")
 
-    # Build config
-    config = get_config_for_extraction()
+    # Build config — use the running service's own config so provider and
+    # config types match (mixing providers here causes attribute errors).
+    config = service.config_for_extraction()
     config.response_json_schema = schema
     config.system_instruction = prompt
 
@@ -375,7 +374,7 @@ def _extract_pass2_via_codegen(
             f.write(user_prompt)
         print(f"#   → Saved code-gen user prompt to {prompt_file}", file=sys.stderr)
 
-    config = get_config_for_code_generation()
+    config = service.config_for_code_generation()
     config.system_instruction = prompt
 
     def _strip_fences(raw: str) -> str:
@@ -720,7 +719,7 @@ def _extract_pass3_via_codegen(
             f.write(user_prompt)
         print(f"#   → Saved code-gen user prompt to {prompt_file}", file=sys.stderr)
 
-    config = get_config_for_code_generation()
+    config = service.config_for_code_generation()
     config.system_instruction = prompt
 
     def _strip_fences(raw: str) -> str:

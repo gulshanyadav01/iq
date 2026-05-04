@@ -1,4 +1,4 @@
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -113,8 +113,7 @@ export function useCommissionIntakeDetail() {
   const actionLoading = ref<string | null>(null)
   const actionError = ref<string | null>(null)
   const activePassSheetKey = ref<string>('')
-
-  let pollTimer: ReturnType<typeof setInterval> | null = null
+  const refreshing = ref(false)
 
   // ── Stage helpers ──────────────────────────────────────────────────────────
 
@@ -427,23 +426,12 @@ export function useCommissionIntakeDetail() {
     }
   }
 
-  function hasRunningPass(): boolean {
-    if ((doc.value?.extraction_passes || []).some(p => p.status === 'running' || p.status === 'pending')) return true
-    // Keep polling when validation is missing on a completed doc (rerun_transform cleared it, validation task pending)
-    if (doc.value?.status === 'completed' && doc.value.cics_result && !doc.value.validation_result) return true
-    return false
-  }
-
-  async function pollDoc() {
-    if (!doc.value || (!isInFlight(doc.value.status) && !hasRunningPass())) return
+  async function refresh() {
+    refreshing.value = true
     try {
-      const headers = await getAuthHeaders()
-      doc.value = await $fetch<CommissionDocument>(
-        `${getBaseUrl()}/api/commission-intake/documents/${route.params.id}/`,
-        { headers }
-      )
-    } catch (err) {
-      console.error('Polling error:', err)
+      await loadDoc()
+    } finally {
+      refreshing.value = false
     }
   }
 
@@ -564,22 +552,18 @@ export function useCommissionIntakeDetail() {
 
   onMounted(() => {
     loadDoc()
-    pollTimer = setInterval(pollDoc, 3000)
-  })
-
-  onUnmounted(() => {
-    if (pollTimer) clearInterval(pollTimer)
   })
 
   return {
     doc, loadError, activeStage, copied, activeCicsTab, actionLoading, actionError, activePassSheetKey,
+    refreshing,
     stages, currentPassSheets, currentPass,
     cicsDoc, cicsMetrics, cicsMetadataRows, cicsProducts,
     validationBannerClass, validationBannerIcon, validationBannerText,
     passesForNum, passAggregateStatus,
     isInFlight, getStatusBadgeClass, formatStatus, getPassStatusBadge, getSeverityBadge,
     getSheetClassification, getSheetClassBadge, formatCommissionValue, formatConditions,
-    sheetPassStatus, copyJson, downloadJson, downloadExcel, loadDoc,
+    sheetPassStatus, copyJson, downloadJson, downloadExcel, loadDoc, refresh,
     triggerIndex, triggerExtract, triggerRerunPass, triggerTransform, triggerValidate,
     triggerMarkValidated, triggerMarkInvalidated,
   }

@@ -32,7 +32,6 @@ def clean_email_content(raw_content: str, service) -> tuple[str, dict]:
         get_pass0a_email_cleaning_schema,
         get_pass0a_email_cleaning_prompt,
     )
-    from cins.processors.llm_services.factory import get_config_for_extraction
 
     schema = get_pass0a_email_cleaning_schema()
     prompt = get_pass0a_email_cleaning_prompt()
@@ -41,8 +40,8 @@ def clean_email_content(raw_content: str, service) -> tuple[str, dict]:
         # Fallback: return content as-is if schema not available
         return raw_content, {"error": "Schema not available", "fallback": True}
 
-    # Build config
-    config = get_config_for_extraction()
+    # Build config from the running service so config and provider match.
+    config = service.config_for_extraction()
     config.response_json_schema = schema
     config.system_instruction = prompt
 
@@ -89,7 +88,6 @@ def detect_csv_tables(csv_content: str, sheet_name: str, service) -> tuple[list,
         get_pass0c_table_detection_schema,
         get_pass0c_table_detection_prompt,
     )
-    from cins.processors.llm_services.factory import get_config_for_extraction
 
     schema = get_pass0c_table_detection_schema()
     prompt = get_pass0c_table_detection_prompt()
@@ -125,7 +123,7 @@ def detect_csv_tables(csv_content: str, sheet_name: str, service) -> tuple[list,
 
     user_message = f"Sheet name: {sheet_name}\n\n{numbered_content}"
 
-    config = get_config_for_extraction()
+    config = service.config_for_extraction()
     config.response_json_schema = schema
     config.system_instruction = prompt
 
@@ -205,7 +203,6 @@ def clean_master_data_content(raw_content: str, service) -> tuple[str, dict]:
         get_pass0b_master_data_cleaning_schema,
         get_pass0b_master_data_cleaning_prompt,
     )
-    from cins.processors.llm_services.factory import get_config_for_extraction
 
     schema = get_pass0b_master_data_cleaning_schema()
     prompt = get_pass0b_master_data_cleaning_prompt()
@@ -214,8 +211,8 @@ def clean_master_data_content(raw_content: str, service) -> tuple[str, dict]:
         # Fallback: return content as-is if schema not available
         return raw_content, {"error": "Schema not available", "fallback": True}
 
-    # Build config
-    config = get_config_for_extraction()
+    # Build config from the running service so config and provider match.
+    config = service.config_for_extraction()
     config.response_json_schema = schema
     config.system_instruction = prompt
 

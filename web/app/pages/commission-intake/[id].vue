@@ -24,7 +24,21 @@
             </span>
           </div>
         </div>
-        <!-- Action buttons: Export Excel (primary, when complete) / Re-index / Extract / Validate -->
+        <!-- Action buttons: Refresh / Export Excel (primary, when complete) / Re-index / Extract / Validate -->
+        <div v-if="doc" class="flex items-center gap-2">
+          <button
+            :disabled="refreshing"
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-400 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            @click="refresh"
+          >
+            <UIcon
+              name="i-lucide-refresh-cw"
+              class="w-3.5 h-3.5"
+              :class="{ 'animate-spin': refreshing }"
+            />
+            Refresh
+          </button>
+        </div>
         <div v-if="doc && !isInFlight(doc.status)" class="flex items-center gap-2">
           <button
             v-if="doc.status === 'completed' && !doc.is_validated"
@@ -776,12 +790,13 @@ const overlapRuleModalData = ref<OverlapIssue | null>(null)
 
 const {
   doc, loadError, activeStage, copied, activeCicsTab, actionLoading, actionError, activePassSheetKey,
+  refreshing,
   stages, currentPassSheets, currentPass,
   cicsMetrics, cicsMetadataRows, cicsProducts,
   validationBannerClass, validationBannerIcon, validationBannerText,
   isInFlight, getStatusBadgeClass, formatStatus, getPassStatusBadge, getSeverityBadge,
   getSheetClassification, getSheetClassBadge, formatCommissionValue, formatConditions,
-  sheetPassStatus, copyJson, downloadJson, downloadExcel,
+  sheetPassStatus, copyJson, downloadJson, downloadExcel, refresh,
   triggerIndex, triggerExtract, triggerRerunPass, triggerTransform, triggerValidate,
   triggerMarkValidated, triggerMarkInvalidated,
 } = useCommissionIntakeDetail()
