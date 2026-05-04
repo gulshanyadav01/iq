@@ -18,32 +18,26 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
     Policy extraction API with background task queue processing.
 
     POST /api/policy-extract/requests/
-        - Accepts multipart file upload with optional metadata
+        - Accepts multipart file upload or file_link JSON
         - Returns immediately with request ID and status="initiated"
         - Enqueues processing chain in Celery
-
-    GET /api/policy-extract/requests/{id}/
-        - Poll current status and result
+        - On completion/failure, a callback is POSTed to settings.POLICY_EXTRACT_CALLBACK_URL
     """
     permission_classes = [AllowAny]
     queryset = PolicyExtractionRequest.objects.all()
-
-    def get_serializer_class(self):
-        if self.action == "create":
-            return PolicyExtractionRequestCreateSerializer
-        return PolicyExtractionRequestSerializer
+    serializer_class = PolicyExtractionRequestCreateSerializer
 
     @extend_schema(
         summary="Submit policy extraction request",
         description="Accept file upload (multipart) or file_link (JSON). Returns extraction request with status=initiated. "
-                    "On completion or failure, a POST callback is sent to the configured callback_url.",
+                    "On completion or failure, a POST callback is sent to the server-configured callback URL.",
         tags=["Policy Extract"],
         request=PolicyExtractionRequestCreateSerializer,
         responses={201: PolicyExtractionRequestSerializer},
         callbacks=[
             OpenApiCallback(
                 name="policyExtractCallback",
-                path="{$request.body#/callback_url}",
+                path="{$settings.POLICY_EXTRACT_CALLBACK_URL}",
                 decorator=extend_schema(
                     summary="Policy extraction callback",
                     description="POSTed by the server when extraction completes or fails.",
@@ -63,25 +57,3 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
         enqueue_processing_chain(str(extraction_request.id))
         response_serializer = PolicyExtractionRequestSerializer(extraction_request)
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
-
-    @extend_schema(
-        summary="List extraction requests",
-        description="List all extraction requests (newest first) with current processing status.",
-        tags=["Policy Extract"],
-        responses={200: PolicyExtractionRequestSerializer(many=True)},
-    )
-    def list(self, request, *args, **kwargs):
-        queryset = self.get_queryset().order_by('-created_at')
-        serializer = PolicyExtractionRequestSerializer(queryset, many=True)
-        return Response(serializer.data)
-
-    @extend_schema(
-        summary="Get extraction request",
-        description="Poll current processing status and extraction result.",
-        tags=["Policy Extract"],
-        responses={200: PolicyExtractionRequestSerializer},
-    )
-    def retrieve(self, request, *args, **kwargs):
-        instance = self.get_object()
-        serializer = PolicyExtractionRequestSerializer(instance)
-        return Response(serializer.data)

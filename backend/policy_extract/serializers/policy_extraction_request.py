@@ -33,7 +33,6 @@ class PolicyExtractionRequestLinkCreateSerializer(serializers.Serializer):
     file_link = serializers.URLField()
     policy_identifier = serializers.CharField()
     file_type = serializers.CharField(required=False, default="application/pdf")
-    callback_url = serializers.URLField(required=False, allow_null=True)
     RequestId = serializers.CharField(required=False, allow_null=True)
     RequestBy = serializers.CharField(required=False, allow_null=True)
     CreatedAt = serializers.CharField(required=False, allow_null=True)
