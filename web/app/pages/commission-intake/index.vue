@@ -129,8 +129,16 @@
                 class="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition cursor-pointer"
                 @click="navigateToDetail(doc.id)"
               >
-                <td class="px-4 py-3 text-sm text-gray-900 dark:text-gray-100 max-w-xs truncate">
-                  {{ doc.original_filename }}
+                <td class="px-4 py-3 text-sm text-gray-900 dark:text-gray-100 max-w-xs">
+                  <div class="flex items-center gap-1.5 min-w-0">
+                    <span class="truncate">{{ doc.original_filename }}</span>
+                    <UIcon
+                      v-if="doc.is_validated"
+                      name="i-lucide-shield-check"
+                      class="w-3.5 h-3.5 flex-shrink-0 text-green-500"
+                      title="Manually validated"
+                    />
+                  </div>
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600 dark:text-gray-400">
                   {{ doc.provider || '—' }}
@@ -172,6 +180,15 @@
                     >
                       <UIcon name="i-lucide-eye" class="w-4 h-4" />
                     </button>
+                    <a
+                      :href="`/commission-intake/${doc.id}`"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition"
+                      title="Open in new tab"
+                    >
+                      <UIcon name="i-lucide-external-link" class="w-4 h-4" />
+                    </a>
                     <button
                       class="p-1.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition disabled:opacity-40 disabled:cursor-not-allowed"
                       title="Delete document"
@@ -358,6 +375,7 @@ interface CommissionDocument {
   llm_provider: string
   llm_model: string
   excel_mode: string
+  is_validated: boolean
   error: string | null
   created_at: string
   updated_at: string

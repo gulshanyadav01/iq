@@ -67,6 +67,12 @@ def index_document(document_id: str):
         set_trace_context(session_id=document_id)
         doc = CommissionDocument.objects.get(id=document_id)
 
+        # Re-indexing supersedes everything downstream (the freshly indexed
+        # content/sheets won't match the prior extraction's rules or validation
+        # output). Wipe stale artefacts BEFORE indexing so the UI doesn't keep
+        # showing old CICS rules against new sheets.
+        _purge_extraction_artifacts(doc)
+
         # Download file from S3/MinIO to a local temp file
         suffix = os.path.splitext(doc.original_filename)[-1] or ".bin"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
@@ -222,30 +228,31 @@ def run_extraction(document_id: str):
         CICSResult.objects.filter(document=doc).delete()
         ValidationResult.objects.filter(document=doc).delete()
 
-        # Pre-create ExtractionPass rows as PENDING for each known sheet × 3 passes.
-        # This lets the UI display pending state before extraction starts.
+        # Pre-create ExtractionPass rows as PENDING for each sheet × 3 passes the
+        # pipeline will actually run. Use the pipeline's own routing helper so
+        # the (sheet_name, attachment_name) keys exactly match what the pipeline
+        # writes during execution — otherwise pre-created rows orphan as PENDING
+        # and the UI sees an inconsistent pass set.
         if indexed.sheet_contents:
+            from cins.processors.core.pipeline import derive_pipeline_routing
+
             sheet_metadata = indexed.sheet_metadata or {}
-            classifications = sheet_metadata.get("classifications", {})
-            # Determine attachment grouping: for email source types, attachment_keys hints at the
-            # original filenames. For direct Excel the attachment_name stays blank.
-            attachment_names = _derive_attachment_names(indexed)
-            for att_name in attachment_names:
-                sheet_names = list(indexed.sheet_contents.keys())
-                for sheet_name in sheet_names:
-                    cls_entry = classifications.get(sheet_name, {})
-                    classification = cls_entry.get("classification") or cls_entry.get("sheet_type", "unknown")
-                    # Only pre-create for commission_data sheets (master_data is not run through passes)
-                    if classification not in ("commission_data", "unknown"):
-                        continue
-                    for pass_num in ExtractionPass.PassNumber.values:
-                        ExtractionPass.objects.get_or_create(
-                            document=doc,
-                            pass_number=pass_num,
-                            sheet_name=sheet_name,
-                            attachment_name=att_name,
-                            defaults={"status": ExtractionPass.Status.PENDING},
-                        )
+            source_meta = sheet_metadata.get("source_metadata", {})
+            sheets_to_process, attachment_name = derive_pipeline_routing(
+                source_type=indexed.source_type,
+                sheet_classifications=sheet_metadata.get("classifications", {}),
+                sheet_names=list(indexed.sheet_contents.keys()),
+                excel_attachments=source_meta.get("excel_attachments", []),
+            )
+            for sheet_name in sheets_to_process:
+                for pass_num in ExtractionPass.PassNumber.values:
+                    ExtractionPass.objects.get_or_create(
+                        document=doc,
+                        pass_number=pass_num,
+                        sheet_name=sheet_name,
+                        attachment_name=attachment_name,
+                        defaults={"status": ExtractionPass.Status.PENDING},
+                    )
 
         # Reconstruct an IndexedDocument dataclass populated from DB
         # (no disk reads — content is pre-loaded from DB fields)
@@ -333,6 +340,58 @@ def _build_content_files(indexed: "IndexedContent") -> dict:
     return content_files
 
 
+def _purge_extraction_artifacts(doc) -> None:
+    """
+    Drop everything downstream of indexing for `doc`: the prior CICS result,
+    validation result, every ExtractionPass row, the cached provider name,
+    and any attachment objects we previously uploaded to S3 (the new index
+    run will re-upload only the attachments it actually emits).
+
+    Safe to call before any (re-)indexing run. The IndexedContent row itself
+    is left alone — `index_document` will overwrite it via update_or_create.
+    """
+    from django.core.files.storage import default_storage
+
+    from commission_intake.models import (
+        CICSResult,
+        ExtractionPass,
+        IndexedContent,
+        ValidationResult,
+    )
+
+    ExtractionPass.objects.filter(document=doc).delete()
+    CICSResult.objects.filter(document=doc).delete()
+    ValidationResult.objects.filter(document=doc).delete()
+
+    # Stale attachments uploaded by a prior index run can have different
+    # filenames than what the new run will produce (e.g. image attachment
+    # support added later, or a re-indexed email with a fresh image set).
+    indexed = IndexedContent.objects.filter(document=doc).first()
+    if indexed:
+        for key in indexed.attachment_keys or []:
+            try:
+                default_storage.delete(key)
+            except Exception as exc:
+                logger.warning("Could not delete stale attachment %s: %s", key, exc)
+
+    update_fields = []
+    if doc.is_validated:
+        doc.is_validated = False
+        doc.validated_at = None
+        update_fields += ["is_validated", "validated_at"]
+    if doc.provider:
+        # Provider name is recomputed from the next extraction; clearing here
+        # avoids a stale provider sticking on the doc card during re-index.
+        doc.provider = ""
+        update_fields.append("provider")
+    if doc.error:
+        doc.error = None
+        update_fields.append("error")
+    if update_fields:
+        update_fields.append("updated_at")
+        doc.save(update_fields=update_fields)
+
+
 def _upsert_extraction_passes(doc, entries: list) -> None:
     """Upsert a list of pass-result dicts into ExtractionPass rows."""
     from commission_intake.models import ExtractionPass
@@ -361,25 +420,6 @@ def _save_extraction_passes(doc, result) -> None:
     """Final upsert of any sheet_pass_results not already persisted by the callback."""
     if result.sheet_pass_results:
         _upsert_extraction_passes(doc, result.sheet_pass_results)
-
-
-def _derive_attachment_names(indexed) -> list:
-    """
-    Return the list of attachment identifiers for pre-creating ExtractionPass rows.
-
-    For email source types with a single Excel attachment: process_from_indexed runs
-    _process_sheets with that attachment name.  Use excel_attachments from source_metadata
-    (populated by the indexer) as the authoritative list.
-    For direct Excel/PDF: return [""] so passes are keyed with blank attachment_name.
-    """
-    if indexed.source_type != "email":
-        return [""]
-    sheet_metadata = indexed.sheet_metadata or {}
-    source_meta = sheet_metadata.get("source_metadata", {})
-    excel_attachments = source_meta.get("excel_attachments", [])
-    if excel_attachments:
-        return list(excel_attachments)
-    return [""]
 
 
 # ---------------------------------------------------------------------------
@@ -565,12 +605,8 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
     from cins.processors.llm_services.factory import get_llm_service
     from cins.processors.core.llm_extract import (
         _extract_pass1_metadata,
-        _extract_pass2_master_data,
         _extract_pass2_via_codegen,
-        _extract_pass3_products_and_rules,
         _extract_pass3_via_codegen,
-        _should_use_codegen_for_pass2,
-        _should_use_codegen_for_pass3,
     )
     from cins.schema.extraction_passes import MetadataExtraction, MasterDataExtraction
 
@@ -625,7 +661,7 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
             commission_sheets=commission_sheets,
         )
 
-        service = get_llm_service(**({"model": doc.llm_model} if doc.llm_model else {}))
+        service = get_llm_service(provider=doc.llm_provider, **({"model": doc.llm_model} if doc.llm_model else {}))
 
         start = _time.monotonic()
         p2_codegen_code = ""
@@ -642,15 +678,12 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
                 sheet_name=sheet_name, attachment_name=attachment_name,
             ).first()
             metadata_obj = MetadataExtraction.model_validate(pass1_row.result) if pass1_row and pass1_row.result else MetadataExtraction()
-            p2_codegen_code = ""
-            p2_extraction_method = "llm"
-            if _should_use_codegen_for_pass2(pass2_prompt):
-                result_obj, p2_codegen_code, _user_prompt = _extract_pass2_via_codegen(pass2_prompt, service, metadata_obj)
-                p2_extraction_method = "codegen"
-            else:
-                result_obj, p2_codegen_code, _user_prompt = _extract_pass2_master_data(pass2_prompt, service, metadata_obj)
-                if p2_codegen_code:
-                    p2_extraction_method = "codegen"
+            # Pass 2 always runs via codegen (matches main pipeline; the JSON
+            # path was removed for perf reasons — see plan A1).
+            result_obj, p2_codegen_code, _user_prompt = _extract_pass2_via_codegen(
+                pass2_prompt, service, metadata_obj
+            )
+            p2_extraction_method = "codegen"
             result_dict = result_obj.model_dump()
         else:  # pass 3
             pass1_row = ExtractionPass.objects.filter(
@@ -672,13 +705,11 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
                     f"\n\n---\n\n{pass3_prompt}"
                 )
 
-            p3_codegen_code = ""
-            p3_extraction_method = "llm"
-            if _should_use_codegen_for_pass3(pass3_prompt):
-                result_obj, p3_codegen_code, _ = _extract_pass3_via_codegen(pass3_prompt, service, metadata_obj, master_data_obj)
-                p3_extraction_method = "codegen"
-            else:
-                result_obj, _ = _extract_pass3_products_and_rules(pass3_prompt, service, metadata_obj, master_data_obj)
+            # Pass 3 always runs via codegen (matches the main pipeline).
+            result_obj, p3_codegen_code, _ = _extract_pass3_via_codegen(
+                pass3_prompt, service, metadata_obj, master_data_obj
+            )
+            p3_extraction_method = "codegen"
             result_dict = result_obj.model_dump()
 
         duration = _time.monotonic() - start
@@ -773,7 +804,7 @@ def rerun_transform(document_id: str):
 
         transformer = RawToCICSTransformer()
         cics_doc, transform_warnings, transform_errors = transformer.transform(merged_raw)
-        cics_json = cics_doc.model_dump(exclude_none=True)
+        cics_json = cics_doc.model_dump(exclude_none=False)
 
         CICSResult.objects.update_or_create(
             document=doc,

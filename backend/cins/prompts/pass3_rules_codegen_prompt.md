@@ -12,7 +12,9 @@ You do not repeat input data in your code.
 ## YOUR INPUTS (pre-loaded, available as Python variables)
 
 **`commission_markdown`** — a string containing the full commission document formatted as
-markdown. It contains one or more table sections, each starting with a header line:
+markdown. Two layouts are possible:
+
+1. **Sheet-derived layout** — one or more typed table sections:
 
 ```
 ## Table N: Table Name [type: commission]
@@ -25,6 +27,18 @@ Each table is followed by pipe-delimited markdown rows.
 **`[type: commission]`** tables contain actual commission rates — extract rules from these.
 **`[type: master]`** tables are reference/lookup tables — use to expand state lists, RTO codes, etc.
 **`[type: notes]`** tables are free-text conditions/deductions that apply globally.
+
+2. **Email-derived layout** — when the commission grid is embedded in an email body,
+   the section is a single `## Email Commission Data` heading (no `[type:]` marker)
+   followed by free text and a pipe-delimited table. `parse_md_tables` returns this
+   with `type="unknown"`. Treat the rows under it the same way you would
+   `[type: commission]`.
+
+In BOTH layouts, any context that appears BEFORE the first `## ` heading
+(provider name, period, global settings, master-data block such as RTO mappings)
+is preserved by `parse_md_tables` as a leading entry with `name=None` and
+`type="unknown"`. Inspect `tables[0]` for that context — for example, RTO
+category → RTO code mappings live there in the email layout.
 
 You do NOT need to load any file. `commission_markdown` is already available.
 
@@ -42,17 +56,7 @@ You do NOT need to load any file. `commission_markdown` is already available.
 
 ## APPROVED FIELDS (string unless noted)
 
-### product_name
-
-Motor products — use exactly one of:
-
-- `"Private Car"` — car, PVT CAR, 4W, four-wheeler, taxi, pvt
-- `"Two Wheeler"` — TW, 2W, bike, scooter, motorcycle, moped
-- `"Commercial Vehicle"` — GCV, GCCV, PCV, PCCV, MSV, bus, tractor, misc D, CV, agri tractor
-
-Non-motor: use name as written in document.
-Set `product_name` as a **string constant** in your code, not a variable read from a column header.
-Vehicle makes (Hero, TVS, Honda, Bajaj, etc.) are NOT separate products.
+{product_taxonomy}
 
 ```
 rule_text          (str, required) - human-readable description of the rule
@@ -81,108 +85,40 @@ Do NOT invent new keys. Do NOT nest dicts inside dicts (except `conditions`).
 
 ---
 
-## CODING RULES
-
-Allowed builtins: `range`, `len`, `list`, `dict`, `str`, `int`, `float`, `bool`, `tuple`,
-`set`, `enumerate`, `zip`, `sorted`, `min`, `max`, `sum`, `abs`, `round`, `any`, `all`,
-`isinstance`, `print`.
-
-String methods are allowed on string instances (`.split()`, `.strip()`, `.startswith()`, etc.)
-
-FORBIDDEN:
-
-- `import`, `from ... import`
-- `exec`, `eval`, `compile`, `open`, `__import__`
-- `getattr`, `setattr`, `globals`, `locals`, `vars`
-- Any attribute starting and ending with `__`
+{codegen_sandbox_rules}
 
 ---
 
-## REQUIRED HELPER FUNCTIONS
+## PRE-LOADED HELPER FUNCTIONS
 
-Always define and use these helpers:
+These helpers are **already injected into your namespace**. Call them directly — do NOT redefine them, and do NOT include their source in your output.
 
-```python
-def parse_md_tables(md):
-    """Split markdown string into ordered list of (name, table_type, lines)."""
-    tables = []
-    current_name = None
-    current_type = "unknown"
-    current_lines = []
-    for line in md.splitlines():
-        if line.startswith("## Table") and "[type:" in line:
-            if current_name is not None:
-                tables.append((current_name, current_type, current_lines))
-            parts = line.split("[type:")
-            current_name = parts[0].strip().lstrip("#").strip()
-            current_type = parts[1].rstrip("]").strip()
-            current_lines = []
-        elif current_name is not None:
-            current_lines.append(line)
-    if current_name is not None:
-        tables.append((current_name, current_type, current_lines))
-    return tables
+```text
+parse_md_tables(md) -> [(name, type, lines)]
+    Splits markdown into table sections. Recognises typed tables
+    ("## Table 1: Foo [type: commission]"), master refs
+    ("## Master Data Reference: …" -> type "master"), commission sheets
+    ("## Commission Data Sheet: …" / "## Email Commission Data" -> type
+    "commission") and other "## …" headings (-> type "unknown"). Any text
+    BEFORE the first heading (provider info, RTO maps, global settings) is
+    preserved as the FIRST entry with name=None, type="unknown" — inspect
+    tables[0] when you need that context.
 
-def parse_md_row(line):
-    """Split a markdown pipe-row into a list of stripped cell strings."""
-    return [c.strip() for c in line.strip("|").split("|")]
+parse_md_row(line) -> [str]
+    Splits a "| a | b | c |" pipe-row into ["a", "b", "c"].
 
-def to_pct(v):
-    """Convert raw float string like '0.325' to '32.5%'. Returns '' for empty/zero."""
-    try:
-        f = float(v)
-        if f == 0:
-            return "0%"
-        pct = f * 100
-        s = f"{pct:.4g}%"
-        return s
-    except (ValueError, TypeError):
-        return ""
+to_pct(v) -> str
+    "0.325" -> "32.5%", "65" -> "65%", "" -> "", 0 -> "0%". Magnitude-aware:
+    values <= 1 are treated as fractions and multiplied by 100; values > 1
+    are kept as-is. Values > 100 are returned verbatim so anomalies surface.
 
-def extract_notes(tables):
-    """Concatenate all notes/master table text into a single string."""
-    parts = []
-    for name, ttype, lines in tables:
-        if ttype in ("notes", "master"):
-            parts.append(" ".join(
-                line.strip().strip("|").strip("*").strip()
-                for line in lines if line.strip() and "---" not in line
-            ))
-    return " ".join(parts).strip()
+extract_notes(tables) -> str
+    Concatenates text from every notes/master table into one space-separated
+    string for use as `other_conditions`.
 
-def parse_cc_range(header):
-    """
-    Extract a CC or KW range string from a column header.
-    Returns a normalized range string if the header encodes a numeric engine range, else "".
-    Examples:
-      "150cc"       -> "150"
-      "150_350cc"   -> "150-350"
-      "150-350cc"   -> "150-350"
-      "> 16 KW"     -> ">16"
-      "7 KW Bike"   -> "7"
-      "SCOOTER"     -> ""
-      "Hero OEM"    -> ""
-    """
-    h = header.strip().upper()
-    # Remove unit suffixes to isolate numbers
-    for unit in ("CC", "KW"):
-        h = h.replace(unit, " ")
-    h = h.strip()
-    # above/greater-than pattern
-    for prefix in (">", ">=", "ABOVE", "GREATER THAN", "MORE THAN"):
-        if h.startswith(prefix):
-            rest = h[len(prefix):].strip().split()[0] if h[len(prefix):].strip() else ""
-            digits = "".join(c for c in rest if c.isdigit() or c == ".")
-            if digits:
-                return ">" + digits
-    # range pattern: two numbers separated by _, -, or space
-    parts = h.replace("_", " ").replace("-", " ").split()
-    nums = ["".join(c for c in p if c.isdigit() or c == ".") for p in parts if any(c.isdigit() for c in p)]
-    if len(nums) >= 2:
-        return nums[0] + "-" + nums[1]
-    if len(nums) == 1:
-        return nums[0]
-    return ""
+parse_cc_range(header) -> str
+    "150cc" -> "150", "150-350cc" -> "150-350", "> 16 KW" -> ">16",
+    "7 KW Bike" -> "7", "SCOOTER" -> "", "Hero OEM" -> "".
 ```
 
 ---
@@ -218,8 +154,15 @@ tables = parse_md_tables(commission_markdown)
 notes_text = extract_notes(tables)
 result = []
 
+# Pull leading context (RTO mappings, global settings) — appears as the
+# tables[0] entry with name=None when present.
+context_lines = []
+if tables and tables[0][0] is None:
+    context_lines = tables[0][2]
+
 for table_name, ttype, lines in tables:
-    if ttype != "commission":
+    # Treat email-embedded grids (type="unknown") the same as commission tables.
+    if ttype != "commission" and not (ttype == "unknown" and table_name and "Commission" in table_name):
         continue
 
     # Get all pipe rows, excluding separator lines

@@ -206,7 +206,7 @@ class RawExtraction(BaseModel):
     )
     global_applied_on: str = Field(
         '',
-        description="What commission is generally applied on if stated globally (e.g., 'All rates on OD Premium')",
+        description="What commission is generally applied on if stated globally (e.g., 'Net Premium', 'OD Premium', 'Total Premium'). Extract exactly as stated in the document.",
     )
     global_vehicle_type_text: str = Field(
         '',

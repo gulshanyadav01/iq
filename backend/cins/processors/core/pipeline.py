@@ -13,8 +13,11 @@ Usage (CLI):
 
 import json
 import logging
+import os
 import re
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -55,6 +58,43 @@ def get_safe_sheet_name(sheet_name: str) -> str:
     """Sanitize sheet name for use in filenames."""
     safe_name = re.sub(r"[^\w\-_]", "_", str(sheet_name))
     return safe_name[:50]
+
+
+def derive_pipeline_routing(
+    source_type: str,
+    sheet_classifications: dict,
+    sheet_names: list,
+    excel_attachments: list,
+) -> tuple:
+    """
+    Compute the (sheets_to_process, attachment_name) the pipeline will use.
+
+    Single source of truth shared by `_process_sheets` and the pre-create loop
+    in `commission_intake.tasks.run_extraction`. Keep these in lockstep so the
+    pre-created PENDING ExtractionPass rows match the rows the pipeline writes.
+
+    Args:
+        source_type: indexed_doc.source_type ("email", "excel", "pdf", ...)
+        sheet_classifications: {sheet_name: {"sheet_type": "commission_data"|...}}
+        sheet_names: ordered list of all sheet names available
+        excel_attachments: list of attachment filenames (email source only)
+
+    Returns:
+        (sheets_to_process, attachment_name)
+    """
+    commission_sheets = [
+        name for name, info in (sheet_classifications or {}).items()
+        if (info or {}).get("sheet_type") == "commission_data"
+    ]
+    sheets_to_process = commission_sheets if commission_sheets else list(sheet_names)
+
+    # Mirrors process_from_indexed: use the attachment name only when there is
+    # exactly one attachment for an email source — otherwise blank.
+    attachment_name = ""
+    if source_type == "email" and len(excel_attachments or []) == 1:
+        attachment_name = excel_attachments[0]
+
+    return sheets_to_process, attachment_name
 
 
 def build_pass_contents(
@@ -379,14 +419,13 @@ class Pipeline:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         if indexed_doc.has_sheets:
-            # For email sources with a single Excel attachment, pass the attachment name
-            # so ExtractionPass rows are keyed correctly.
-            attachment_name = ""
-            if indexed_doc.is_email:
-                source_meta = indexed_doc.metadata.get("source_metadata", {})
-                excel_attachments = source_meta.get("excel_attachments", [])
-                if len(excel_attachments) == 1:
-                    attachment_name = excel_attachments[0]
+            source_meta = indexed_doc.metadata.get("source_metadata", {})
+            _, attachment_name = derive_pipeline_routing(
+                source_type=indexed_doc.source_type,
+                sheet_classifications=indexed_doc.get_sheet_classifications(),
+                sheet_names=list(indexed_doc.get_all_sheet_contents().keys()),
+                excel_attachments=source_meta.get("excel_attachments", []),
+            )
             return self._process_sheets(
                 indexed_doc,
                 output_path,
@@ -415,7 +454,7 @@ class Pipeline:
 
         from cins.schema.extraction_passes import MetadataExtraction, MasterDataExtraction
         from cins.schema.raw_extraction import RawExtraction
-        from cins.processors.core.llm_extract import _extract_pass3_products_and_rules
+        from cins.processors.core.llm_extract import _extract_pass3_via_codegen
         from cins.processors.llm_services.factory import get_llm_service
         from cins.processors.core.raw_to_cics_transformer import RawToCICSTransformer
 
@@ -454,7 +493,7 @@ class Pipeline:
         logger.info("Running Pass 3 (products & rules extraction)")
         commission_data_content = pass3_prompt_file.read_text(encoding="utf-8")
         service = get_llm_service(provider=self.llm_provider)
-        rules_extraction, _ = _extract_pass3_products_and_rules(
+        rules_extraction, _, _ = _extract_pass3_via_codegen(
             commission_data_content,
             service,
             metadata,
@@ -477,7 +516,7 @@ class Pipeline:
         logger.info("Transforming to CICS")
         transformer = RawToCICSTransformer()
         cics_doc, transform_warnings, transform_errors = transformer.transform(raw_extraction)
-        cics_json = cics_doc.model_dump(exclude_none=True)
+        cics_json = cics_doc.model_dump(exclude_none=False)
 
         # Determine output file name from the folder (use folder name + .json)
         output_path = output_folder / f"{output_folder.name}.json"
@@ -516,8 +555,8 @@ class Pipeline:
         from cins.processors.core.llm_extract import (
             extract_multi_pass,
             get_pass1_metadata_prompt,
-            get_pass2_master_data_prompt,
-            get_pass3_rules_prompt,
+            get_pass2_master_data_codegen_prompt,
+            get_pass3_rules_codegen_prompt,
         )
         from cins.processors.llm_services.factory import get_llm_service
 
@@ -539,8 +578,8 @@ class Pipeline:
 
         system_instructions = {
             1: get_pass1_metadata_prompt(),
-            2: get_pass2_master_data_prompt(),
-            3: get_pass3_rules_prompt(),
+            2: get_pass2_master_data_codegen_prompt(),
+            3: get_pass3_rules_codegen_prompt(),
         }
 
         def _on_pass_done(pass_num, result_dict, duration, extra=None):
@@ -622,14 +661,14 @@ class Pipeline:
         from cins.processors.core.llm_extract import (
             extract_multi_pass,
             get_pass1_metadata_prompt,
-            get_pass2_master_data_prompt,
-            get_pass3_rules_prompt,
+            get_pass2_master_data_codegen_prompt,
+            get_pass3_rules_codegen_prompt,
         )
 
         system_instructions = {
             1: get_pass1_metadata_prompt(),
-            2: get_pass2_master_data_prompt(),
-            3: get_pass3_rules_prompt(),
+            2: get_pass2_master_data_codegen_prompt(),
+            3: get_pass3_rules_codegen_prompt(),
         }
 
         start_time = datetime.now()
@@ -653,7 +692,13 @@ class Pipeline:
             if content:
                 master_context += f"\n\n## Master Data Reference: {sheet_name}\n\n{content}"
 
-        sheets_to_process = commission_sheets if commission_sheets else list(sheet_contents.keys())
+        source_meta = indexed_doc.metadata.get("source_metadata", {})
+        sheets_to_process, _ = derive_pipeline_routing(
+            source_type=indexed_doc.source_type,
+            sheet_classifications=indexed_doc.get_sheet_classifications(),
+            sheet_names=list(sheet_contents.keys()),
+            excel_attachments=source_meta.get("excel_attachments", []),
+        )
         total_sheets = len(sheets_to_process)
 
         email_body_for_pass3 = ""
@@ -667,13 +712,38 @@ class Pipeline:
         errors = []
         sheet_pass_results = []
 
-        for sheet_idx, sheet_name in enumerate(sheets_to_process, 1):
-            logger.info(f"Processing sheet {sheet_idx}/{total_sheets}: {sheet_name}")
+        # All shared mutable state is guarded by this lock. Per-sheet workers
+        # only need it when appending to `sheet_pass_results`, `results`, or
+        # `errors`, and when invoking the `on_sheet_complete` callback (the
+        # callback writes to Django ORM and we want serialised writes per row).
+        results_lock = threading.Lock()
+
+        from cins.processors.llm_services.factory import get_llm_service
+        try:
+            model_used = get_llm_service(provider=self.llm_provider).model
+        except Exception:
+            model_used = ""
+
+        # Capture parent thread's langfuse trace context once so worker threads
+        # can re-establish it (set_trace_context uses contextvars which don't
+        # propagate across thread boundaries).
+        from cins.processors.llm_services.langfuse_client import (
+            get_trace_context, set_trace_context, clear_trace_context,
+            make_pass_trace_id,
+        )
+        parent_trace_ctx = get_trace_context()
+
+        def _process_one_sheet(sheet_idx: int, sheet_name: str):
+            """Run all 3 passes for a single sheet. Safe to call concurrently."""
+            # Re-bind the parent trace context onto this worker thread.
+            if parent_trace_ctx.get("session_id"):
+                set_trace_context(**parent_trace_ctx)
             try:
+                logger.info(f"Processing sheet {sheet_idx}/{total_sheets}: {sheet_name}")
                 content = sheet_contents.get(sheet_name, "")
                 if not content:
                     logger.warning(f"Skipping '{sheet_name}' — no content")
-                    continue
+                    return
 
                 safe_name = get_safe_sheet_name(sheet_name)
                 sheet_output_path = output_dir / f"{base_name}_{safe_name}.json"
@@ -702,12 +772,6 @@ class Pipeline:
                 _, pass2_prompt = prepare_extraction_request(str(output_dir / f"pass2_content_{safe_name}.txt"))
                 _, pass3_prompt = prepare_extraction_request(str(output_dir / f"pass3_content_{safe_name}.txt"))
 
-                from cins.processors.llm_services.factory import get_llm_service
-                try:
-                    model_used = get_llm_service(provider=self.llm_provider).model
-                except Exception:
-                    model_used = ""
-
                 pass_prompts = {
                     1: pass1_prompt,
                     2: pass2_prompt,
@@ -726,18 +790,16 @@ class Pipeline:
                         "model": model_used,
                         "duration": duration,
                         "status": "completed",
-                        "error": "",
+                        "error": _extra.get("skip_reason", "") if _extra.get("skipped") else "",
                         "extraction_method": _extra.get("extraction_method", "llm"),
                         "codegen_code": _extra.get("codegen_code", ""),
                     }
-                    sheet_pass_results.append(entry)
-                    if on_sheet_complete:
-                        on_sheet_complete([entry])
+                    with results_lock:
+                        sheet_pass_results.append(entry)
+                        if on_sheet_complete:
+                            on_sheet_complete([entry])
 
                 def _on_pass_start(pass_num):
-                    from cins.processors.llm_services.langfuse_client import (
-                        set_trace_context, get_trace_context, make_pass_trace_id,
-                    )
                     ctx = get_trace_context()
                     if ctx["session_id"]:
                         set_trace_context(
@@ -747,28 +809,52 @@ class Pipeline:
                             metadata={"document_id": ctx["session_id"], "pass": pass_num, "sheet": sheet_name, "attachment": attachment_name},
                         )
 
-                pass_result = extract_multi_pass(
-                    pass1_prompt,
-                    return_passes=True,
-                    output_dir=str(output_dir),
-                    filename_prefix=f"{safe_name}_",
-                    source_type="excel",
-                    email_and_master_data_content=pass1_prompt,
-                    master_data_content=pass2_prompt,
-                    commission_data_content=pass3_prompt,
-                    # When email body IS the commission content it's already embedded in
-                    # pass3_prompt; skip the separate email_body_content prepend to avoid
-                    # mixing it with master sheet data.
-                    email_body_content=None if email_is_primary_commission else (email_body_for_pass3 or None),
-                    on_pass_complete=_on_pass_done,
-                    on_pass_start=_on_pass_start,
-                    provider=self.llm_provider,
-                )
+                try:
+                    pass_result = extract_multi_pass(
+                        pass1_prompt,
+                        return_passes=True,
+                        output_dir=str(output_dir),
+                        filename_prefix=f"{safe_name}_",
+                        source_type="excel",
+                        email_and_master_data_content=pass1_prompt,
+                        master_data_content=pass2_prompt,
+                        commission_data_content=pass3_prompt,
+                        # When email body IS the commission content it's already embedded in
+                        # pass3_prompt; skip the separate email_body_content prepend to avoid
+                        # mixing it with master sheet data.
+                        email_body_content=None if email_is_primary_commission else (email_body_for_pass3 or None),
+                        on_pass_complete=_on_pass_done,
+                        on_pass_start=_on_pass_start,
+                        provider=self.llm_provider,
+                    )
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error(f"  ✗ '{sheet_name}' failed: {error_msg}")
+                    exc_entries = []
+                    for pass_num in (1, 2, 3):
+                        entry = {
+                            "sheet_name": sheet_name,
+                            "attachment_name": attachment_name,
+                            "pass_number": pass_num,
+                            "result": None,
+                            "prompt_text": "",
+                            "model": "",
+                            "duration": 0.0,
+                            "status": "failed",
+                            "error": error_msg,
+                        }
+                        exc_entries.append(entry)
+                    with results_lock:
+                        errors.append({"sheet": sheet_name, "error": error_msg})
+                        results.append({"sheet": sheet_name, "status": "failed", "error": error_msg})
+                        sheet_pass_results.extend(exc_entries)
+                        if on_sheet_complete:
+                            on_sheet_complete(exc_entries)
+                    return
 
                 # pass_result is a dict when return_passes=True
                 if isinstance(pass_result, dict) and "cics" in pass_result:
                     parsed_result = pass_result["cics"]
-                    json_result = json.dumps(parsed_result, indent=2)
                 else:
                     # Unexpected shape — mark any passes not yet persisted as failed
                     json_result = json.dumps(pass_result) if not isinstance(pass_result, str) else pass_result
@@ -776,25 +862,26 @@ class Pipeline:
                         parsed_result = json.loads(json_result)
                     except Exception:
                         parsed_result = {}
-                    persisted_pass_nums = {e["pass_number"] for e in sheet_pass_results if e.get("sheet_name") == sheet_name}
-                    failed_entries = []
-                    for pass_num in (1, 2, 3):
-                        if pass_num not in persisted_pass_nums:
-                            entry = {
-                                "sheet_name": sheet_name,
-                                "attachment_name": attachment_name,
-                                "pass_number": pass_num,
-                                "result": None,
-                                "prompt_text": "",
-                                "model": "",
-                                "duration": 0.0,
-                                "status": "failed",
-                                "error": "Unexpected multi-pass result shape",
-                            }
-                            failed_entries.append(entry)
-                            sheet_pass_results.append(entry)
-                    if failed_entries and on_sheet_complete:
-                        on_sheet_complete(failed_entries)
+                    with results_lock:
+                        persisted_pass_nums = {e["pass_number"] for e in sheet_pass_results if e.get("sheet_name") == sheet_name}
+                        failed_entries = []
+                        for pass_num in (1, 2, 3):
+                            if pass_num not in persisted_pass_nums:
+                                entry = {
+                                    "sheet_name": sheet_name,
+                                    "attachment_name": attachment_name,
+                                    "pass_number": pass_num,
+                                    "result": None,
+                                    "prompt_text": "",
+                                    "model": "",
+                                    "duration": 0.0,
+                                    "status": "failed",
+                                    "error": "Unexpected multi-pass result shape",
+                                }
+                                failed_entries.append(entry)
+                                sheet_pass_results.append(entry)
+                        if failed_entries and on_sheet_complete:
+                            on_sheet_complete(failed_entries)
 
                 prompt_path = output_dir / f"{base_name}_{safe_name}_prompt.txt"
                 prompt_path.write_text(
@@ -811,38 +898,44 @@ class Pipeline:
                     else "UNKNOWN"
                 )
 
-                results.append({
-                    "sheet": sheet_name,
-                    "status": "success",
-                    "output_path": str(sheet_output_path),
-                    "output_filename": sheet_output_path.name,
-                    "validation_status": validation_status,
-                    "json_data": parsed_result,
-                })
+                with results_lock:
+                    results.append({
+                        "sheet": sheet_name,
+                        "status": "success",
+                        "output_path": str(sheet_output_path),
+                        "output_filename": sheet_output_path.name,
+                        "validation_status": validation_status,
+                        "json_data": parsed_result,
+                    })
                 logger.info(f"  ✓ '{sheet_name}' processed")
+            finally:
+                # Don't leak per-sheet trace context back into the parent thread.
+                clear_trace_context()
 
-            except Exception as e:
-                error_msg = str(e)
-                logger.error(f"  ✗ '{sheet_name}' failed: {error_msg}")
-                errors.append({"sheet": sheet_name, "error": error_msg})
-                results.append({"sheet": sheet_name, "status": "failed", "error": error_msg})
-                exc_entries = []
-                for pass_num in (1, 2, 3):
-                    entry = {
-                        "sheet_name": sheet_name,
-                        "attachment_name": attachment_name,
-                        "pass_number": pass_num,
-                        "result": None,
-                        "prompt_text": "",
-                        "model": "",
-                        "duration": 0.0,
-                        "status": "failed",
-                        "error": error_msg,
-                    }
-                    exc_entries.append(entry)
-                    sheet_pass_results.append(entry)
-                if on_sheet_complete:
-                    on_sheet_complete(exc_entries)
+        # Tunable concurrency: default 4, override via CINS_SHEET_CONCURRENCY.
+        # Each worker is a single LLM-bound HTTP path, so threads are fine
+        # (no GIL contention on JSON or HTTP I/O).
+        try:
+            max_workers = int(os.environ.get("CINS_SHEET_CONCURRENCY", "4"))
+        except ValueError:
+            max_workers = 4
+        max_workers = max(1, min(max_workers, len(sheets_to_process) or 1))
+
+        if max_workers == 1 or len(sheets_to_process) <= 1:
+            for sheet_idx, sheet_name in enumerate(sheets_to_process, 1):
+                _process_one_sheet(sheet_idx, sheet_name)
+        else:
+            logger.info(f"Processing {len(sheets_to_process)} sheets with {max_workers} threads")
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="cins-sheet") as executor:
+                futures = [
+                    executor.submit(_process_one_sheet, idx, name)
+                    for idx, name in enumerate(sheets_to_process, 1)
+                ]
+                for fut in as_completed(futures):
+                    # Surface any unexpected exception from the worker — the
+                    # function already does internal try/except, but a bug in
+                    # that logic shouldn't silently swallow.
+                    fut.result()
 
         successful_results = [r for r in results if r.get("status") == "success"]
         combined_path = base_output_path.parent / f"{base_name}_combined.json"

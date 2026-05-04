@@ -701,7 +701,146 @@ class ContentIndexer:
             if all_indexing_errors:
                 metadata["indexing_errors"] = all_indexing_errors
 
+        # --- Inline-image commission grids ---------------------------------
+        # Some senders attach the actual commission table as a screenshot
+        # (PNG/JPG inside the email body). Convert qualifying images to
+        # markdown via vision-LLM so they flow through the per-sheet pass
+        # loop the same way Excel sheets do.
+        self._extract_image_table_sheets(
+            email_data=email_data,
+            cleaned_body=body,
+            output_dir=output_dir,
+            metadata=metadata,
+            progress=_p,
+        )
+
         return metadata
+
+    def _extract_image_table_sheets(
+        self,
+        email_data: Dict,
+        cleaned_body: str,
+        output_dir: Path,
+        metadata: Dict,
+        progress,
+    ) -> None:
+        """
+        For each image attachment that (a) is referenced from the latest
+        message body via a `cid:` token and (b) passes the table-likelihood
+        size heuristic, run vision-LLM to extract a markdown table and inject
+        it as a pseudo-sheet into the indexer's metadata.
+
+        Mutates `metadata` in place. Side-effect free for non-image emails.
+        """
+        from cins.processors.extractors.extract_eml import extract_cid_refs_from_body
+        from cins.processors.extractors.image_to_markdown import extract_table_markdown
+        try:
+            from cins.processors.extractors.sheet_classifier import SheetClassifier
+        except ImportError:
+            SheetClassifier = None  # type: ignore
+
+        image_attachments = [
+            att for att in email_data.get("attachments", [])
+            if att.get("image_path")
+        ]
+        if not image_attachments:
+            return
+
+        # Step 1: cid whitelist from the *latest* message body. The cleaned
+        # text body already had its quoted/forwarded trail stripped (and our
+        # `[cid:...]` sweep removes stale tokens), so we collect cids from the
+        # raw HTML parts instead — but trim each HTML to its pre-quoted-block
+        # prefix first, otherwise the whitelist would include images that only
+        # appear in older messages further down the thread.
+        cid_whitelist = set()
+        for raw_html_part in email_data.get("raw_html_parts", []) or []:
+            latest_html = self._strip_quoted_trail_html(raw_html_part)
+            cid_whitelist |= extract_cid_refs_from_body(latest_html)
+
+        # Step 2: filter to images that (a) live in the latest message and
+        # (b) look like grids. Older quoted images and tiny logos are dropped
+        # before any LLM call.
+        surviving = [
+            att for att in image_attachments
+            if att.get("is_likely_table")
+            and att.get("content_id")
+            and att["content_id"] in cid_whitelist
+        ]
+
+        logger.info(
+            "Image attachment routing: %d total, %d in latest body, %d look like tables",
+            len(image_attachments),
+            sum(1 for a in image_attachments if a.get("content_id") in cid_whitelist),
+            len(surviving),
+        )
+
+        if not surviving:
+            return
+
+        llm_service = self._get_llm_service()
+        if not llm_service:
+            logger.warning(
+                "Image attachments present but no LLM service available; skipping vision extraction"
+            )
+            return
+
+        sheets_dir = output_dir / "sheets"
+        sheets_dir.mkdir(exist_ok=True)
+
+        existing_sheet_files = list(
+            metadata.get("content_files", {}).get("sheets", []) or []
+        )
+        existing_sheet_names = list(
+            metadata.get("source_metadata", {}).get("sheet_names", []) or []
+        )
+        existing_classifications = dict(metadata.get("sheet_classifications", {}) or {})
+
+        classifier = SheetClassifier() if SheetClassifier else None
+
+        added_any = False
+        for att in surviving:
+            filename = att.get("filename", "image")
+            stem = Path(filename).stem or "image"
+            sheet_key = f"image::{stem}"
+            # IndexedDocument.get_sheet_content() looks up by passing the
+            # sheet name through `re.sub(r"[^\w\-_]", "_", name)`, which turns
+            # "image::imageNNN" into "image__imageNNN". Use the same sanitiser
+            # here so the file we write matches what the loader reads.
+            safe_name = self._sanitize_filename(sheet_key)
+
+            progress("extracting_image_table", f"Vision: {filename}")
+            md = extract_table_markdown(Path(att["image_path"]), llm_service)
+            if not md or not md.strip():
+                logger.info("Vision returned empty markdown for %s; skipping", filename)
+                continue
+
+            md_path = sheets_dir / f"{safe_name}.md"
+            md_path.write_text(md, encoding="utf-8")
+
+            existing_sheet_files.append(safe_name)
+            existing_sheet_names.append(sheet_key)
+            added_any = True
+
+            if classifier:
+                try:
+                    classification = classifier.classify_sheet(
+                        sheet_name=sheet_key,
+                        csv_preview=md[:4000],
+                        metadata={"source": "image", "filename": filename},
+                    )
+                    existing_classifications[sheet_key] = classification.to_dict()
+                except Exception as exc:
+                    logger.warning(
+                        "Sheet classification failed for image '%s': %s", sheet_key, exc
+                    )
+
+        if not added_any:
+            return
+
+        metadata.setdefault("content_files", {})["sheets"] = existing_sheet_files
+        metadata.setdefault("source_metadata", {})["sheet_names"] = existing_sheet_names
+        if existing_classifications:
+            metadata["sheet_classifications"] = existing_classifications
 
     def _index_pdf(self, file_path: str, output_dir: Path, progress=None) -> dict:
         """Index PDF file."""
@@ -1075,12 +1214,19 @@ class ContentIndexer:
 
     def _clean_email_body(self, body: str) -> str:
         """
-        Clean email body by removing caution warnings, disclaimers, and other boilerplate.
+        Clean email body by removing caution warnings, disclaimers, quoted/forwarded
+        chains, and other boilerplate. Preserves markdown table structure
+        (separator rows like `| --- | --- |` and blank table rows).
         """
         import re
 
         if not body:
             return body
+
+        # Strip the quoted/forwarded trail first — only the latest message body
+        # is relevant for commission extraction. Replied-to / forwarded-from
+        # content is duplicate noise that confuses Pass 1 metadata detection.
+        body = self._strip_quoted_trail(body)
 
         lines = body.split("\n")
         cleaned_lines = []
@@ -1122,27 +1268,148 @@ class ContentIndexer:
 
         all_patterns = caution_patterns + disclaimer_patterns
 
+        # Markdown table separator rows: `| --- | --- |`, `|---|---|`, etc.
+        # These MUST be preserved — without them downstream parsers (Pass 0c,
+        # codegen helpers, etc.) cannot identify table boundaries.
+        sep_row_re = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+
         for line in lines:
+            if sep_row_re.match(line):
+                cleaned_lines.append(line)
+                continue
+
             is_boilerplate = False
             for pattern in all_patterns:
                 if re.search(pattern, line, re.IGNORECASE):
                     is_boilerplate = True
                     break
 
-            if "|" in line:
-                content = line.replace("|", "").replace("-", "").strip()
-                if not content or any(
-                    re.search(p, line, re.IGNORECASE) for p in caution_patterns
-                ):
+            # Drop pipe-rows that are caution banners rendered as a 1-cell table
+            # (e.g. `| CAUTION: external email |`). Keep all other pipe-rows —
+            # an empty data row may still be meaningful row-positioning.
+            if not is_boilerplate and "|" in line:
+                if any(re.search(p, line, re.IGNORECASE) for p in caution_patterns):
                     is_boilerplate = True
 
             if not is_boilerplate:
                 cleaned_lines.append(line)
 
         cleaned = "\n".join(cleaned_lines)
+
+        # Strip stale `[cid:imageNNN.ext@<hash>]` placeholders. They confuse
+        # Pass 1 metadata extraction and add no signal — the underlying images
+        # (when they're commission grids) are surfaced as proper sheets via
+        # _extract_image_table_sheets, so the body reference is redundant.
+        cleaned = re.sub(r"\[cid:[^\]\s]+\]\s*", "", cleaned)
+
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
 
         return cleaned.strip()
+
+    def _strip_quoted_trail(self, body: str) -> str:
+        """
+        Drop everything from the first quoted-reply / forwarded-message marker.
+
+        Email clients use a variety of conventions to mark the boundary between
+        the new message and the prior thread. We scan for the earliest match of
+        any of these and truncate.
+
+        Conservative on purpose: only well-known unambiguous markers; never trim
+        on `From:` alone (that header appears legitimately in some bodies).
+        """
+        import re
+
+        if not body:
+            return body
+
+        markers = [
+            # Outlook / Exchange explicit reply boundary
+            r"^\s*-{3,}\s*Original Message\s*-{3,}\s*$",
+            # Outlook / Exchange forward boundary
+            r"^\s*-{3,}\s*Forwarded by .+\s*-{3,}\s*$",
+            r"^\s*Begin forwarded message:\s*$",
+            # Underscored separator (Outlook web)
+            r"^_{5,}\s*$",
+            # Outlook header block: "From: ... Sent: ... To: ... Subject: ..."
+            # Matched as a *line* containing both "From:" at start and another
+            # quoted header on subsequent lines is too noisy; instead only trim
+            # when a "From:" line is followed immediately by "Sent:" or "Date:".
+            # Handled below as a 2-line lookahead.
+            # Gmail / Apple reply: "On <date>, <name> wrote:"
+            r"^\s*On .+ wrote:\s*$",
+            r"^\s*On .+ at .+ wrote:\s*$",
+        ]
+        compiled = [re.compile(p, re.IGNORECASE) for p in markers]
+        # Outlook quoted-header tokens. We treat a `From:` line as a quoted
+        # boundary only when it's followed (within a small window) by both a
+        # `Sent:` (or `Date:`) and a `Subject:` line, since some HTML→text
+        # conversions split the header into one label per line:
+        #
+        #   From:
+        #   Hemant Kumar
+        #   Sent:
+        #   Friday, June 20, 2025
+        #   Subject:
+        #   ...
+        #
+        # Matching only `From:`+`Sent:` adjacency misses this layout.
+        from_re = re.compile(r"^\s*from\s*:", re.IGNORECASE)
+        sent_or_date_re = re.compile(r"^\s*(sent|date)\s*:", re.IGNORECASE)
+        subject_re = re.compile(r"^\s*subject\s*:", re.IGNORECASE)
+
+        lines = body.split("\n")
+        cut_at = None
+        for idx, line in enumerate(lines):
+            if any(rx.match(line) for rx in compiled):
+                cut_at = idx
+                break
+            if from_re.match(line):
+                # Window must be wide enough to cover the Outlook split-line
+                # layout where label and value alternate:
+                #   From: / <name> / Sent: / <date> / To: / <addr> / Cc: / <addr> / Subject: / <subject>
+                window = lines[idx + 1 : idx + 14]
+                has_sent = any(sent_or_date_re.match(w) for w in window)
+                has_subject = any(subject_re.match(w) for w in window)
+                if has_sent and has_subject:
+                    cut_at = idx
+                    break
+
+        if cut_at is None:
+            return body
+        return "\n".join(lines[:cut_at]).rstrip()
+
+    def _strip_quoted_trail_html(self, html: str) -> str:
+        """
+        Trim raw HTML to everything before the first quoted-header block.
+
+        Used by image-attachment routing: we need the cid-reference set from
+        the LATEST message only, but `extract_eml_content` returns the full
+        HTML body (which contains every quoted reply). Cutting on the first
+        `<b>From:` / `<b>Sent:` / `-----Original Message-----` boundary keeps
+        only the new message's cid: references in scope.
+
+        Conservative: if no boundary is found, returns the input unchanged.
+        """
+        import re
+        if not html:
+            return html
+        boundary_patterns = [
+            # Outlook bold-header reply block (any inline HTML between <b> and From:)
+            r"<b[^>]*>(?:\s|<[^>]+>)*From\s*:",
+            # Plain HTML "Original Message" / "Forwarded by" markers
+            r"-{3,}\s*Original Message\s*-{3,}",
+            r"-{3,}\s*Forwarded by",
+            # Gmail reply line ("On <date>, <name> wrote:")
+            r"On [^<]+wrote:",
+        ]
+        earliest = None
+        for pat in boundary_patterns:
+            m = re.search(pat, html, re.IGNORECASE)
+            if m and (earliest is None or m.start() < earliest):
+                earliest = m.start()
+        if earliest is None:
+            return html
+        return html[:earliest]
 
     def _format_email_context(self, email_data: Dict) -> str:
         """Format email metadata and body for prepending to sheets."""

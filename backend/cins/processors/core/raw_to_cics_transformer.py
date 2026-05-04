@@ -78,6 +78,7 @@ POLICY_TYPE_MAPPINGS = {
     "third party": "third-party",
     "tp": "third-party",
     "tp only": "third-party",
+    "satp": "third-party",
     "act": "third-party",          # Cholamandalam: ACT = third-party (act-only)
     "saod": "saod",
     "sa od": "saod",
@@ -966,9 +967,15 @@ class RawToCICSTransformer:
             "school_bus_type",
         )
 
-        # Deal parameter
+        # Deal parameter — fall back to applied_on_text or global_applied_on
+        # so every rule has one of: od, net, regular-tp, tp-with-vehicle-age, flat-amount, ape
+        deal_parameter_text = (
+            entry_conditions.get("deal_parameter")
+            or entry.applied_on_text
+            or getattr(raw, "global_applied_on", None)
+        )
         deal_parameter = self._normalize_list_field(
-            entry_conditions.get("deal_parameter"),
+            deal_parameter_text,
             DEAL_PARAMETER_MAPPINGS,
             "deal_parameter",
         )
@@ -1021,11 +1028,31 @@ class RawToCICSTransformer:
 
         # Integer range fields
         gvw_start, gvw_end = self._parse_range_field(entry_conditions.get("gvw"))
+        if gvw_start is None and gvw_end is None:
+            gvw_start, gvw_end = 0, 0
+        elif gvw_start is None:
+            gvw_start = 0
+        elif gvw_end is None:
+            gvw_end = 0
+
         cc_start, cc_end = self._parse_range_field(entry_conditions.get("cc"))
+        if cc_start is None and cc_end is None:
+            cc_start, cc_end = 0, 99999
+        elif cc_start is None:
+            cc_start = 0
+        elif cc_end is None:
+            cc_end = 99999
+
         seat_start, seat_end = self._parse_range_field(
             entry_conditions.get("seating_capacity")
             or getattr(raw, "global_seating_capacity_text", None)
         )
+        if seat_start is None and seat_end is None:
+            seat_start, seat_end = 0, 99
+        elif seat_start is None:
+            seat_start = 0
+        elif seat_end is None:
+            seat_end = 99
 
         # Vehicle age
         vehicle_age = self._parse_int_field(entry_conditions.get("vehicle_age"))
@@ -1212,11 +1239,15 @@ class RawToCICSTransformer:
                 if excluded_names:
                     return sorted(VALID_STATE_NAMES - set(excluded_names))
 
-        # Proactive master data expansion
+        # Proactive master data expansion — only for state-grouping entries.
+        # Skip 'declined' and other non-state entries whose values may contain
+        # exclusion phrases that would over-expand to all states.
         if master_data:
             upper_text = state_text.upper()
             for m in master_data:
                 if not m.key:
+                    continue
+                if m.entry_type not in ("state_mapping", "rto_mapping"):
                     continue
                 key_upper = m.key.upper()
                 if re.search(rf"\b{re.escape(key_upper)}\b", upper_text):
@@ -1387,10 +1418,23 @@ class RawToCICSTransformer:
         if pct_match:
             pct_value = float(pct_match.group(1))
             if pct_value > 100:
+                # An explicit '%' sign means percentage. Values > 100 are almost
+                # always upstream bugs (e.g. fraction multiplied by 100 twice:
+                # 0.65 -> 65 -> "6500%"). Flag for manual review instead of
+                # silently flipping units to flat INR.
                 self.warnings.append(
-                    f"Commission value '{value}' exceeds 100% — interpreting as flat INR amount"
+                    f"Commission value '{value}' exceeds 100% — likely an upstream "
+                    f"unit error; flagging for manual review"
                 )
-                return "flat", {"flat_value": pct_value, "flat_currency": "INR"}
+                self.errors.append(
+                    f"Commission value '{value}' > 100% requires manual review"
+                )
+                return "percentage", {
+                    "percentage_value": None,
+                    "calculation_notes": (
+                        f"UNPARSED: {value} exceeds 100% - REQUIRES MANUAL REVIEW"
+                    ),
+                }
             return "percentage", {"percentage_value": pct_value}
 
         # Plain decimal/number without % sign (e.g., "0.26" means 26%, "26" means 26%)
@@ -1401,12 +1445,23 @@ class RawToCICSTransformer:
             # If value < 1, assume it's a decimal representation (0.26 = 26%)
             if num_value < 1:
                 return "percentage", {"percentage_value": num_value * 100}
-            # If value > 100, it can't be a percentage — treat as flat amount (INR)
+            # Plain number > 100 with no currency marker is ambiguous — could be
+            # a flat INR amount or a unit error. Flag for manual review rather
+            # than guessing a currency.
             elif num_value > 100:
                 self.warnings.append(
-                    f"Commission value '{value}' exceeds 100 — interpreting as flat INR amount"
+                    f"Commission value '{value}' exceeds 100 with no currency or "
+                    f"% marker — flagging for manual review"
                 )
-                return "flat", {"flat_value": num_value, "flat_currency": "INR"}
+                self.errors.append(
+                    f"Ambiguous commission value '{value}' requires manual review"
+                )
+                return "percentage", {
+                    "percentage_value": None,
+                    "calculation_notes": (
+                        f"UNPARSED: {value} ambiguous (>100, no unit) - REQUIRES MANUAL REVIEW"
+                    ),
+                }
             else:
                 return "percentage", {"percentage_value": num_value}
 

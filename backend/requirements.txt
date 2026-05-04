@@ -20,6 +20,7 @@ PyJWT==2.10.1
 cryptography==45.0.6
 google-genai==1.73.1
 openai==2.32.0
+anthropic==0.97.0
 gunicorn==23.0.0
 uvicorn==0.35.0
 whitenoise==6.9.0
@@ -28,3 +29,5 @@ langfuse>=4.3.1
 pdfplumber>=0.10.0
 openpyxl>=3.1.0
 python-magic>=0.4.27
+beautifulsoup4>=4.12.0
+Pillow>=12.2.0
