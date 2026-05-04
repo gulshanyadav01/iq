@@ -34,7 +34,7 @@ ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/../.env}"
 if [ -f "$ENV_FILE" ]; then
   while IFS='=' read -r key value; do
     case "$key" in
-      AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AWS_REGION|AWS_DEFAULT_REGION)
+      AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AWS_REGION|AWS_DEFAULT_REGION|DB_HOST|DB_PORT|DB_USER|DB_PASSWORD|DB_NAME)
         value="${value%\"}"; value="${value#\"}"
         value="${value%\'}"; value="${value#\'}"
         if [ -z "${!key:-}" ]; then
@@ -42,7 +42,7 @@ if [ -f "$ENV_FILE" ]; then
         fi
         ;;
     esac
-  done < <(grep -E '^(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AWS_REGION|AWS_DEFAULT_REGION)=' "$ENV_FILE" || true)
+  done < <(grep -E '^(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AWS_REGION|AWS_DEFAULT_REGION|DB_HOST|DB_PORT|DB_USER|DB_PASSWORD|DB_NAME)=' "$ENV_FILE" || true)
 fi
 unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 AWS_S3_ENDPOINT_URL
 
