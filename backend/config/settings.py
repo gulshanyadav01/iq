@@ -346,7 +346,10 @@ AWS_REGION = env('AWS_REGION', default='ap-south-1')
 AWS_S3_REGION_NAME = AWS_REGION
 AWS_S3_SIGNATURE_VERSION = env('AWS_S3_SIGNATURE_VERSION', default='s3v4')
 AWS_S3_ADDRESSING_STYLE = env('AWS_S3_ADDRESSING_STYLE', default='virtual')
-AWS_DEFAULT_ACL = 'public-read'
+AWS_DEFAULT_ACL = None
+AWS_S3_OBJECT_PARAMETERS = {}
+AWS_QUERYSTRING_AUTH = True
+AWS_QUERYSTRING_EXPIRE = env.int('AWS_QUERYSTRING_EXPIRE', default=3600)
 
 _endpoint = _normalize_s3_endpoint(env('AWS_S3_ENDPOINT_URL', default=''))
 if _endpoint:
