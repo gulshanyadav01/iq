@@ -1,5 +1,6 @@
 from .commission_document import (
     CommissionDocumentCreateSerializer,
+    CommissionDocumentListSerializer,
     CommissionDocumentSerializer,
     ProcessingModeRequestSerializer,
     RerunPassRequestSerializer,
@@ -11,6 +12,7 @@ from .commission_document import (
 
 __all__ = [
     "CommissionDocumentCreateSerializer",
+    "CommissionDocumentListSerializer",
     "CommissionDocumentSerializer",
     "ProcessingModeRequestSerializer",
     "RerunPassRequestSerializer",

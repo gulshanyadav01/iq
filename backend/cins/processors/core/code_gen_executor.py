@@ -78,7 +78,9 @@ def to_pct(v):
     Convert a raw cell value to a percentage string.
 
     Cells may be stored as fractions ('0.325' = 32.5%) OR as already-percent
-    numbers ('32.5' = 32.5%, '65' = 65%). Detect by magnitude:
+    numbers ('32.5' = 32.5%, '65' = 65%) OR with an explicit '%' suffix
+    ('30%' = 30%). Detect by magnitude:
+      - has '%' suffix -> strip it, treat the remainder as a percentage
       - 0 < |f| <= 1   -> fraction, multiply by 100
       - |f| > 1        -> already a percentage, do not multiply
 
@@ -87,12 +89,18 @@ def to_pct(v):
     non-numeric, '0%' for zero.
     \"\"\"
     try:
-        f = float(v)
+        s_in = str(v).strip() if v is not None else ""
+        had_pct = s_in.endswith("%")
+        if had_pct:
+            s_in = s_in[:-1].strip()
+        f = float(s_in)
         if f == 0:
             return "0%"
-        pct = f * 100 if abs(f) <= 1 else f
-        s = "{:.4g}%".format(pct)
-        return s
+        if had_pct:
+            pct = f
+        else:
+            pct = f * 100 if abs(f) <= 1 else f
+        return "{:.4g}%".format(pct)
     except (ValueError, TypeError):
         return ""
 

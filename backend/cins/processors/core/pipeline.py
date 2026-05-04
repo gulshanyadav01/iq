@@ -97,6 +97,108 @@ def derive_pipeline_routing(
     return sheets_to_process, attachment_name
 
 
+_PIPE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+
+
+def _strip_common_header_prefix(header_line: str) -> tuple[str, str]:
+    """
+    If every column header in a markdown pipe-row shares a common
+    `"<title> - "` prefix (a pattern the email indexer produces when it
+    flattens HTML tables that had a title row), strip the prefix off and
+    return (title, cleaned_header_line).
+
+    Returns ("", header_line) when no common prefix is detected.
+    """
+    cells = [c.strip() for c in header_line.strip().strip("|").split("|")]
+    cells = [c for c in cells if c]
+    if len(cells) < 2:
+        return "", header_line
+    sep = " - "
+    prefixes = []
+    for c in cells:
+        idx = c.find(sep)
+        if idx <= 0:
+            return "", header_line
+        prefixes.append(c[:idx])
+    title = prefixes[0]
+    if not all(p == title for p in prefixes):
+        return "", header_line
+    cleaned = "| " + " | ".join(c[len(title) + len(sep):].strip() for c in cells) + " |"
+    return title, cleaned
+
+
+def _promote_table_headings(body: str) -> str:
+    """
+    Promote plain-text section titles to typed `## ` headings when they
+    immediately precede a markdown pipe table, so emails arrive at Pass 3
+    with the same `[type: commission]` shape Excel sheets do.
+
+    Two patterns are handled:
+
+    1. Bare title line directly above the table:
+
+           GCV – STP Grid for Flatbed Trailers
+           | RTO State | RTO Division | Payout |
+           | --- | --- | --- |
+           | TN | Chennai | 30% |
+
+       → `## GCV – STP Grid for Flatbed Trailers [type: commission]`
+
+    2. Title baked into every column header (the email indexer does this
+       when an HTML table had a title row above the column row):
+
+           | GCV Grid - RTO State | GCV Grid - Payout |
+           | --- | --- |
+           | TN01 | 30% |
+
+       → title `GCV Grid` lifted into a `[type: commission]` heading and
+       the column headers cleaned to `RTO State | Payout`.
+
+    Without this the codegen helper `parse_md_tables` swallows the table
+    into the leading-context block (`name=None`), and the LLM cannot rely
+    on the prompt's `[type: commission]` contract to find it.
+    """
+    lines = body.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Pattern 1: bare title line above a pipe-table row.
+        looks_like_title = (
+            stripped
+            and len(stripped) <= 120
+            and "|" not in stripped
+            and not stripped.startswith(("#", "-", "*", ">", "`"))
+        )
+        if looks_like_title:
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines) and _PIPE_ROW_RE.match(lines[j]):
+                out.append(f"## {stripped} [type: commission]")
+                i += 1
+                continue
+
+        # Pattern 2: pipe-table row whose every column shares a "<title> - " prefix.
+        if _PIPE_ROW_RE.match(line):
+            already_under_heading = any(
+                ln.strip().startswith("## ") for ln in out
+            )
+            if not already_under_heading:
+                title, cleaned = _strip_common_header_prefix(line)
+                if title:
+                    out.append(f"## {title} [type: commission]")
+                    out.append(cleaned)
+                    i += 1
+                    continue
+
+        out.append(line)
+        i += 1
+    return "\n".join(out)
+
+
 def build_pass_contents(
     sheet_name: str,
     sheet_content: str,
@@ -122,7 +224,7 @@ def build_pass_contents(
     pass2_content = master_context
 
     if email_is_primary_commission:
-        pass3_content = f"## Email Commission Data\n\n{email_body}"
+        pass3_content = f"## Email Commission Data\n\n{_promote_table_headings(email_body)}"
     else:
         pass3_content = f"## Commission Data Sheet: {sheet_name}\n\n{sheet_content}"
 

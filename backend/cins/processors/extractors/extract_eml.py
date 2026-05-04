@@ -19,6 +19,7 @@ except ImportError:
     BS4_AVAILABLE = False
 
 from .extract_pdf import extract_pdf_text
+from .convert_xlsb import convert_xlsb_to_xlsx, XlsbConversionError
 
 # Import existing extraction modules
 PDF_EXTRACTOR_AVAILABLE = False
@@ -246,12 +247,44 @@ def process_excel_attachment(attachment_data, filename, api_key=None):
     """
     # Save attachment to temporary file (DON'T delete - will be used later)
     suffix = Path(filename).suffix.lower()
-    if suffix not in [".xlsx", ".xls", ".xlsm"]:
+    if suffix not in [".xlsx", ".xls", ".xlsm", ".xlsb"]:
         suffix = ".xlsx"  # default
 
     tmp_file = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
     tmp_file.write(attachment_data)
     tmp_file.close()
+
+    # .xlsb (Excel binary) is not readable by openpyxl. Convert to .xlsx via
+    # LibreOffice so the rest of the pipeline can treat it like any other workbook.
+    if suffix == ".xlsb":
+        try:
+            converted_path = convert_xlsb_to_xlsx(tmp_file.name)
+        except XlsbConversionError as e:
+            try:
+                os.unlink(tmp_file.name)
+            except Exception:
+                pass
+            return {
+                "filename": filename,
+                "content_type": "application/vnd.ms-excel.sheet.binary.macroenabled.12",
+                "size": len(attachment_data),
+                "error": f"xlsb conversion failed: {e}",
+            }
+
+        try:
+            os.unlink(tmp_file.name)
+        except Exception:
+            pass
+
+        converted_filename = Path(filename).with_suffix(".xlsx").name
+        return {
+            "temp_path": converted_path,
+            "filename": converted_filename,
+            "original_filename": filename,
+            "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "size": Path(converted_path).stat().st_size,
+            "converted_from": "xlsb",
+        }
 
     return {
         "temp_path": tmp_file.name,
@@ -421,7 +454,9 @@ def extract_eml_content(eml_path, output_dir=None):
                                 elif content_type in [
                                     "application/vnd.ms-excel",
                                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                ] or filename.lower().endswith((".xls", ".xlsx")):
+                                    "application/vnd.ms-excel.sheet.binary.macroenabled.12",
+                                    "application/vnd.ms-excel.sheet.macroenabled.12",
+                                ] or filename.lower().endswith((".xls", ".xlsx", ".xlsm", ".xlsb")):
                                     # For Excel, save temp path for later sheet-by-sheet processing
                                     excel_info = process_excel_attachment(
                                         payload, filename

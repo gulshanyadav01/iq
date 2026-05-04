@@ -16,27 +16,25 @@ def upload_bytes_to_minio_and_get_url(
     """Upload bytes to a MinIO/S3 bucket and return a public or presigned URL.
 
     Environment variables used:
-    - AWS_S3_ENDPOINT_URL (required)
-    - AWS_ACCESS_KEY_ID (required)
-    - AWS_SECRET_ACCESS_KEY (required)
     - AWS_STORAGE_BUCKET_NAME (required)
+    - AWS_S3_ENDPOINT_URL (optional; set for MinIO, blank for real S3)
+    - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (optional; blank in prod uses
+      boto3's default credential chain — EKS Pod Identity, IAM role, etc.)
     - AWS_REGION (optional)
     - AWS_S3_PUBLIC_ENDPOINT_URL (optional). If not provided, a presigned URL is returned
     - AWS_S3_PRESIGN_EXPIRES (optional, seconds). Default: 604800 (7 days)
     """
 
-    endpoint_url = os.environ.get("AWS_S3_ENDPOINT_URL")
-    access_key = os.environ.get("AWS_ACCESS_KEY_ID")
-    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    endpoint_url = os.environ.get("AWS_S3_ENDPOINT_URL") or None
+    access_key = os.environ.get("AWS_ACCESS_KEY_ID") or None
+    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY") or None
     bucket_name = os.environ.get("AWS_STORAGE_BUCKET_NAME")
     region_name = os.environ.get("AWS_REGION")
     public_base = os.environ.get("AWS_S3_PUBLIC_ENDPOINT_URL")
     presign_expires_raw = os.environ.get("AWS_S3_PRESIGN_EXPIRES")
 
-    if not all([endpoint_url, access_key, secret_key, bucket_name]):
-        raise ValueError(
-            "Missing MinIO configuration. Ensure MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, and MINIO_BUCKET are set."
-        )
+    if not bucket_name:
+        raise ValueError("AWS_STORAGE_BUCKET_NAME must be set.")
 
     presign_expires = 604800  # 7 days
     if presign_expires_raw:
