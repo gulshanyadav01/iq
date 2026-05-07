@@ -596,8 +596,14 @@ class ContentIndexer:
         body = self._clean_email_body(email_data.get("body", ""))
 
         header_lines = []
+        if email_data.get("subject"):
+            header_lines.append(f"Subject: {email_data['subject']}")
         if email_data.get("from"):
             header_lines.append(f"From: {email_data['from']}")
+        if email_data.get("to"):
+            header_lines.append(f"To: {email_data['to']}")
+        if email_data.get("cc"):
+            header_lines.append(f"Cc: {email_data['cc']}")
         if email_data.get("date"):
             header_lines.append(f"Date: {email_data['date']}")
 

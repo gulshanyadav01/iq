@@ -15,6 +15,8 @@ extraction accuracy. Passes are then merged into RawExtraction format.
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
+from cins.schema.carriers import CarrierCode
+
 
 # ============================================================================
 # PASS 0A: EMAIL CLEANING (PREPROCESSING)
@@ -237,8 +239,18 @@ class MetadataExtraction(BaseModel):
         "", description="General notes about the document structure"
     )
 
-    # Provider - simple flat structure
-    provider_name: str = Field(..., description="Provider name as stated in document")
+    # Provider - constrained short code (Bajaj, FG, HDFC, ...). Empty string
+    # if the LLM cannot confidently identify the carrier from the 25-item list.
+    # See cins/schema/carriers.py for the canonical vocabulary.
+    provider_name: CarrierCode = Field(
+        ...,
+        description=(
+            "Insurance carrier short code. Must be one of: Bajaj, Chola, Digit, "
+            "FG, HDFC, ICICI, Iffco, Kotak, Liberty, Magma, National, New India, "
+            "Oriental, Reliance, RSGI, SBI, Shriram, United, Universal, Zuno. "
+            "Return empty string if the carrier cannot be confidently identified."
+        ),
+    )
 
     # Commission period - simple strings
     start_date: str = Field(

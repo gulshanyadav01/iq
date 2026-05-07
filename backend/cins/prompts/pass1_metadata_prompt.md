@@ -20,8 +20,22 @@ Return **strict JSON only**. No explanation.
 * `provider_email`
 * `provider_phone`
 
-Extract exactly as written.
-If not present → return empty string.
+For `provider_name`, return the **short code** of the insurance carrier — must be one of the 25 below:
+
+```text
+Bajaj    HDFC      Liberty     Oriental    Shriram
+Chola    ICICI     Magma       Reliance    United
+Digit    Iffco     National    RSGI        Universal
+FG       Kotak     New India   SBI         Zuno
+```
+
+`FG` = Future Generali. `RSGI` = Raheja QBE. `Zuno` = Zuno General (formerly Edelweiss General).
+
+Identify the carrier from any signal in the document — Subject line, To/Cc/From recipient domains, body text, attached document, or quoted/forwarded thread. **Match the underwriting carrier, NOT the broker, aggregator, or forwarder** (e.g., pbpartners.com, policybazaar.com, insurance-broker domains are NOT carriers — look past them to the carrier they correspond with).
+
+If the carrier cannot be confidently identified as one of the 25 → return empty string. Do not invent or approximate.
+
+Extract `provider_email` and `provider_phone` exactly as written. If not present → return empty string.
 
 ### 3. Commission Period
 
