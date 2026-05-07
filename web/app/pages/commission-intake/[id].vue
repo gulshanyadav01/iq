@@ -24,82 +24,6 @@
             </span>
           </div>
         </div>
-        <!-- Action buttons: Refresh / Export Excel (primary, when complete) / Re-index / Extract / Validate -->
-        <div v-if="doc" class="flex items-center gap-2">
-          <button
-            :disabled="refreshing"
-            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-400 transition disabled:opacity-50 disabled:cursor-not-allowed"
-            @click="refresh"
-          >
-            <UIcon
-              name="i-lucide-refresh-cw"
-              class="w-3.5 h-3.5"
-              :class="{ 'animate-spin': refreshing }"
-            />
-            Refresh
-          </button>
-        </div>
-        <div v-if="doc && !isInFlight(doc.status)" class="flex items-center gap-2">
-          <button
-            v-if="doc.status === 'completed' && !doc.is_validated"
-            :disabled="actionLoading !== null"
-            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-green-600 hover:bg-green-700 text-white transition disabled:opacity-50 disabled:cursor-not-allowed"
-            @click="triggerMarkValidated"
-          >
-            <UIcon
-              name="i-lucide-shield-check"
-              class="w-3.5 h-3.5"
-              :class="{ 'animate-spin': actionLoading === 'mark-validated' }"
-            />
-            Mark Validated
-          </button>
-          <button
-            v-if="doc.is_validated"
-            :disabled="actionLoading !== null"
-            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 transition disabled:opacity-50 disabled:cursor-not-allowed"
-            @click="triggerMarkInvalidated"
-          >
-            <UIcon
-              name="i-lucide-shield-off"
-              class="w-3.5 h-3.5"
-              :class="{ 'animate-spin': actionLoading === 'mark-invalidated' }"
-            />
-            Remove Validation
-          </button>
-          <button
-            v-if="doc.cics_result"
-            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-primary-600 hover:bg-primary-700 text-white transition"
-            @click="downloadExcel"
-          >
-            <UIcon name="i-lucide-table" class="w-3.5 h-3.5" />
-            Export Excel
-          </button>
-          <button
-            :disabled="actionLoading !== null"
-            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-400 transition disabled:opacity-50 disabled:cursor-not-allowed"
-            @click="triggerIndex"
-          >
-            <UIcon
-              name="i-lucide-scan-text"
-              class="w-3.5 h-3.5"
-              :class="{ 'animate-spin': actionLoading === 'index' }"
-            />
-            Re-index
-          </button>
-          <button
-            v-if="doc.indexed_content"
-            :disabled="actionLoading !== null"
-            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-400 transition disabled:opacity-50 disabled:cursor-not-allowed"
-            @click="triggerExtract"
-          >
-            <UIcon
-              name="i-lucide-cpu"
-              class="w-3.5 h-3.5"
-              :class="{ 'animate-spin': actionLoading === 'extract' }"
-            />
-            Extract
-          </button>
-        </div>
         <div class="flex flex-col items-end gap-1">
           <span v-if="doc" :class="['inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium', getStatusBadgeClass(doc.status)]">
             <span v-if="isInFlight(doc.status)" class="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
@@ -111,6 +35,109 @@
           >
             {{ doc.index_progress.detail }}
           </span>
+        </div>
+      </div>
+
+      <!-- Action toolbar -->
+      <div v-if="doc" class="glass rounded-xl px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+        <!-- Primary actions (left) -->
+        <div class="flex items-center gap-2 flex-wrap">
+          <template v-if="!isInFlight(doc.status)">
+            <button
+              v-if="doc.cics_result"
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-primary-600 hover:bg-primary-700 text-white transition shadow-sm"
+              @click="downloadExcel"
+            >
+              <UIcon name="i-lucide-table" class="w-3.5 h-3.5" />
+              Export Excel
+            </button>
+            <button
+              v-if="doc.status === 'completed' && !doc.is_validated"
+              :disabled="actionLoading !== null"
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-green-600 hover:bg-green-700 text-white transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              @click="triggerMarkValidated"
+            >
+              <UIcon
+                name="i-lucide-shield-check"
+                class="w-3.5 h-3.5"
+                :class="{ 'animate-spin': actionLoading === 'mark-validated' }"
+              />
+              Mark Validated
+            </button>
+            <button
+              v-if="doc.is_validated"
+              :disabled="actionLoading !== null"
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              @click="triggerMarkInvalidated"
+            >
+              <UIcon
+                name="i-lucide-shield-off"
+                class="w-3.5 h-3.5"
+                :class="{ 'animate-spin': actionLoading === 'mark-invalidated' }"
+              />
+              Remove Validation
+            </button>
+          </template>
+          <span v-else class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+            <UIcon name="i-lucide-loader-circle" class="w-3.5 h-3.5 animate-spin" />
+            Pipeline running…
+          </span>
+        </div>
+
+        <!-- Secondary actions (right) -->
+        <div class="flex items-center gap-1">
+          <button
+            title="Download original document"
+            class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+            @click="downloadOriginal"
+          >
+            <UIcon name="i-lucide-download" class="w-3.5 h-3.5" />
+            Original
+          </button>
+          <span class="w-px h-5 bg-gray-200 dark:bg-gray-700 mx-1" />
+          <template v-if="!isInFlight(doc.status)">
+            <button
+              :disabled="actionLoading !== null"
+              title="Re-run indexing from source document"
+              class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              @click="triggerIndex"
+            >
+              <UIcon
+                name="i-lucide-scan-text"
+                class="w-3.5 h-3.5"
+                :class="{ 'animate-spin': actionLoading === 'index' }"
+              />
+              Re-index
+            </button>
+            <button
+              v-if="doc.indexed_content"
+              :disabled="actionLoading !== null"
+              title="Re-run LLM extraction on indexed content"
+              class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-primary-200 dark:border-primary-800 text-primary-700 dark:text-primary-300 bg-primary-50/50 dark:bg-primary-900/20 hover:bg-primary-100 dark:hover:bg-primary-900/40 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              @click="triggerExtract"
+            >
+              <UIcon
+                name="i-lucide-sparkles"
+                class="w-3.5 h-3.5"
+                :class="{ 'animate-spin': actionLoading === 'extract' }"
+              />
+              Extract
+            </button>
+          </template>
+          <button
+            v-else
+            :disabled="refreshing"
+            title="Refresh status"
+            class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            @click="refresh"
+          >
+            <UIcon
+              name="i-lucide-refresh-cw"
+              class="w-3.5 h-3.5"
+              :class="{ 'animate-spin': refreshing }"
+            />
+            Refresh
+          </button>
         </div>
       </div>
 
@@ -796,7 +823,7 @@ const {
   validationBannerClass, validationBannerIcon, validationBannerText,
   isInFlight, getStatusBadgeClass, formatStatus, getPassStatusBadge, getSeverityBadge,
   getSheetClassification, getSheetClassBadge, formatCommissionValue, formatConditions,
-  sheetPassStatus, copyJson, downloadJson, downloadExcel, refresh,
+  sheetPassStatus, copyJson, downloadJson, downloadExcel, downloadOriginal, refresh,
   triggerIndex, triggerExtract, triggerRerunPass, triggerTransform, triggerValidate,
   triggerMarkValidated, triggerMarkInvalidated,
 } = useCommissionIntakeDetail()
