@@ -596,8 +596,14 @@ class ContentIndexer:
         body = self._clean_email_body(email_data.get("body", ""))
 
         header_lines = []
+        if email_data.get("subject"):
+            header_lines.append(f"Subject: {email_data['subject']}")
         if email_data.get("from"):
             header_lines.append(f"From: {email_data['from']}")
+        if email_data.get("to"):
+            header_lines.append(f"To: {email_data['to']}")
+        if email_data.get("cc"):
+            header_lines.append(f"Cc: {email_data['cc']}")
         if email_data.get("date"):
             header_lines.append(f"Date: {email_data['date']}")
 
@@ -1428,7 +1434,21 @@ class ContentIndexer:
 
         if cut_at is None:
             return body
-        return "\n".join(lines[:cut_at]).rstrip()
+
+        # Broker-forward guard: when the new message *above* the quoted/forwarded
+        # boundary is short, the outer message is almost certainly a forwarding
+        # preamble ("Hi X, FYI" / "Pls find below the latest grid") and the
+        # carrier-bearing content lives inside the forwarded thread — stripping
+        # it would discard the only signal Pass 1 has for provider identity.
+        #
+        # 400 chars ≈ a paragraph; well above any realistic broker preamble
+        # (the FG case is 62 chars), and below any genuine original message
+        # that legitimately precedes a quoted reply trail.
+        pre_marker = "\n".join(lines[:cut_at]).rstrip()
+        if len(pre_marker) < 400:
+            return body
+
+        return pre_marker
 
     def _strip_quoted_trail_html(self, html: str) -> str:
         """

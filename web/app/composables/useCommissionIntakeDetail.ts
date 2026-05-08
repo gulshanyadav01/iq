@@ -406,6 +406,21 @@ export function useCommissionIntakeDetail() {
     URL.revokeObjectURL(url)
   }
 
+  async function downloadOriginal() {
+    if (!doc.value) return
+    const headers = await getAuthHeaders()
+    const { url } = await $fetch<{ url: string }>(
+      `${getBaseUrl()}/api/commission-intake/documents/${route.params.id}/download/`,
+      { method: 'GET', headers }
+    )
+    const a = document.createElement('a')
+    a.href = url
+    a.download = doc.value.original_filename
+    a.target = '_blank'
+    a.rel = 'noopener'
+    a.click()
+  }
+
   // ── Data fetching + polling ────────────────────────────────────────────────
 
   async function getAuthHeaders() {
@@ -563,7 +578,7 @@ export function useCommissionIntakeDetail() {
     passesForNum, passAggregateStatus,
     isInFlight, getStatusBadgeClass, formatStatus, getPassStatusBadge, getSeverityBadge,
     getSheetClassification, getSheetClassBadge, formatCommissionValue, formatConditions,
-    sheetPassStatus, copyJson, downloadJson, downloadExcel, loadDoc, refresh,
+    sheetPassStatus, copyJson, downloadJson, downloadExcel, downloadOriginal, loadDoc, refresh,
     triggerIndex, triggerExtract, triggerRerunPass, triggerTransform, triggerValidate,
     triggerMarkValidated, triggerMarkInvalidated,
   }

@@ -521,3 +521,38 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         response = FileResponse(buf, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
         return response
+
+    @extend_schema(
+        summary="Get download URL for original uploaded document",
+        description="Returns a short-lived presigned URL the browser can use to download the original file.",
+        tags=["Commission Document"],
+    )
+    @action(detail=True, methods=["get"], url_path="download")
+    def download(self, request, *args, **kwargs):
+        import boto3
+        from botocore.config import Config
+        from django.conf import settings
+
+        instance = self.get_object()
+        if not instance.file:
+            return Response({"detail": "No file available."}, status=status.HTTP_404_NOT_FOUND)
+
+        public_endpoint = getattr(settings, "AWS_S3_PUBLIC_ENDPOINT_URL", "") or None
+        s3_client = boto3.client(
+            "s3",
+            endpoint_url=public_endpoint or getattr(settings, "AWS_S3_ENDPOINT_URL", None),
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID or None,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY or None,
+            region_name=settings.AWS_REGION,
+            config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+        )
+        url = s3_client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
+                "Key": instance.file.name,
+                "ResponseContentDisposition": f'attachment; filename="{instance.original_filename}"',
+            },
+            ExpiresIn=300,
+        )
+        return Response({"url": url})

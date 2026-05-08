@@ -16,6 +16,7 @@ import hashlib
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple, Any
 
+from cins.schema.carriers import CARRIER_FULL_NAMES, normalize_carrier
 from cins.schema.raw_extraction import RawExtraction, RawCommissionEntry, RawMasterDataEntry
 from cins.schema.cics_model import (
     CICSDocument,
@@ -554,14 +555,38 @@ class RawToCICSTransformer:
     # ==================== PROVIDER ====================
 
     def _transform_provider(self, raw_provider) -> Provider:
-        """Transform provider from raw extraction."""
-        provider_id = self._slugify(raw_provider.name).upper()
-        if not provider_id:
-            provider_id = "UNKNOWN_PROVIDER"
+        """
+        Transform provider from raw extraction.
 
+        Normalises whatever the LLM returned (or the alias the codegen path
+        passes through) to one of the 25 canonical short codes via
+        `cins.schema.carriers.normalize_carrier`. Anything that fails to map
+        becomes `UNKNOWN_PROVIDER` and a transformer warning, so downstream
+        callers can flag it.
+        """
+        raw_name = (raw_provider.name or "").strip()
+        short_code = normalize_carrier(raw_name)
+
+        if short_code:
+            # `provider_id` must match ^[A-Za-z0-9_-]+$ per CICS schema —
+            # spaces in canonical codes (e.g. "New India") are converted to
+            # underscores for the ID, but the human-facing `provider_name`
+            # uses the canonical full name from the alias table.
+            return Provider(
+                provider_id=short_code.replace(" ", "_"),
+                provider_name=CARRIER_FULL_NAMES.get(short_code, short_code),
+            )
+
+        # No alias match — keep the original string visible (so a human can
+        # see what the LLM returned) but flag the doc as needing review.
+        if raw_name:
+            self.warnings.append(
+                f"Provider '{raw_name}' did not match any of the 25 valid carriers; "
+                f"setting provider_id=UNKNOWN_PROVIDER."
+            )
         return Provider(
-            provider_id=provider_id,
-            provider_name=raw_provider.name or "Unknown Provider",
+            provider_id="UNKNOWN_PROVIDER",
+            provider_name=raw_name or "Unknown Provider",
         )
 
     # ==================== PERIOD ====================

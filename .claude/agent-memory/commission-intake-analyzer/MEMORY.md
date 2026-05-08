@@ -1,0 +1,3 @@
+- [Provider identification pipeline](architecture_provider_identification.md) — provider name is set by Pass 1 LLM extraction from `primary_content`; no constrained list exists anywhere
+- [Email primary_content scope](architecture_email_primary_content.md) — for .eml ingestion, Pass 1 sees only `From:` + `Date:` + cleaned body — no Subject, To, or Cc
+- [Valid carriers (25 short codes)](reference_valid_carriers.md) — canonical short-code list given by user for Indian motor-insurance carriers

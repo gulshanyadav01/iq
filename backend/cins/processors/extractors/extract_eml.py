@@ -411,6 +411,8 @@ def extract_eml_content(eml_path, output_dir=None):
         # Extract metadata
         subject = msg.get("Subject", "")
         from_addr = msg.get("From", "")
+        to_addr = msg.get("To", "")
+        cc_addr = msg.get("Cc", "")
         date = msg.get("Date", "")
 
         # Extract body content
@@ -565,6 +567,8 @@ def extract_eml_content(eml_path, output_dir=None):
         return {
             "subject": subject,
             "from": from_addr,
+            "to": to_addr,
+            "cc": cc_addr,
             "date": date,
             "body": body,
             "attachments": attachments,
@@ -577,6 +581,8 @@ def extract_eml_content(eml_path, output_dir=None):
         return {
             "subject": "",
             "from": "",
+            "to": "",
+            "cc": "",
             "date": "",
             "body": f"Error processing email: {str(e)}",
             "attachments": [],

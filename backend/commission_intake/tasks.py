@@ -309,10 +309,14 @@ def run_extraction(document_id: str):
                 },
             )
 
-            # Write provider name back to the document from the CICS result
-            provider_name = (result.cics_doc or {}).get("provider", {}).get("provider_name", "")
-            if provider_name:
-                doc.provider = provider_name
+            # Write the canonical carrier short code (e.g. "FG", "New India")
+            # back to the document. We use provider_id (which is the short code
+            # with spaces -> underscores per CICS schema regex) and reverse the
+            # underscore conversion so the DB matches the user-facing list.
+            # Skip UNKNOWN_PROVIDER so the column isn't polluted with sentinel.
+            provider_id = (result.cics_doc or {}).get("provider", {}).get("provider_id", "")
+            if provider_id and provider_id != "UNKNOWN_PROVIDER":
+                doc.provider = provider_id.replace("_", " ")
                 doc.save(update_fields=["provider", "updated_at"])
 
         finally:
@@ -818,9 +822,12 @@ def rerun_transform(document_id: str):
             },
         )
 
-        provider_name = cics_json.get("provider", {}).get("provider_name", "")
-        if provider_name:
-            doc.provider = provider_name
+        # Mirror the writeback semantics in run_extraction: store the canonical
+        # short code (provider_id with underscores -> spaces), skip the
+        # UNKNOWN_PROVIDER sentinel.
+        provider_id = cics_json.get("provider", {}).get("provider_id", "")
+        if provider_id and provider_id != "UNKNOWN_PROVIDER":
+            doc.provider = provider_id.replace("_", " ")
             doc.save(update_fields=["provider", "updated_at"])
 
         # Run validation immediately after transform

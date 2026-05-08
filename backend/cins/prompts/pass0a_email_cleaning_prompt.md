@@ -15,10 +15,12 @@ Return **strict JSON only**. No explanation.
 - Subject: (unless it contains commission info)
 - Message-ID, References, In-Reply-To
 
+**Preserve `From:` lines and the sender's email address** — the carrier's domain (e.g. `futuregenerali.in`, `bajajallianz.com`, `icicilombard.com`, `hdfcergo.com`) is often the only place the carrier identity appears textually. Removing `From:` lines strips the provider signal Pass 1 needs.
+
 ### 2. Email Thread History
 
 - Quoted reply boilerplate markers (lines starting with >, |, etc.) — strip the markers, keep the content
-- Repetitive forwarded message headers (e.g. "From: ... Sent: ... To: ... Subject: ...") — remove the header line but keep the email body
+- Repetitive forwarded message headers (e.g. "Sent: ... To: ... Cc: ... Subject: ...") — remove these lines but keep the email body. **Always preserve `From:` lines** in every message of the chain; the sender's email address (especially the domain) is load-bearing for carrier identification and must not be stripped.
 
 ### 3. Signatures and Contact Info
 
