@@ -598,6 +598,7 @@ class MineruGeminiParser:
                 "od_term": {"description": "OD term years (default: 1)"},
                 "tp_term": {"description": "TP term years (default: 1)"},
                 "previous_policy_number": {"description": "Previous policy no"},
+                "previous_policy_end_date": {"description": "Previous policy end/expiry date (dd/mm/yyyy) — used to derive STP/NSTP"},
                 "pa_cover": {"description": "PA cover (numeric)", "default": "0"},
                 "pa_cover_addon": {"description": "PA addon: YES/NO", "default": "NO"},
                 "electricalAccessoriesIDV": {"description": "Elec IDV (numeric)", "default": "0"},
@@ -637,7 +638,7 @@ class MineruGeminiParser:
                 "IMT34_value": {"description": "IMT34 (numeric)", "default": "0"},
                 "IMT34": {"description": "IMT34", "enum": ["YES", "NO"], "default": "NO"},
                 "imtIncluded": {"description": "IMT: TRUE/FALSE", "default": "FALSE"},
-                "stp_nstp": {"description": "STP/NSTP status"},
+                "stp_nstp": {"description": "STP/NSTP status — DERIVED in post-processing from previous_policy_end_date vs policy_start_date. LLM should leave this empty.", "enum": ["STP", "NSTP", ""]},
                 "financialInstitutionName": {"description": "Financier name"},
                 "nomineeName": {"description": "Nominee name"},
                 "nomineeRelationWithCustomer": {"description": "Nominee relation"},
@@ -1296,7 +1297,7 @@ class MineruGeminiParser:
         DATE_FIELDS = [
             'manufacturing_date', 'registration_date', 'policy_start_date',
             'policy_end_date', 'issuance_date', 'tpStartDate', 'tpEndDate',
-            'od_startdate', 'od_enddate'
+            'od_startdate', 'od_enddate', 'previous_policy_end_date'
         ]
         for field in DATE_FIELDS:
             if field in structured_data and isinstance(structured_data[field], dict):
@@ -1335,6 +1336,35 @@ class MineruGeminiParser:
                             structured_data[term_field]['is_extracted'] = "TRUE"
                     except (ValueError, KeyError):
                         pass
+
+        # Derive stp_nstp from previous_policy_end_date vs policy_start_date.
+        # STP if gap is <= 1 day (clean rollover); NSTP if gap > 1 day (lapse).
+        # Empty (FALSE) when previous_policy_end_date is absent (new business).
+        if 'stp_nstp' in structured_data and isinstance(structured_data['stp_nstp'], dict):
+            prev_end_str = ''
+            start_str = ''
+            if 'previous_policy_end_date' in structured_data and isinstance(structured_data['previous_policy_end_date'], dict):
+                prev_end_str = str(structured_data['previous_policy_end_date'].get('value', '')).strip()
+            if 'policy_start_date' in structured_data and isinstance(structured_data['policy_start_date'], dict):
+                start_str = str(structured_data['policy_start_date'].get('value', '')).strip()
+
+            if prev_end_str and start_str and '/' in prev_end_str and '/' in start_str:
+                try:
+                    # Dates are dd/mm/yyyy after the DATE_FIELDS conversion above
+                    prev_end_date = datetime.strptime(prev_end_str, "%d/%m/%Y")
+                    start_date = datetime.strptime(start_str, "%d/%m/%Y")
+                    diff_days = (start_date - prev_end_date).days
+                    stp_value = "STP" if diff_days <= 1 else "NSTP"
+                    structured_data['stp_nstp']['value'] = stp_value
+                    structured_data['stp_nstp']['is_extracted'] = "TRUE"
+                    structured_data['stp_nstp']['confidence_score'] = 1.0
+                    structured_data['stp_nstp']['do_verification'] = "FALSE"
+                except (ValueError, KeyError):
+                    pass
+            else:
+                structured_data['stp_nstp']['value'] = ""
+                structured_data['stp_nstp']['is_extracted'] = "FALSE"
+                structured_data['stp_nstp']['confidence_score'] = 0.0
 
         # Ensure no null values
         for field, data in structured_data.items():
