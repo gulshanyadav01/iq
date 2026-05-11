@@ -13,32 +13,28 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/../.env}"
 
-# Load AWS creds from .env if not already in environment.
-# Explicitly ignore AWS_S3_ENDPOINT_URL (it points at MinIO for app storage,
-# not real S3) so the AWS CLI talks to AWS.
-if [ -f "$ENV_FILE" ]; then
-  while IFS='=' read -r key value; do
-    case "$key" in
-      AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AWS_REGION|AWS_DEFAULT_REGION)
-        value="${value%\"}"; value="${value#\"}"
-        value="${value%\'}"; value="${value#\'}"
-        if [ -z "${!key:-}" ]; then
-          export "$key=$value"
-        fi
-        ;;
-    esac
-  done < <(grep -E '^(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AWS_REGION|AWS_DEFAULT_REGION)=' "$ENV_FILE" || true)
+# Force AWS CLI to use ~/.aws/credentials only. Strip any AWS_* vars from the
+# environment (the project's .env carries MinIO creds under AWS_* names, which
+# would otherwise override the profile and break real-AWS calls).
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+      AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 AWS_S3_ENDPOINT_URL \
+      AWS_S3_PUBLIC_ENDPOINT_URL AWS_STORAGE_BUCKET_NAME
+
+AWS_PROFILE="${AWS_PROFILE:-default}"
+export AWS_PROFILE
+
+if [ ! -f "${HOME}/.aws/credentials" ]; then
+  echo "ERROR: ~/.aws/credentials not found. Configure with 'aws configure'." >&2
+  exit 1
 fi
-unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 AWS_S3_ENDPOINT_URL
 
 POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-insur-iq-postgres-1}"
 DB_USER="${DB_USER:-postgres}"
 DB_NAME="${DB_NAME:-insure_iq}"
 S3_BUCKET="${S3_BUCKET:-rhobots-temp}"
 S3_PREFIX="${S3_PREFIX:-commission-intake-dumps}"
-AWS_REGION="${AWS_REGION:-us-east-1}"
+AWS_REGION="${AWS_REGION:-$(aws configure get region --profile "$AWS_PROFILE" 2>/dev/null || echo us-east-1)}"
 
 TABLES=(
   "public.commission_intake_cicsresult"

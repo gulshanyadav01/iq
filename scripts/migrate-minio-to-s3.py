@@ -29,8 +29,10 @@ Configuration:
     S3_BUCKET                (default: pbpartners-insuriq)
     AWS_PROFILE              (optional named profile)
 
-The script skips objects that already exist at the destination with a
-matching size, so it is safe to re-run.
+Before copying, the script DELETES every object under the same prefix
+in the destination bucket so the destination is a clean mirror of the
+source. `--dry-run` lists the deletes and copies that would happen
+without performing either.
 """
 
 from __future__ import annotations
@@ -93,31 +95,29 @@ def list_keys(client, bucket: str, prefix: str):
             yield obj["Key"], obj["Size"]
 
 
-def head_size(client, bucket: str, key: str) -> int | None:
-    """Return ContentLength, None for missing, or -1 when HEAD is forbidden."""
-    try:
-        resp = client.head_object(Bucket=bucket, Key=key)
-        return resp["ContentLength"]
-    except ClientError as e:
-        code = e.response.get("Error", {}).get("Code")
-        status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-        if code in ("404", "NoSuchKey", "NotFound") or status == 404:
-            return None
-        if code in ("403", "AccessDenied", "Forbidden") or status == 403:
-            # No s3:GetObject/HeadObject — fall back to unconditional upload.
-            return -1
-        raise
-
-
 def copy_one(minio, s3, src_bucket: str, dst_bucket: str, key: str, size: int) -> str:
-    existing = head_size(s3, dst_bucket, key)
-    if existing == size:
-        return f"skip  {key} (already present, {size}B)"
-
     body = minio.get_object(Bucket=src_bucket, Key=key)["Body"]
     s3.upload_fileobj(body, dst_bucket, key)
-    note = " [no head perms; uploaded blindly]" if existing == -1 else ""
-    return f"copy  {key} ({size}B){note}"
+    return f"copy  {key} ({size}B)"
+
+
+def clear_prefix(s3, bucket: str, prefix: str) -> int:
+    """Delete every object under prefix in the destination bucket. Returns count."""
+    paginator = s3.get_paginator("list_objects_v2")
+    deleted = 0
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        contents = page.get("Contents") or []
+        if not contents:
+            continue
+        # delete_objects accepts up to 1000 keys per call; pages are <=1000.
+        resp = s3.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": [{"Key": o["Key"]} for o in contents], "Quiet": True},
+        )
+        for err in resp.get("Errors", []) or []:
+            print(f"  delete failed: {err.get('Key')}: {err.get('Message')}", file=sys.stderr)
+        deleted += len(contents)
+    return deleted
 
 
 def main() -> int:
@@ -166,11 +166,23 @@ def main() -> int:
     print()
 
     if args.dry_run:
+        try:
+            existing = list(list_keys(make_s3_session().client("s3", region_name=dst_region, config=Config(signature_version="s3v4")), dst_bucket, args.prefix))
+        except ClientError as e:
+            print(f"(could not list destination for dry-run: {e})", file=sys.stderr)
+            existing = []
+        for key, size in existing:
+            print(f"would delete  {key} ({size}B)")
         for key, size in keys:
-            print(f"would copy  {key} ({size}B)")
+            print(f"would copy    {key} ({size}B)")
         return 0
 
-    copied = skipped = failed = 0
+    print(f"Clearing destination prefix s3://{dst_bucket}/{args.prefix} ...")
+    deleted = clear_prefix(s3, dst_bucket, args.prefix)
+    print(f"Deleted {deleted} existing objects.")
+    print()
+
+    copied = failed = 0
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(copy_one, minio, s3, src_bucket, dst_bucket, k, sz): k for k, sz in keys}
         for fut in as_completed(futures):
@@ -178,16 +190,13 @@ def main() -> int:
             try:
                 msg = fut.result()
                 print(msg)
-                if msg.startswith("skip"):
-                    skipped += 1
-                else:
-                    copied += 1
+                copied += 1
             except Exception as exc:
                 failed += 1
                 print(f"FAIL  {key}: {exc}", file=sys.stderr)
 
     print()
-    print(f"Done. copied={copied} skipped={skipped} failed={failed}")
+    print(f"Done. deleted={deleted} copied={copied} failed={failed}")
     return 1 if failed else 0
 
 
