@@ -39,43 +39,6 @@ class MineruGeminiParser:
 
     MINERVA_API_URL = os.getenv("MINERVA_API_URL", "https://rhobots.pbpartners.com/api/mineru/file_parse")
 
-    # Vehicle SubClass Master — ID + canonical name per Product (CV, TW, Car)
-    VEHICLE_SUBCLASS_MASTER = {
-        "CV": [
-            (1, "Truck"), (2, "Heavy Truck/Semi Trailer"), (3, "Tipper"),
-            (5, "Dumper"), (6, "Tractor"), (7, "Tanker"), (8, "Bulker"),
-            (9, "Trailer"), (10, "Pick Up/Delivery Van"), (11, "Refrigerated Van"),
-            (16, "Agricultural Tractor"), (20, "Bulldozer"), (21, "Crane"),
-            (22, "Garbage Van"), (23, "Ambulance"), (24, "Excavator"),
-            (28, "Taxi"), (31, "Fork Lift Trucks"), (32, "Drilling Rigs"),
-            (34, "Fire Vehicles"), (36, "Compressors"), (37, "Road Rollers"),
-            (38, "Motor Grader"), (39, "Transit Mixer"), (40, "Generator Van"),
-            (41, "Backhoe Loader"), (42, "Loader"), (43, "Harvester"),
-            (44, "Tractor Loader"), (47, "Car Carrier"), (48, "Flat Bed Trailer"),
-            (49, "Kisan Suvidha"), (50, "Compactor"), (51, "Vibrator"),
-            (52, "Towing Van"), (53, "Tar Sprayer"), (54, "Jetting Machine"),
-            (55, "Container"), (56, "Gas Tanker"), (57, "Car Carrier"),
-            (58, "Road Sweeper"), (12, "E Rickshaw"), (13, "Auto Rickshaw"),
-            (14, "Passenger Bus"), (15, "School Bus"), (27, "Staff Bus"),
-        ],
-        "TW": [
-            (1, "Bike"), (2, "Scooter"), (3, "E-Bike"),
-        ],
-        "Car": [
-            (1, "Private Car"), (2, "Taxi"),
-        ],
-    }
-
-    # Map VehicleClass enum to Product
-    VEHICLE_CLASS_TO_PRODUCT = {
-        "GCV": "CV",
-        "PCV": "CV",
-        "BUS": "CV",
-        "MISC D": "CV",
-        "Two Wheeler": "TW",
-        "Private Car": "Car",
-    }
-
     def __init__(self, api_key: str = None, model: str = "gemini-2.5-flash-lite", intermediate_dir: str = None):
         """
         Initialize parser
@@ -89,6 +52,12 @@ class MineruGeminiParser:
         """
         self.model_name = model
         self._client = genai.Client(api_key=api_key or os.getenv("GOOGLE_API_KEY"))
+
+        # Master-data resolver — backed by the `master_data` Django app.
+        # Loaded once per parser instance (~7 small SELECTs); negligible vs
+        # minutes of LLM work per PDF.
+        from master_data.services.resolver import MasterDataResolver
+        self._resolver = MasterDataResolver()
 
         # Cost tracking
         self.total_input_tokens = 0
@@ -190,50 +159,19 @@ class MineruGeminiParser:
         return match.group(1) if match else ""
 
     def _resolve_vehicle_subclass(self, extracted_text: str, vehicle_class: str):
+        """Backwards-compatible shim around :class:`MasterDataResolver`.
+
+        Delegates to the DB-backed resolver, which uses the same 4-step ladder
+        plus a Private-Car fallback. Returns ``(PBVehicleSubClassId, canonical_name)``
+        or ``(None, None)``.
         """
-        Fuzzy-match extracted_text against master for the given VehicleClass.
-        Maps VehicleClass to Product, then resolves against master.
-        Returns (PBVehicleSubClassId, canonical_name) or (None, None).
-        """
-        import difflib
-
-        # Map VehicleClass to Product
-        product_id = self.VEHICLE_CLASS_TO_PRODUCT.get(vehicle_class.strip())
-        if not product_id:
+        product = self._resolver.resolve_product_code(vehicle_class)
+        if not product:
             return None, None
-
-        candidates = self.VEHICLE_SUBCLASS_MASTER.get(product_id, [])
-        if not candidates:
+        resolution = self._resolver.resolve_vehicle_subclass(extracted_text, product)
+        if not resolution.matched or resolution.id is None:
             return None, None
-
-        names = [name for _, name in candidates]
-        text_upper = extracted_text.strip().upper()
-
-        # 1. Exact match (case-insensitive)
-        for sub_id, name in candidates:
-            if name.upper() == text_upper:
-                return sub_id, name
-
-        # 2. Substring match
-        for sub_id, name in candidates:
-            if name.upper() in text_upper or text_upper in name.upper():
-                return sub_id, name
-
-        # 3. difflib fuzzy match
-        matches = difflib.get_close_matches(extracted_text, names, n=1, cutoff=0.5)
-        if matches:
-            for sub_id, name in candidates:
-                if name == matches[0]:
-                    return sub_id, name
-
-        # 4. Product-specific fallback for unmatched sub-classes
-        # Private Car: body styles (SEDAN, SUV, HATCHBACK) default to "Private Car" unless it's a TAXI
-        if product_id == "Car":
-            if any(kw in text_upper for kw in ["TAXI", "CAB"]):
-                return 2, "Taxi"
-            return 1, "Private Car"
-
-        return None, None
+        return resolution.id, resolution.canonical
 
     def _strip_markdown_code_blocks(self, text: str) -> str:
         """Remove markdown code blocks from response text"""
@@ -1121,7 +1059,62 @@ class MineruGeminiParser:
                 structured_data['vechicle_carrier_id']['value'] = derived_carrier
                 structured_data['vechicle_carrier_id']['is_extracted'] = "TRUE"
 
-        # Resolve VehicleSubClass to master ID + canonical name
+        # ────────────── Master-data ID resolution (DB-backed) ──────────────
+        # Populate the `id` field on each enum-like extracted field by looking
+        # up the canonical row in the master_data tables. Order matters:
+        # product_id must be resolved before insurer_id (insurer rows are
+        # scoped per product). When no match is found we leave `id=""` and
+        # set `do_verification="TRUE"` so a human can review.
+        def _apply(field_name: str, resolution) -> None:
+            if field_name not in structured_data:
+                return
+            bucket = structured_data[field_name]
+            if not isinstance(bucket, dict):
+                return
+            extracted = (bucket.get('value') or '').strip()
+            if resolution.matched and resolution.id is not None:
+                bucket['id'] = str(resolution.id)
+                if resolution.canonical:
+                    bucket['value'] = resolution.canonical
+                bucket['is_extracted'] = "TRUE"
+                bucket['do_verification'] = "FALSE"
+            elif extracted:
+                bucket['do_verification'] = "TRUE"
+
+        # 1. product_id — try the explicit product_id field first, then VehicleClass.
+        product_text = (structured_data.get('product_id', {}).get('value') or '').strip()
+        vehicle_class_text = (structured_data.get('VehicleClass', {}).get('value') or '').strip()
+        prod_resolution = self._resolver.resolve_product_id(product_text or vehicle_class_text)
+        _apply('product_id', prod_resolution)
+        resolved_product_id = prod_resolution.id
+
+        # 2. insurer_id — filtered by product_id; default to 188 (CV) when unresolved.
+        insurer_text = (structured_data.get('insurer_id', {}).get('value') or '').strip()
+        lookup_pid = resolved_product_id if resolved_product_id is not None else 188
+        _apply('insurer_id', self._resolver.resolve_insurer(insurer_text, product_id=lookup_pid))
+        if (
+            resolved_product_id is None
+            and 'insurer_id' in structured_data
+            and isinstance(structured_data['insurer_id'], dict)
+            and insurer_text
+        ):
+            structured_data['insurer_id']['do_verification'] = "TRUE"
+
+        # 3. plan_type_id — key on (plan, isZeroDepCover == "YES").
+        plan_text = (structured_data.get('plan_type_id', {}).get('value') or '').strip()
+        zd_value = (structured_data.get('isZeroDepCover', {}).get('value') or '').strip().upper()
+        _apply('plan_type_id', self._resolver.resolve_plan_type(plan_text, is_zero_dep=(zd_value == "YES")))
+
+        # 4. Independent small enums.
+        _apply('fuel_type', self._resolver.resolve_fuel_type(
+            (structured_data.get('fuel_type', {}).get('value') or '').strip()
+        ))
+        _apply('vechicle_carrier_id', self._resolver.resolve_carrier(
+            (structured_data.get('vechicle_carrier_id', {}).get('value') or '').strip()
+        ))
+        _apply('VehicleClass', self._resolver.resolve_vehicle_class(vehicle_class_text))
+
+        # 5. VehicleSubClass — uses the DB-backed resolver via the existing shim.
         if 'VehicleSubClass' in structured_data and isinstance(structured_data['VehicleSubClass'], dict):
             extracted_sub = (structured_data['VehicleSubClass'].get('value') or '').strip()
             vehicle_class = (structured_data.get('VehicleClass', {}).get('value') or '').strip()
@@ -1131,9 +1124,24 @@ class MineruGeminiParser:
                     structured_data['VehicleSubClass']['id'] = str(sub_id)
                     structured_data['VehicleSubClass']['value'] = canonical
                     structured_data['VehicleSubClass']['is_extracted'] = "TRUE"
+                    structured_data['VehicleSubClass']['do_verification'] = "FALSE"
                     print(f"   ✓ VehicleSubClass resolved: '{extracted_sub}' → [{sub_id}] {canonical}")
                 else:
+                    structured_data['VehicleSubClass']['do_verification'] = "TRUE"
                     print(f"   ⚠ VehicleSubClass no match: '{extracted_sub}' for class '{vehicle_class}'")
+
+        # Strip hallucinated `id` values from non-master-data fields. The LLM
+        # often echoes the field's own key into `id`; only the 7 master-data
+        # fields above legitimately carry a resolved DB row id here.
+        ID_BEARING_FIELDS = {
+            "product_id", "insurer_id", "plan_type_id", "fuel_type",
+            "vechicle_carrier_id", "VehicleClass", "VehicleSubClass",
+        }
+        for _fname, _bucket in structured_data.items():
+            if _fname in ID_BEARING_FIELDS:
+                continue
+            if isinstance(_bucket, dict) and "id" in _bucket:
+                _bucket["id"] = ""
 
         # Handle NEW vehicles: derive rto_num from rto_location in raw data
         reg_value = (structured_data.get('reg_num', {}).get('value', '') or '').strip().upper()
