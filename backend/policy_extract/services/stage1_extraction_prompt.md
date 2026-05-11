@@ -53,6 +53,14 @@ identifiers:
 
 dates:
 - Any date or date range with context (issue, start, end, payment)
+- PREVIOUS POLICY DATES — explicitly capture if present:
+  • Labels: "Previous Policy Period To", "Previous Policy Expiry",
+    "Expiry of Previous Policy", "Previous Policy End Date",
+    "Prev Policy To", "Date of Expiry of Previous Policy"
+  • In renewal narratives like "Renewal of Policy from <X> to <Y>",
+    capture <Y> when the document distinguishes new vs previous periods
+  • Use a clear "context" string such as "previous_policy_end_date"
+    so Stage 2 can identify it
 - ALL dates MUST be normalized to dd/mm/yyyy format (e.g., "15/01/2025")
   • Convert any format: "Jan 15, 2025" → "15/01/2025"
   • Convert: "2025-01-15" → "15/01/2025"

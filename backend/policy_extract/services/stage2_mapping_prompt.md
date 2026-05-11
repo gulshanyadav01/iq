@@ -14,9 +14,12 @@ DATA LOCATION GUIDE (where to find values in extracted data):
 - entities: insurer name, company name, branch
 - participants: customer name, nominee, intermediary, agent
 - vehicles: registration no, make, model, variant, fuel type, CC, GVW, seats, wheels
-- dates: policy start/end, OD start/end, TP start/end, issuance date, mfg date, reg date
+- dates: policy start/end, OD start/end, TP start/end, issuance date, mfg date, reg date,
+  previous policy end date
   • manufacturing_date: If only year was in the document, Stage 1 normalizes to 01/01/YYYY
     If only month+year was in the document, Stage 1 normalizes to 01/MM/YYYY. Output as-is in dd/mm/yyyy format.
+  • previous_policy_end_date: Look for context like "previous policy expiry/end/to".
+    Used downstream to compute STP vs NSTP — keep dd/mm/yyyy.
 - premiums: OD premium, TP premium, basic OD Premium, basic TP Premium, net premium, total premium
 - taxes: CGST, SGST, IGST, GST, total GST
   • serviceTax: This is the TOTAL of ALL tax components = CGST + SGST + IGST + GST
@@ -255,6 +258,11 @@ FIELD MAPPING
 - cgst, sgst, igst: Look in "taxes" array for individual tax components
 - serviceTax: Calculate as cgst + sgst + igst (sum of all tax components)
 - policy_start_date, policy_end_date: Look in "dates"
+- previous_policy_end_date: Look in "dates" for context like "previous policy expiry",
+  "previous policy to", "expiry of previous policy". Output as dd/mm/yyyy.
+  Leave value="" and is_extracted="FALSE" when not found (new business).
+- stp_nstp: DO NOT set this field. Output {"id":"", "value":"", "confidence_score":0.0,
+  "is_extracted":"FALSE", "do_verification":"FALSE"}. Computed in post-processing.
 - search_text_make: Look in "vehicles" - extract MANUFACTURER only (see rules above)
 - model_name: Look in "vehicles" - extract MODEL only (see rules above)
 - variantName: Look in "vehicles" - extract VARIANT/TRIM only (see rules above)
