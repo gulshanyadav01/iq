@@ -958,12 +958,29 @@ class Pipeline:
                 if isinstance(pass_result, dict) and "cics" in pass_result:
                     parsed_result = pass_result["cics"]
                 else:
-                    # Unexpected shape — mark any passes not yet persisted as failed
+                    # Unexpected shape — mark any passes not yet persisted as failed.
+                    # `extract_multi_pass` swallows upstream exceptions (e.g.
+                    # GeminiAPIError 429) and returns a JSON string shaped like
+                    # {"error": "Multi-pass extraction failed: ...", "status": "failed"}.
+                    # Surface that string so the DB row points at the real cause
+                    # (rate limit, quota, connectivity) instead of this generic label.
                     json_result = json.dumps(pass_result) if not isinstance(pass_result, str) else pass_result
                     try:
                         parsed_result = json.loads(json_result)
                     except Exception:
                         parsed_result = {}
+                    upstream_error = ""
+                    if isinstance(parsed_result, dict):
+                        err = parsed_result.get("error")
+                        if isinstance(err, str) and err.strip():
+                            upstream_error = err.strip()
+                        else:
+                            errs = parsed_result.get("errors")
+                            if isinstance(errs, list) and errs:
+                                upstream_error = "; ".join(str(x) for x in errs if x)
+                            elif isinstance(errs, str) and errs.strip():
+                                upstream_error = errs.strip()
+                    error_msg = upstream_error or "Unexpected multi-pass result shape"
                     with results_lock:
                         persisted_pass_nums = {e["pass_number"] for e in sheet_pass_results if e.get("sheet_name") == sheet_name}
                         failed_entries = []
@@ -978,7 +995,7 @@ class Pipeline:
                                     "model": "",
                                     "duration": 0.0,
                                     "status": "failed",
-                                    "error": "Unexpected multi-pass result shape",
+                                    "error": error_msg,
                                 }
                                 failed_entries.append(entry)
                                 sheet_pass_results.append(entry)

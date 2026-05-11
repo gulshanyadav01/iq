@@ -65,6 +65,7 @@ services:
     command: ["bash", "./entrypoint.sh", "celery"]
     environment:
       <<: *backend-env
+      CELERY_AUTORELOAD: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -79,6 +80,7 @@ services:
     command: ["bash", "./entrypoint.sh", "celery-policy-extract"]
     environment:
       <<: *backend-env
+      CELERY_AUTORELOAD: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -93,6 +95,7 @@ services:
     command: ["bash", "./entrypoint.sh", "celery-commission-intake"]
     environment:
       <<: *backend-env
+      CELERY_AUTORELOAD: "1"
     depends_on:
       backend:
         condition: service_healthy

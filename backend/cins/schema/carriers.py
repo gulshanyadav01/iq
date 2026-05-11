@@ -1,7 +1,7 @@
 """
 Insurance Carrier Vocabulary
 
-Single source of truth for the 25 valid Indian motor-insurance carriers
+Single source of truth for the 20 valid Indian motor-insurance carriers
 recognised by this system. Used by:
 
 - Pass 1 metadata extraction (`MetadataExtraction.provider_name`) — constrains
@@ -97,7 +97,7 @@ CARRIER_FULL_NAMES: dict[str, str] = {
     "New India": "New India Assurance",
     "Oriental": "Oriental Insurance",
     "Reliance": "Reliance General",
-    "RSGI": "Raheja QBE",
+    "RSGI": "Royal Sundaram",
     "SBI": "SBI General",
     "Shriram": "Shriram General",
     "United": "United India",
@@ -204,11 +204,18 @@ CARRIER_ALIASES: dict[str, str] = {
     "reliance general insurance": "Reliance",
     "reliancegeneral.co.in": "Reliance",
     "rgicl": "Reliance",
-    # Raheja QBE General Insurance
+    # Royal Sundaram General Insurance (short code RSGI per business convention)
     "rsgi": "RSGI",
-    "raheja qbe": "RSGI",
-    "raheja qbe general insurance": "RSGI",
-    "rahejaqbe.com": "RSGI",
+    "royal": "RSGI",
+    "royal sundaram": "RSGI",
+    "royal sundram": "RSGI",  # common misspelling (missing 'a')
+    "royal sundaram general": "RSGI",
+    "royal sundaram general insurance": "RSGI",
+    "royal sundaram alliance": "RSGI",
+    "rsai": "RSGI",
+    "royalsundaram.com": "RSGI",
+    "royalsundaram.in": "RSGI",
+    "royalsundaram.co.in": "RSGI",
     # SBI General Insurance
     "sbi": "SBI",
     "sbi general": "SBI",

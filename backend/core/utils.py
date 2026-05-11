@@ -32,6 +32,7 @@ def upload_bytes_to_minio_and_get_url(
     region_name = os.environ.get("AWS_REGION")
     public_base = os.environ.get("AWS_S3_PUBLIC_ENDPOINT_URL")
     presign_expires_raw = os.environ.get("AWS_S3_PRESIGN_EXPIRES")
+    addressing_style = os.environ.get("AWS_S3_ADDRESSING_STYLE") or "virtual"
 
     if not bucket_name:
         raise ValueError("AWS_STORAGE_BUCKET_NAME must be set.")
@@ -49,7 +50,7 @@ def upload_bytes_to_minio_and_get_url(
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
         region_name=region_name,
-        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+        config=Config(signature_version="s3v4", s3={"addressing_style": addressing_style}),
     )
 
     # Determine file extension from content type

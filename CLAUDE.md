@@ -1,7 +1,7 @@
 # insure_iq
 
 Full-stack monorepo: Django 5 backend + Nuxt 4 (Vue 3) frontend.
-Reusable starter template — copy per project, don't modify shared tooling.
+Domain: insurance commission intake and policy data extraction.
 
 ## Stack
 
@@ -16,15 +16,22 @@ Reusable starter template — copy per project, don't modify shared tooling.
 
 | Path | Purpose |
 | --- | --- |
-| `backend/` | Django app — config, accounts, core, system apps |
+| `backend/` | Django project root |
 | `backend/config/` | settings.py, urls.py, celery.py, authentication.py |
 | `backend/accounts/` | User/auth models and views |
-| `backend/core/` | Core business logic app |
+| `backend/core/` | Shared business logic |
+| `backend/commission_intake/` | Commission statement ingestion pipeline (models, tasks, serializers, views) |
+| `backend/policy_extract/` | Policy data extraction app (models, services, tasks) |
+| `backend/cins/` | CINS product field mapping, schema, prompts, processors, validators |
+| `backend/system/` | System-level models and views |
 | `web/` | Nuxt frontend |
-| `web/app/pages/` | Nuxt file-based routes |
+| `web/app/pages/` | Nuxt file-based routes (incl. `commission-intake/`, `policy-extract.vue`) |
 | `web/app/components/` | Vue components |
 | `web/app/composables/` | Vue 3 composables |
 | `web/app/stores/` | Pinia stores |
+| `web/app/api/` | Frontend HTTP client (`http.ts`) |
+| `web/app/middleware/` | Nuxt route middleware |
+| `web/app/layouts/` | Nuxt layouts |
 | `conf/` | Nginx dev/prod configs |
 | `scripts/` | Helper shell scripts |
 | `postgres/` | DB init SQL scripts |

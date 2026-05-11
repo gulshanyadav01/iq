@@ -16,9 +16,9 @@ from cins.schema.raw_extraction import RawProviderInfo
 
 
 class NormalizeCarrierTests(TestCase):
-    def test_carrier_count_is_twenty(self):
-        # Sanity guard — user-provided 5x4 grid totals 20 carriers.
-        # If this changes, update both VALID_CARRIERS and the prompt.
+    def test_carrier_count(self):
+        # Sanity guard — must stay in sync with `VALID_CARRIERS` and the
+        # prompt. Bump the literal here when adding/removing a carrier.
         self.assertEqual(len(VALID_CARRIERS), 20)
 
     def test_canonical_short_codes_pass_through(self):
@@ -64,6 +64,18 @@ class NormalizeCarrierTests(TestCase):
         for domain, expected in cases.items():
             with self.subTest(domain=domain):
                 self.assertEqual(normalize_carrier(domain), expected)
+
+    def test_rsgi_aliases_resolve(self):
+        # Regression: intake 597b697c-... had Cc'd royalsundaram.in addresses
+        # but the carrier (short code RSGI per business convention) had no
+        # Royal Sundaram aliases — RSGI was previously misattributed to
+        # Raheja QBE. Cover the canonical name, the misspelling, the email
+        # domain, the bare short code, and the RSAI abbreviation.
+        self.assertEqual(normalize_carrier("RSGI"), "RSGI")
+        self.assertEqual(normalize_carrier("Royal Sundaram"), "RSGI")
+        self.assertEqual(normalize_carrier("royal sundram"), "RSGI")
+        self.assertEqual(normalize_carrier("royalsundaram.in"), "RSGI")
+        self.assertEqual(normalize_carrier("RSAI"), "RSGI")
 
     def test_rebrand_resolves(self):
         # Edelweiss General was renamed to Zuno; both forms should map.

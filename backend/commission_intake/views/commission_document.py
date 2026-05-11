@@ -538,13 +538,14 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             return Response({"detail": "No file available."}, status=status.HTTP_404_NOT_FOUND)
 
         public_endpoint = getattr(settings, "AWS_S3_PUBLIC_ENDPOINT_URL", "") or None
+        addressing_style = getattr(settings, "AWS_S3_ADDRESSING_STYLE", "virtual") or "virtual"
         s3_client = boto3.client(
             "s3",
             endpoint_url=public_endpoint or getattr(settings, "AWS_S3_ENDPOINT_URL", None),
             aws_access_key_id=settings.AWS_ACCESS_KEY_ID or None,
             aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY or None,
             region_name=settings.AWS_REGION,
-            config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+            config=Config(signature_version="s3v4", s3={"addressing_style": addressing_style}),
         )
         url = s3_client.generate_presigned_url(
             ClientMethod="get_object",

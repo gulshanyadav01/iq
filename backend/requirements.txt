@@ -13,6 +13,7 @@ djangorestframework==3.16.1
 docker==7.1.0
 ipython==9.4.0
 markdown-it-py==4.0.0
+watchdog==6.0.0
 redis==6.4.0
 drf-spectacular==0.28.0
 psycopg2==2.9.10

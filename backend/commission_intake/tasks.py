@@ -826,13 +826,32 @@ def rerun_transform(document_id: str):
         # short code (provider_id with underscores -> spaces), skip the
         # UNKNOWN_PROVIDER sentinel.
         provider_id = cics_json.get("provider", {}).get("provider_id", "")
+        update_fields: list[str] = []
         if provider_id and provider_id != "UNKNOWN_PROVIDER":
             doc.provider = provider_id.replace("_", " ")
-            doc.save(update_fields=["provider", "updated_at"])
+            update_fields.append("provider")
 
-        # Run validation immediately after transform
+        # Re-transform is a recovery action: a successful rebuild supersedes
+        # any prior failure, so clear the stale error banner and flip status
+        # back to extracting (run_validation will set completed on success).
+        if doc.error:
+            doc.error = None
+            update_fields.append("error")
+        if doc.status == CommissionDocument.Status.FAILED:
+            doc.status = CommissionDocument.Status.EXTRACTING
+            update_fields.append("status")
+        if update_fields:
+            update_fields.append("updated_at")
+            doc.save(update_fields=update_fields)
+
+        # Run validation immediately after transform, then mark completed —
+        # re-transform is a recovery action, so it must drive the doc all the
+        # way back to COMPLETED on its own (no enclosing chain to do it).
         ValidationResult.objects.filter(document=doc).delete()
-        run_validation.apply_async(args=[document_id], queue=COMMISSION_INTAKE_QUEUE)
+        chain(
+            run_validation.si(document_id),
+            _set_completed.si(document_id),
+        ).apply_async(queue=COMMISSION_INTAKE_QUEUE)
 
         return document_id
 

@@ -181,7 +181,7 @@
                       <UIcon name="i-lucide-eye" class="w-4 h-4" />
                     </button>
                     <a
-                      :href="`/commission-intake/${doc.id}`"
+                      :href="`${appBaseUrl}/commission-intake/${doc.id}`"
                       target="_blank"
                       rel="noopener noreferrer"
                       class="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition"
@@ -389,6 +389,7 @@ definePageMeta({
 const router = useRouter()
 const userStore = useUserStore()
 const { getBaseUrl } = useBaseUrl()
+const appBaseUrl = useRuntimeConfig().public.appBaseUrl as string
 
 const documents = ref<CommissionDocument[]>([])
 const loading = ref(false)

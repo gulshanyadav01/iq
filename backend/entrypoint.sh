@@ -18,13 +18,31 @@ elif [ "$1" = "dev" ]; then
     exec python manage.py runserver 0.0.0.0:8000
 elif [ "$1" = "celery" ]; then
   echo "📦 Starting Celery worker..."
-  exec celery -A config worker --loglevel=INFO
+  if [ "$CELERY_AUTORELOAD" = "1" ]; then
+    echo "🔁 Auto-reload enabled (watchmedo)"
+    exec watchmedo auto-restart --directory=/app --pattern='*.py' --recursive -- \
+      celery -A config worker --loglevel=INFO
+  else
+    exec celery -A config worker --loglevel=INFO
+  fi
 elif [ "$1" = "celery-policy-extract" ]; then
   echo "📄 Starting Celery policy-extract worker (concurrency=10)..."
-  exec celery -A config worker --queues=policy_extract --concurrency=10 --loglevel=INFO --hostname=policy-extract@%h
+  if [ "$CELERY_AUTORELOAD" = "1" ]; then
+    echo "🔁 Auto-reload enabled (watchmedo)"
+    exec watchmedo auto-restart --directory=/app --pattern='*.py' --recursive -- \
+      celery -A config worker --queues=policy_extract --concurrency=10 --loglevel=INFO --hostname=policy-extract@%h
+  else
+    exec celery -A config worker --queues=policy_extract --concurrency=10 --loglevel=INFO --hostname=policy-extract@%h
+  fi
 elif [ "$1" = "celery-commission-intake" ]; then
   echo "📄 Starting Celery commission-intake worker (concurrency=2)..."
-  exec celery -A config worker --queues=commission_intake --concurrency=2 --loglevel=INFO --hostname=commission-intake@%h
+  if [ "$CELERY_AUTORELOAD" = "1" ]; then
+    echo "🔁 Auto-reload enabled (watchmedo)"
+    exec watchmedo auto-restart --directory=/app --pattern='*.py' --recursive -- \
+      celery -A config worker --queues=commission_intake --concurrency=2 --loglevel=INFO --hostname=commission-intake@%h
+  else
+    exec celery -A config worker --queues=commission_intake --concurrency=2 --loglevel=INFO --hostname=commission-intake@%h
+  fi
 elif [ "$1" = "beat" ]; then
   echo "⏰ Starting Celery beat..."
   exec celery -A config beat --loglevel=INFO
