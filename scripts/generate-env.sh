@@ -68,7 +68,7 @@ API_PORT=$(pick_free_port)
 APP_PORT=$(pick_free_port)
 AUTH_PORT=$(pick_free_port)
 PROXY_PORT=$(pick_free_port)
-MINIO_PORT=$(pick_free_port)
+MINIO_HOST_PORT=$(pick_free_port)
 MINIO_CONSOLE_PORT=$(pick_free_port)
 REDIS_HOST_PORT=$(pick_free_port)
 POSTGRES_HOST_PORT=$(pick_free_port)
@@ -94,7 +94,7 @@ set_kv API_PORT "$API_PORT"
 set_kv APP_PORT "$APP_PORT"
 set_kv AUTH_PORT "$AUTH_PORT"
 set_kv PROXY_PORT "$PROXY_PORT"
-set_kv MINIO_PORT "$MINIO_PORT"
+set_kv MINIO_HOST_PORT "$MINIO_HOST_PORT"
 set_kv MINIO_CONSOLE_PORT "$MINIO_CONSOLE_PORT"
 set_kv REDIS_HOST_PORT "$REDIS_HOST_PORT"
 set_kv POSTGRES_HOST_PORT "$POSTGRES_HOST_PORT"
@@ -110,7 +110,7 @@ set_kv BETTER_AUTH_URL "http://localhost:${PROXY_PORT}/auth"
 set_kv TRUSTED_ORIGINS "http://localhost:${PROXY_PORT}"
 
 # MinIO direct (S3 public endpoint reached from host/browser).
-set_kv AWS_S3_PUBLIC_ENDPOINT_URL "http://localhost:${MINIO_PORT}"
+set_kv AWS_S3_PUBLIC_ENDPOINT_URL "http://localhost:${MINIO_HOST_PORT}"
 
 echo "✅ Generated $ENV_FILE for workspace '${WORKSPACE_NAME}'"
 echo ""
@@ -118,7 +118,7 @@ printf "  %-22s %s\n" "API_PORT"            "$API_PORT"
 printf "  %-22s %s\n" "APP_PORT"            "$APP_PORT"
 printf "  %-22s %s\n" "AUTH_PORT"           "$AUTH_PORT"
 printf "  %-22s %s\n" "PROXY_PORT"          "$PROXY_PORT"
-printf "  %-22s %s\n" "MINIO_PORT"          "$MINIO_PORT"
+printf "  %-22s %s\n" "MINIO_HOST_PORT"     "$MINIO_HOST_PORT"
 printf "  %-22s %s\n" "MINIO_CONSOLE_PORT"  "$MINIO_CONSOLE_PORT"
 printf "  %-22s %s\n" "REDIS_HOST_PORT"     "$REDIS_HOST_PORT"
 printf "  %-22s %s\n" "POSTGRES_HOST_PORT"  "$POSTGRES_HOST_PORT"
