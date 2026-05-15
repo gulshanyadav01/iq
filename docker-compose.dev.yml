@@ -18,15 +18,15 @@ services:
       SECRET_KEY: ${SECRET_KEY:-mysecretkey}
       WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:-mywebhooksecretkey}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*,}
-      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://localhost:3000,}
-      HOST_NAME: ${HOST_NAME:-http://localhost:8000}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://localhost:${PROXY_PORT:-8080},}
+      HOST_NAME: ${HOST_NAME:-http://localhost:${PROXY_PORT:-8080}}
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://auth:10000}
       DB_HOST: ${DB_HOST:-postgres}
       DB_USER: ${DB_USER:-postgres}
       DB_PASSWORD: ${DB_PASSWORD:-postgres}
       DB_NAME: ${DB_NAME:-insure_iq}
       AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-http://minio:9000}
-      AWS_S3_PUBLIC_ENDPOINT_URL: ${AWS_S3_PUBLIC_ENDPOINT_URL:-http://localhost:9900}
+      AWS_S3_PUBLIC_ENDPOINT_URL: ${AWS_S3_PUBLIC_ENDPOINT_URL:-http://localhost:${MINIO_API_HOST_PORT:-9900}}
       AWS_S3_ADDRESSING_STYLE: ${AWS_S3_ADDRESSING_STYLE:-path}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minio}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-miniosecret}
@@ -124,10 +124,10 @@ services:
         - NODE_ENV=${NODE_ENV:-development}
     environment:
       - NODE_ENV=${NODE_ENV:-development}
-      - NUXT_PUBLIC_AUTH_BASE_URL=${NUXT_PUBLIC_AUTH_BASE_URL:-http://localhost:8080/auth/api/auth}
-      - NUXT_PUBLIC_APP_BASE_URL=${NUXT_PUBLIC_APP_BASE_URL:-http://localhost:8080}
+      - NUXT_PUBLIC_AUTH_BASE_URL=${NUXT_PUBLIC_AUTH_BASE_URL:-http://localhost:${PROXY_PORT:-8080}/auth/api/auth}
+      - NUXT_PUBLIC_APP_BASE_URL=${NUXT_PUBLIC_APP_BASE_URL:-http://localhost:${PROXY_PORT:-8080}}
       - NUXT_PUBLIC_API_SCHEME=${NUXT_PUBLIC_API_SCHEME:-http}
-      - NUXT_PUBLIC_API_BASE_URL=${NUXT_PUBLIC_API_BASE_URL:-localhost:8080/service-api}
+      - NUXT_PUBLIC_API_BASE_URL=${NUXT_PUBLIC_API_BASE_URL:-localhost:${PROXY_PORT:-8080}/service-api}
       - NUXT_PUBLIC_ENABLED_SOCIAL_PROVIDERS=${NUXT_PUBLIC_ENABLED_SOCIAL_PROVIDERS:-}
     volumes:
       - ./web:/app/web
@@ -143,14 +143,14 @@ services:
         condition: service_healthy
     command: [ "start" ]
     ports:
-      - ${PORT}:${PORT}
+      - "${AUTH_HOST_PORT:-10000}:10000"
     environment:
       NODE_ENV: ${NODE_ENV:-development}
-      PORT: ${PORT:-10000}
+      PORT: 10000
       BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-myauthsecret}
-      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:10000}
-      TRUSTED_ORIGINS: ${TRUSTED_ORIGINS:-http://localhost:3000,http://localhost:20001,http://localhost:8080}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:${PROXY_PORT:-8080}/auth}
+      TRUSTED_ORIGINS: ${TRUSTED_ORIGINS:-http://localhost:${PROXY_PORT:-8080}}
       DATABASE_STRING: ${DATABASE_STRING:-postgres://postgres:postgres@postgres:5432/auth}
       REQUIRE_EMAIL_VERIFICATION: ${REQUIRE_EMAIL_VERIFICATION:-false}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
@@ -193,8 +193,8 @@ services:
       MINIO_ROOT_USER: minio
       MINIO_ROOT_PASSWORD: miniosecret
     ports:
-      - "9900:9000"
-      - "9901:9001"
+      - "${MINIO_API_HOST_PORT:-9900}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT:-9901}:9001"
     volumes:
       - minio_data:/data
     healthcheck:
@@ -221,7 +221,7 @@ services:
     image: redis:7
     restart: always
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
@@ -241,7 +241,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: postgres
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d
@@ -251,3 +251,7 @@ volumes:
     driver: local
   minio_data:
     driver: local
+
+networks:
+  default:
+    name: ${DOCKER_NETWORK_NAME:-insure_iq_network}

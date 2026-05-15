@@ -92,6 +92,7 @@ INSTALLED_APPS = [
     'core',
     'policy_extract',
     'commission_intake',
+    'master_data',
     'system'
 ]
 

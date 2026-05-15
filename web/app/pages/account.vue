@@ -105,6 +105,81 @@
             </button>
           </div>
         </div>
+
+        <!-- Master Data Section -->
+        <div class="p-6">
+          <h2 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-2">Master Data</h2>
+          <p class="text-xs text-gray-400 dark:text-gray-500 mb-4">
+            Upload the Master Mapper Excel to refresh insurer, vehicle, fuel and plan mappings.
+            Existing rows update; new rows are added.
+          </p>
+
+          <input
+              ref="masterFileInput"
+              type="file"
+              class="hidden"
+              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              @change="handleMasterFileSelect"
+          />
+
+          <div class="flex items-center gap-3">
+            <button
+                type="button"
+                class="px-3 py-1.5 rounded-lg text-xs font-medium text-gray-700 dark:text-gray-300 border border-gray-200/60 dark:border-white/[0.08] hover:bg-gray-50 dark:hover:bg-white/[0.04] transition-colors duration-200"
+                @click="triggerMasterFileInput"
+            >
+              {{ masterFile ? 'Change file' : 'Choose file' }}
+            </button>
+            <span class="text-xs text-gray-500 dark:text-gray-400 truncate">
+              {{ masterFile?.name || 'No file selected' }}
+            </span>
+            <button
+                type="button"
+                class="ml-auto px-3 py-1.5 rounded-lg bg-primary-600 text-white text-xs font-medium hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
+                :disabled="!masterFile || masterUploading"
+                @click="uploadMasterFile"
+            >
+              {{ masterUploading ? 'Uploading…' : 'Upload Master Sheet' }}
+            </button>
+          </div>
+
+          <div v-if="masterStatus" class="mt-4">
+            <div
+                class="flex items-center gap-2 p-3 rounded-lg text-xs"
+                :class="{
+                  'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400': masterStatus.type === 'error',
+                  'bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400': masterStatus.type === 'success'
+                }"
+            >
+              <component
+                  :is="masterStatus.type === 'error' ? AlertCircle : CheckCircle2"
+                  class="h-4 w-4 flex-shrink-0"
+              />
+              <p>{{ masterStatus.message }}</p>
+            </div>
+          </div>
+
+          <div v-if="masterSummary" class="mt-4 overflow-hidden rounded-xl border border-gray-200/60 dark:border-white/[0.06]">
+            <table class="w-full text-xs">
+              <thead class="bg-gray-50/60 dark:bg-white/[0.03] text-gray-500 dark:text-gray-400">
+                <tr>
+                  <th class="text-left px-3 py-2 font-medium">Sheet</th>
+                  <th class="text-right px-3 py-2 font-medium">Created</th>
+                  <th class="text-right px-3 py-2 font-medium">Updated</th>
+                  <th class="text-right px-3 py-2 font-medium">Skipped</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-200/60 dark:divide-white/[0.04]">
+                <tr v-for="(counts, sheet) in masterSummary" :key="sheet">
+                  <td class="px-3 py-2 text-gray-700 dark:text-gray-300">{{ sheet }}</td>
+                  <td class="px-3 py-2 text-right text-gray-700 dark:text-gray-300">{{ counts.created }}</td>
+                  <td class="px-3 py-2 text-right text-gray-700 dark:text-gray-300">{{ counts.updated }}</td>
+                  <td class="px-3 py-2 text-right text-gray-700 dark:text-gray-300">{{ counts.skipped }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
 
       <!-- Password Change Dialog -->
@@ -210,8 +285,17 @@ import {Dialog, DialogPanel, DialogTitle, TransitionChild, TransitionRoot} from 
 const fileInput = ref<HTMLInputElement | null>(null)
 const userStore = useUserStore()
 const {profile, fullName} = storeToRefs(userStore)
+const {getBaseUrl} = useBaseUrl()
 
 const showPasswordDialog = ref(false)
+
+// Master Data upload state
+const masterFileInput = ref<HTMLInputElement | null>(null)
+const masterFile = ref<File | null>(null)
+const masterUploading = ref(false)
+const masterStatus = ref<{ type: 'success' | 'error'; message: string } | null>(null)
+type SheetCounts = { created: number; updated: number; skipped: number }
+const masterSummary = ref<Record<string, SheetCounts> | null>(null)
 
 const passwordForm = ref({
   current: '',
@@ -237,6 +321,54 @@ const handleProfilePicture = (event: Event) => {
 
 const saveProfile = () => {
   // TODO: Implement profile update
+}
+
+const triggerMasterFileInput = () => {
+  masterFileInput.value?.click()
+}
+
+const handleMasterFileSelect = (event: Event) => {
+  const input = event.target as HTMLInputElement
+  if (input.files?.length) {
+    masterFile.value = input.files[0]
+    masterStatus.value = null
+    masterSummary.value = null
+  }
+}
+
+const uploadMasterFile = async () => {
+  if (!masterFile.value) return
+  masterUploading.value = true
+  masterStatus.value = null
+  masterSummary.value = null
+
+  try {
+    const formData = new FormData()
+    formData.append('file', masterFile.value)
+    const token = await userStore.getToken()
+    const response = await $fetch<{ status: string; summary: Record<string, SheetCounts>; error_message?: string }>(
+        `${getBaseUrl()}/api/master-data/uploads/`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+          body: formData,
+        }
+    )
+    if (response.status === 'success') {
+      masterSummary.value = response.summary
+      masterStatus.value = { type: 'success', message: 'Master sheet uploaded successfully.' }
+      masterFile.value = null
+      if (masterFileInput.value) masterFileInput.value.value = ''
+    } else {
+      masterStatus.value = { type: 'error', message: response.error_message || 'Upload failed.' }
+    }
+  } catch (error: unknown) {
+    const err = error as { data?: { error_message?: string; detail?: string }; message?: string }
+    const detail = err.data?.error_message || err.data?.detail || err.message || 'Upload failed.'
+    masterStatus.value = { type: 'error', message: detail }
+  } finally {
+    masterUploading.value = false
+  }
 }
 
 const changePassword = async () => {
