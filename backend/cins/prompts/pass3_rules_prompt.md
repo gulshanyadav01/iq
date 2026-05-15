@@ -105,6 +105,19 @@ Use for engine CC / cubic capacity ranges. These appear as grid row/column heade
 
 **Never** put CC ranges in `conditions["vehicle_sub_class"]` — vehicle sub-class is a body/usage type, not engine size.
 
+### `conditions["gvw"]`
+
+Use for Gross Vehicle Weight ranges on commercial-vehicle grids (GCV / GCCV / MSV / bus / truck / pickup). Labels appear as row/column headers or as product-name slugs like `"UPTO 3.5T"`, `"3.5T TO 7.5T"`, `"7.5T TO 12T"`, `"12T TO 16T"`, `"16T TO 20T"`, `"20T TO 40T"`, `"ABOVE 40T"`. Tonnage (`T`, `TON`, `TONNE`, `MT`) and kilogram (`KG`, `GVW`) units both occur. Copy the label verbatim — the transformer parses the range and converts tonnes to kilograms.
+
+- `"UPTO 3.5T"` → `conditions["gvw"] = "UPTO 3.5T"`
+- `"3.5T TO 7.5T"` → `conditions["gvw"] = "3.5T TO 7.5T"`
+- `"ABOVE 40T"` → `conditions["gvw"] = "ABOVE 40T"`
+- `"3501-7500 KG"` → `conditions["gvw"] = "3501-7500 KG"`
+
+If the GVW range is embedded inside a product/subclass slug (e.g. `"GCCV - UPTO 3.5T"`, `"2_UPTO_3.5T"`), split the slug: keep the product/subclass part in `product_name` or `conditions["vehicle_sub_class"]`, and put the weight range in `conditions["gvw"]`.
+
+**Never** put GVW ranges in `conditions["vehicle_sub_class"]` or `conditions["cc"]` — vehicle sub-class is body/usage type, and `cc` is engine displacement, not vehicle weight.
+
 ### `conditions["vehicle_sub_class"]`
 
 Populate when section or product name explicitly identifies a body/usage sub-class.

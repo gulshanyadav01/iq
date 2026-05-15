@@ -121,6 +121,16 @@ extract_notes(tables) -> str
 parse_cc_range(header) -> str
     "150cc" -> "150", "150-350cc" -> "150-350", "> 16 KW" -> ">16",
     "7 KW Bike" -> "7", "SCOOTER" -> "", "Hero OEM" -> "".
+
+parse_gvw_range(header) -> str
+    "UPTO 3.5T" -> "UPTO 3.5T", "3.5T TO 7.5T" -> "3.5T TO 7.5T",
+    "12T TO 16T" -> "12T TO 16T", "ABOVE 40T" -> "ABOVE 40T",
+    "3500-7500 KG" -> "3500-7500 KG", "GVW < 2000" -> "GVW < 2000",
+    "2_UPTO_3.5T" -> "2_UPTO_3.5T", "GCCV" -> "", "SCOOTER" -> "",
+    "150cc" -> "" (CC headers belong in parse_cc_range).
+    Returns the verbatim label when the header encodes a GVW range
+    (tonne, kg, or qualified). Pass through unchanged to conditions["gvw"];
+    the transformer parses the numeric range and converts T to kg.
 ```
 
 ---
@@ -133,6 +143,7 @@ Some commission tables use 2–4 header rows encoding multiple dimensions (e.g. 
 
 - Inspect ALL header rows to understand what each column encodes before writing parsing logic.
 - Use `parse_cc_range(header)` on each column header to detect CC/KW ranges. If it returns a non-empty string, store it as `conditions["cc"]`.
+- Use `parse_gvw_range(header)` on commercial-vehicle headers to detect Gross Vehicle Weight ranges (tonne or kg). If it returns a non-empty string, store it verbatim as `conditions["gvw"]` — the transformer converts tonnes to kilograms.
 - If a header is a brand/make name (no digits, not a CC range), store it as `conditions["vehicle_make"]`.
 - If a header identifies a vehicle sub-class (e.g. "SCOOTER", "BIKE", "BUS"), store it as `conditions["vehicle_sub_class"]`.
 - A single column may encode multiple dimensions (e.g. "7 KW Bike" = cc + sub-class); split and assign each to its canonical key.

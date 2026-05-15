@@ -1,0 +1,176 @@
+services:
+  auth:
+    image: rhobotsai/auth:latest
+    command: [ "start" ]
+    ports:
+      - ${PORT}:${PORT}
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: ${PORT:-10000}
+      BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:10000}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-myauthsecret}
+      TRUSTED_ORIGINS: ${TRUSTED_ORIGINS:-http://localhost:3000}
+      DATABASE_STRING: ${DATABASE_STRING:-postgres://postgres:postgres@postgres:5432/auth}
+      REQUIRE_EMAIL_VERIFICATION: ${REQUIRE_EMAIL_VERIFICATION:-false}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minio}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-miniosecret}
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      AWS_STORAGE_BUCKET_NAME: ${AWS_STORAGE_BUCKET_NAME:-operator}
+      AWS_SENDER_EMAIL: ${AWS_SENDER_EMAIL:-}
+      WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:-mywebhooksecretkey}
+      WEBHOOK_EP: ${WEBHOOK_EP:-http://backend:8000/api/auth/webhook/}
+    restart: always
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:10000/api/auth/ok" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  backend:
+    build:
+      dockerfile: ./backend/Dockerfile
+      context: .
+    image: insure-iq-backend:latest
+    command: ["bash", "./entrypoint.sh", "prod"]
+    ports:
+      - "${API_PORT}:8000"
+    volumes:
+      - operator-static:/app/static
+    environment: &backend-env
+      DEBUG:  ${DEBUG:-false}
+      APP_ENV: ${APP_ENV:-PROD}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required in production}
+      WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:?WEBHOOK_SECRET_KEY is required in production}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*,}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://localhost:3000,}
+      HOST_NAME: ${HOST_NAME:-http://localhost:8000}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://auth:10000}
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_NAME: ${DB_NAME:-insure_iq}
+      AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-}
+      AWS_S3_PUBLIC_ENDPOINT_URL: ${AWS_S3_PUBLIC_ENDPOINT_URL:-}
+      AWS_S3_ADDRESSING_STYLE: ${AWS_S3_ADDRESSING_STYLE:-virtual}
+      AWS_S3_SIGNATURE_VERSION: ${AWS_S3_SIGNATURE_VERSION:-s3v4}
+      AWS_QUERYSTRING_EXPIRE: ${AWS_QUERYSTRING_EXPIRE:-3600}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_STORAGE_BUCKET_NAME: ${AWS_STORAGE_BUCKET_NAME:-}
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-django-db}
+      CELERY_CACHE_BACKEND: ${CELERY_CACHE_BACKEND:-django-cache}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      MINERVA_API_URL: ${MINERVA_API_URL:-}
+      POLICY_EXTRACT_CALLBACK_URL: ${POLICY_EXTRACT_CALLBACK_URL:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      EXCEL_AI_CLASSIFICATION_ENABLED: ${EXCEL_AI_CLASSIFICATION_ENABLED:-true}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  celery:
+    image: insure-iq-backend:latest
+    command: ["bash", "./entrypoint.sh", "celery"]
+    environment:
+      <<: *backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+
+  celery_policy_extract:
+    image: insure-iq-backend:latest
+    command: ["bash", "./entrypoint.sh", "celery-policy-extract"]
+    environment:
+      <<: *backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+
+  celery_commission_intake:
+    image: insure-iq-backend:latest
+    command: ["bash", "./entrypoint.sh", "celery-commission-intake"]
+    environment:
+      <<: *backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+
+  beat:
+    image: insure-iq-backend:latest
+    command: ["bash", "./entrypoint.sh", "beat"]
+    environment:
+      <<: *backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+
+  web:
+    image: insure-iq-web:latest
+    build:
+      dockerfile: ./web/Dockerfile
+      context: .
+      args:
+        - NODE_ENV=${NODE_ENV:-development}
+        - NUXT_PUBLIC_AUTH_BASE_URL=${NUXT_PUBLIC_AUTH_BASE_URL:-http://localhost:10000}
+        - NUXT_PUBLIC_APP_BASE_URL=${NUXT_PUBLIC_APP_BASE_URL:-http://localhost:3000}
+        - NUXT_PUBLIC_API_SCHEME=${NUXT_PUBLIC_API_SCHEME:-http}
+        - NUXT_PUBLIC_API_BASE_URL=${NUXT_PUBLIC_API_BASE_URL:-localhost:8000}
+        - NUXT_PUBLIC_ENABLED_SOCIAL_PROVIDERS=${NUXT_PUBLIC_ENABLED_SOCIAL_PROVIDERS:-}
+        - NUXT_APP_BASE_URL=${NUXT_APP_BASE_URL:-/}
+    ports:
+      - "${APP_PORT}:3000"
+    depends_on:
+      - backend
+    restart: always
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./conf/nginx/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - operator-static:/app/static:ro
+    environment:
+      - SERVER_NAME=${SERVER_NAME:-localhost}
+    depends_on:
+      - auth
+      - backend
+      - web
+    restart: always
+    healthcheck:
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:80/" ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+networks:
+  default:
+    name: insure_iq_network
+
+volumes:
+  operator-static:
+    driver: local

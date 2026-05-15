@@ -139,6 +139,62 @@ def parse_cc_range(header):
         return nums[0]
     return ""
 
+def parse_gvw_range(header):
+    \"\"\"
+    Detect a Gross Vehicle Weight range label on a commercial-vehicle grid
+    header (or product/subclass slug). Returns the verbatim label when the
+    header encodes a GVW range, else ''.
+
+    Examples:
+        'UPTO 3.5T'      -> 'UPTO 3.5T'
+        '3.5T TO 7.5T'   -> '3.5T TO 7.5T'
+        '12T TO 16T'     -> '12T TO 16T'
+        'ABOVE 40T'      -> 'ABOVE 40T'
+        '3500-7500 KG'   -> '3500-7500 KG'
+        'GVW < 2000'     -> 'GVW < 2000'
+        '2_UPTO_3.5T'    -> '2_UPTO_3.5T'
+        'GCCV'           -> ''
+        'SCOOTER'        -> ''
+        '150cc'          -> ''  (use parse_cc_range for CC headers)
+
+    Pass the verbatim label through to conditions['gvw']; the transformer
+    parses the numeric range and converts tonnes to kilograms.
+    \"\"\"
+    if header is None:
+        return ""
+    h = str(header).strip()
+    if not h:
+        return ""
+    hu = h.upper().replace("_", " ")
+    if not any(c.isdigit() for c in hu):
+        return ""
+    # Reject CC/KW engine-displacement headers — those belong to parse_cc_range.
+    if "CC" in hu.split() or hu.endswith("CC") or "KW" in hu.split() or hu.endswith("KW"):
+        return ""
+    # Strong indicators: explicit GVW or KG unit.
+    if "GVW" in hu or "KG" in hu:
+        return h
+    # Tonnage scan: a digit immediately followed by 'T' that is not part of
+    # another word (e.g. 'TO', 'TRACTOR'). Allow optional whitespace.
+    i = 0
+    while i < len(hu):
+        if hu[i] == "T":
+            prev = hu[i - 1] if i > 0 else ""
+            # Look back across optional spaces for a digit.
+            j = i - 1
+            while j >= 0 and hu[j] == " ":
+                j -= 1
+            prev_digit = j >= 0 and hu[j].isdigit()
+            nxt = hu[i + 1] if i + 1 < len(hu) else ""
+            if prev_digit and not nxt.isalpha():
+                return h
+        i += 1
+    # Range / qualifier with at least one digit.
+    qualifiers = ("UPTO", "UP TO", "ABOVE", "BELOW", "GREATER THAN", "MORE THAN", "LESS THAN", ">", "<")
+    if any(q in hu for q in qualifiers):
+        return h
+    return ""
+
 def get_entry_type(table_name, header):
     tl = table_name.lower()
     hl = " ".join(header).lower()

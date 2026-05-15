@@ -3,5 +3,6 @@
         "setup": "pnpm i && pnpm setup:env --force",
         "remoteSetup": "pnpm i && pnpm setup:env --force",
         "run": "pnpm dev:down && pnpm dev:up"
-    }
+    },
+    "runScriptMode": "concurrent"
 }

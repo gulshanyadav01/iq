@@ -1058,7 +1058,9 @@ class RawToCICSTransformer:
         elif gvw_start is None:
             gvw_start = 0
         elif gvw_end is None:
-            gvw_end = 0
+            # Open-ended upper bound ("ABOVE 40T") — use the canonical
+            # gvwRange ceiling from PRODUCT_FIELD_VALUES.md (999999 kg).
+            gvw_end = 999999
 
         cc_start, cc_end = self._parse_range_field(entry_conditions.get("cc"))
         if cc_start is None and cc_end is None:
@@ -1200,37 +1202,77 @@ class RawToCICSTransformer:
     def _parse_range_field(
         self, text: Optional[str]
     ) -> Tuple[Optional[int], Optional[int]]:
-        """Parse a range text into start/end integers."""
+        """Parse a range text into start/end integers.
+
+        Handles decimals and tonnage units. Tonnage suffixes (T, TON, TONNE,
+        TONNES, MT) trigger a ×1000 conversion so commercial-vehicle GVW
+        labels like "UPTO 3.5T" land on 3500 kg, matching the canonical
+        gvwRange buckets in PRODUCT_FIELD_VALUES.md. Underscore separators
+        from indexer slugs ("3.5T_TO_7.5T") are normalised to whitespace
+        before pattern matching.
+        """
         if text is None:
             return None, None
         if isinstance(text, dict):
             return text.get("min"), text.get("max")
 
         text_str = str(text).strip()
+        if not text_str:
+            return None, None
 
-        # Pattern: "1-2500" or "1 - 2500" or "1 to 2500"
+        # Normalise indexer slug separators ("3.5T_TO_7.5T" -> "3.5T TO 7.5T").
+        normalized = text_str.replace("_", " ")
+
+        # Tonnage detection: a digit immediately followed (optional whitespace)
+        # by T / TON / TONNE / TONNES / MT at a word boundary. Word-boundary
+        # guard prevents "TO", "TRACTOR", "TOTAL" from triggering.
+        tonne_pattern = r"\d\s*(?:TONNES|TONNE|TONS|TON|MT|T)\b"
+        multiplier = 1000 if re.search(tonne_pattern, normalized, re.IGNORECASE) else 1
+
+        # Strip tonnage units attached to numbers so the range regexes see
+        # plain decimals ("3.5T TO 7.5T" -> "3.5 TO 7.5").
+        stripped = re.sub(
+            r"(\d+(?:\.\d+)?)\s*(?:TONNES|TONNE|TONS|TON|MT|T)\b",
+            r"\1",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+
+        def _to_int(num: str) -> int:
+            return int(round(float(num) * multiplier))
+
+        # Pattern: "1-2500", "1 – 2500", "1 to 2500", "3.5 TO 7.5".
         range_match = re.search(
-            r"(\d+)\s*[-–to]+\s*(\d+)", text_str, re.IGNORECASE
+            r"(\d+(?:\.\d+)?)\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)",
+            stripped,
+            re.IGNORECASE,
         )
         if range_match:
-            return int(range_match.group(1)), int(range_match.group(2))
+            return _to_int(range_match.group(1)), _to_int(range_match.group(2))
 
-        # Pattern: "> 12" or ">= 12" or "above 12"
+        # Pattern: "> 12", ">= 12", "above 12", "above 20T".
         above_match = re.search(
-            r"(?:>|>=|above|greater than|more than)\s*(\d+)", text_str, re.IGNORECASE
+            r"(?:>=|>|above|greater than|more than)\s*(\d+(?:\.\d+)?)",
+            stripped,
+            re.IGNORECASE,
         )
         if above_match:
-            return int(above_match.group(1)), None
+            return _to_int(above_match.group(1)), None
 
-        # Pattern: "< 12" or "<= 12" or "upto 12" or "up to 12"
-        below_match = re.search(r"(?:<|<=|below|less than|upto|up to)\s*(\d+)", text_str, re.IGNORECASE)
+        # Pattern: "< 12", "<= 12", "upto 12", "up to 12", "UPTO 3.5T".
+        below_match = re.search(
+            r"(?:<=|<|below|less than|upto|up to)\s*(\d+(?:\.\d+)?)",
+            stripped,
+            re.IGNORECASE,
+        )
         if below_match:
-            return None, int(below_match.group(1))
+            return None, _to_int(below_match.group(1))
 
-        # Single number
-        single_match = re.match(r"^\d+$", text_str)
+        # Single bare number (optionally decimal). Use fullmatch so we don't
+        # accidentally swallow a fragment from a larger string.
+        single_match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*", stripped)
         if single_match:
-            val = int(text_str)
+            val = _to_int(single_match.group(1))
             return val, val
 
         return None, None
