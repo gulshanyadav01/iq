@@ -63,6 +63,7 @@ Controlled by `LLM_PROVIDER` env var (default: `"gemini"`). Options: `"gemini"`,
 - **`ProductCatalogExtraction` is a backward-compat alias** for `MasterDataExtraction` (`extraction_passes.py:370`).
 - **Large documents fall back to code-gen** — when input exceeds size thresholds (`llm_extract.py:30-36`), the pipeline asks the LLM to generate Python code instead of JSON, executed safely by `code_gen_executor.py`.
 - **Langfuse tracing** is integrated via `processors/llm_services/langfuse_client.py`. Controlled by `LANGFUSE_*` env vars.
+- **Pass 0C output is not trusted verbatim** — the prompt's "Shared Header Rule" makes the LLM emit cumulative `end_row` values for stacked sub-tables under one shared column-header block. `detect_csv_tables` post-processes raw boundaries through `_dedupe_overlapping_table_ranges` to (a) reshape cumulative siblings into "header band + own data band" using `metadata.formatting.detected_header_rows`, and (b) clip classic overlaps. Only `table_type == 'commission'` is touched; `master` / `notes` are preserved. The dedupe pass is load-bearing: regressions silently inflate rule counts by 5–10× without surfacing any validation error. Contract is pinned by `cins/tests/test_table_dedupe.py`.
 
 ## Things an agent might get wrong
 

@@ -1053,7 +1053,12 @@ class ContentIndexer:
                                 else content_str
                             )
                             tables_list, detection_meta = detect_csv_tables(
-                                raw_csv_content, sheet_name, service
+                                raw_csv_content,
+                                sheet_name,
+                                service,
+                                header_row_count=sheet_header_row_counts.get(
+                                    sheet_name, 0
+                                ),
                             )
 
                             if detection_meta.get("fallback") or not tables_list:

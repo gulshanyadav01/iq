@@ -42,3 +42,14 @@ Entry point: `processors/core/pipeline.py`
 - **LLM calls are expensive** — add new passes only if strictly necessary; prefer extending an existing pass prompt over adding a new pass
 - **Prompt templates use Jinja2** — keep logic minimal in templates; heavy pre-processing belongs in `content/prepare_prompt.py`
 - **Sheet classification** (`extractors/sheet_classifier.py`) determines which sheets feed which passes — changes here affect the entire pipeline
+- **Pass 0C table boundaries are not safe to trust verbatim** — the prompt's "Shared Header Rule" makes the LLM emit cumulative `end_row` values for stacked sub-tables under one shared column-header block (one Two-Wheeler grid produced 24,006 rules instead of ~3,000 before the fix). `detect_csv_tables` post-processes raw LLM boundaries through `_dedupe_overlapping_table_ranges`, which (a) reshapes cumulative siblings — same `(start_row, col band)`, monotonic `end_row` — to "shared header band + own data band" using `header_row_count` from `metadata.formatting.detected_header_rows`, and (b) clips classic overlaps where a later commission table's `start_row` falls inside the prior table's range. Only `table_type == 'commission'` is reshaped; `master` and `notes` are left intact. See `cins/tests/test_table_dedupe.py` for the contract.
+
+## When changing Pass 0C
+
+Before touching `pass0c_table_detection_prompt.md`, `content_cleaning.detect_csv_tables`, or `indexer.py`'s table-split block, read the rationale at the top of `_dedupe_overlapping_table_ranges`. Any change that
+
+- alters the meaning of `start_row` / `end_row` in the response schema,
+- removes the column-band guard (`start_col` / `end_col`),
+- drops the `table_type` filter,
+
+must come with a new fixture in `test_table_dedupe.py` and a documented rationale here. The dedupe pass is load-bearing: a regression silently inflates rule counts by 5-10x without surfacing any validation error.
