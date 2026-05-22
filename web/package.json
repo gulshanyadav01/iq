@@ -28,6 +28,7 @@
     "markdown-it": "^14.1.0",
     "mermaid": "^11.10.0",
     "nuxt": "^4.0.3",
+    "pdfjs-dist": "^4.7.76",
     "pinia": "^3.0.3",
     "serve": "14.2.4",
     "std-env": "^3.9.0",

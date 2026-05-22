@@ -91,6 +91,7 @@ INSTALLED_APPS = [
     'accounts',
     'core',
     'policy_extract',
+    'pipelines',
     'commission_intake',
     'master_data',
     'system'

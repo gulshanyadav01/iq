@@ -70,6 +70,33 @@ html {
   }
 }
 
+/* ── MD viewer: bare HTML from Minerva tables ─────────────────── */
+.md-html table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  margin: 0.25rem 0;
+}
+.md-html th,
+.md-html td {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  padding: 4px 6px;
+  vertical-align: top;
+  text-align: left;
+  white-space: pre-wrap;
+}
+.dark .md-html th,
+.dark .md-html td {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+.md-html th {
+  background: rgba(0, 0, 0, 0.04);
+  font-weight: 600;
+}
+.dark .md-html th {
+  background: rgba(255, 255, 255, 0.05);
+}
+
 /* ── Reduced motion ───────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
