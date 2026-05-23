@@ -13,7 +13,7 @@ Key simplifications:
 - Flat source traceability - just section and quoted text
 """
 
-from typing import Dict, List
+from typing import Any, Dict, List
 from pydantic import BaseModel, Field
 
 
@@ -97,6 +97,15 @@ class RawCommissionEntry(BaseModel):
             "(e.g., 'tourist permit only', 'corporate-registered vehicles'). "
             "Do NOT use for dimensions that fit as key-value pairs — use conditions dict instead. "
             "Do NOT put footnote definitions here."
+        ),
+    )
+    qualifying_clauses: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Structured machine-ingestable representation of footnote / notes-table "
+            "clauses that modify this rule's outcome (applied_on override, conditional "
+            "deduction, grid alias, mandatory requirement, etc.). Each item: "
+            "{clause_type, text, when?, effect?}. See pass3_rules_prompt.md for shape."
         ),
     )
 

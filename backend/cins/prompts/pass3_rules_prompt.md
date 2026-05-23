@@ -118,6 +118,30 @@ If the GVW range is embedded inside a product/subclass slug (e.g. `"GCCV - UPTO 
 
 **Never** put GVW ranges in `conditions["vehicle_sub_class"]` or `conditions["cc"]` — vehicle sub-class is body/usage type, and `cc` is engine displacement, not vehicle weight.
 
+### `conditions["number_of_wheels"]`
+
+Use for the wheel-count dimension on commercial-vehicle grids (GCV / GCCV / PCV / PCCV). Canonical values: `"3W"` or `"4W & Above"`. The wheel category is often baked into the sheet/section/product slug rather than a per-row column header — extract it from there.
+
+- `"1_GCCV_3W"` (sheet name) → `conditions["number_of_wheels"] = "3W"`
+- `"GCCV 4W & ABOVE"` → `conditions["number_of_wheels"] = "4W & Above"`
+- `"PCV Three-Wheeler"` → `conditions["number_of_wheels"] = "3W"`
+- `"GCCV - UPTO 3.5T - 4W"` → `conditions["gvw"] = "UPTO 3.5T"`, `conditions["number_of_wheels"] = "4W"`
+
+If the sheet/product slug names only one wheel category, every rule extracted from that sheet inherits it — do not leave `number_of_wheels` blank. If the slug names neither (e.g. just `"GCCV"`), omit the field and the transformer will bifurcate the rule into both 3W and 4W & Above downstream.
+
+**Never** put wheel counts in `conditions["vehicle_sub_class"]` — sub-class is body/usage type, not axle count.
+
+### `conditions["policies_count"]`
+
+Use for **number of policies sold** tiers (NOP = "no. of policies"). Common on Chola Two-Wheeler grids where a `Type` row label encodes both business type and a policy-count tier — e.g. `"NEW(UPTO 30 NOP)"`, `"NEW(30-100 NOP)"`, `"NEW(100-500 NOP)"`. Split the qualifier off the business type:
+
+- `"NEW(UPTO 30 NOP)"` → `customer_type_text = "new"`, `conditions["policies_count"] = "UPTO 30"`
+- `"NEW(30-100 NOP)"` → `customer_type_text = "new"`, `conditions["policies_count"] = "30-100"`
+- `"NEW(100-500 NOP)"` → `customer_type_text = "new"`, `conditions["policies_count"] = "100-500"`
+- `"NEW(ABOVE 500 NOP)"` → `customer_type_text = "new"`, `conditions["policies_count"] = "ABOVE 500"`
+
+Copy the range label verbatim — the transformer parses it. **Never** silently drop the NOP qualifier; it differentiates rules that otherwise look identical and carries the actual commission tier.
+
 ### `conditions["vehicle_sub_class"]`
 
 Populate when section or product name explicitly identifies a body/usage sub-class.
@@ -128,6 +152,105 @@ Populate when section or product name explicitly identifies a body/usage sub-cla
 - `"Agri Tractor Comp."` → `"agricultural tractor"`
 
 Only populate if explicitly stated or unambiguously implied. Never use for engine CC ranges.
+
+### `conditions["fuel_type"]` — Chola Private Car suffix
+
+When the provider is `Chola` AND `product_name` is `"Private Car"`, the
+SUBCLASS / CC labels in Standalone OD grids carry a trailing fuel-type suffix
+in square brackets that MUST be parsed:
+
+- `[P]` (e.g. `UPTO 1000 CC[P]`, `ABOVE 1500 CC[P]`) → `conditions["fuel_type"] = "Petrol"`
+- `[D]` (e.g. `UPTO 1000 CC[D]`, `1000 TO 1500 CC[D]`) → `conditions["fuel_type"] = "Non Petrol"`
+
+Strip the suffix from the label before populating `conditions["cc"]`:
+`"UPTO 1000 CC[P]"` → `conditions = {"cc": "UPTO 1000 CC", "fuel_type": "Petrol"}`.
+
+This rule applies ONLY when provider is `Chola`. Other carriers do not use this
+convention — never parse `[P]` / `[D]` suffixes for any other provider. If the
+label has no suffix (e.g. Chola's Package grid uses plain `UPTO 1000 CC`),
+leave `fuel_type` unset.
+
+### `other_conditions` — Chola CPA deduction footnote
+
+When the provider is `Chola`, watch for a footnote/notes clause of the form
+"if CPA is not collected for individual name then 1.5% of OD Pay-out will be
+deducted" (wording varies — "without CPA", "CPA not opted", percentage and
+basis may differ). Capture the clause verbatim (or near-verbatim, ≤ 200 chars)
+in `other_conditions` on EVERY rule the clause applies to (typically every
+rule on the same sheet/section).
+
+This rule applies ONLY when provider is `Chola`. Do not invent equivalent
+footnotes for other carriers.
+
+### `qualifying_clauses` — structured machine-ingestable form
+
+Alongside the verbatim `other_conditions` text, emit a structured list of
+`qualifying_clauses` on every rule the clause applies to. Each clause is a
+dict the downstream booking pipeline ingests programmatically.
+
+Schema per clause: `{clause_type, text, when?, effect?}`.
+
+Recognized `clause_type` values and their expected payload shape:
+
+**`applied_on_override`** — "For X policy pay-out is on Y Premium"
+```json
+{
+  "clause_type": "applied_on_override",
+  "text": "Private Car Package pay-out is on OD Cover Premium",
+  "when": {"product_name": "Private Car", "coverage_type_text": "comprehensive"},
+  "effect": {"applied_on": "OD Cover Premium"}
+}
+```
+
+**`conditional_deduction`** — "if X then Y% of Z will be deducted"
+```json
+{
+  "clause_type": "conditional_deduction",
+  "text": "if CPA not collected for individual name, 1.5% of OD Pay-out deducted",
+  "when": {"product_name": "Private Car", "coverage_type_text": ["comprehensive", "saod", "third party"], "school_bus_type": "on-individual-name", "cpa": "without-cpa"},
+  "effect": {"deduction": {"value": 1.5, "value_type": "percentage", "applied_on": "OD Pay-out"}}
+}
+```
+
+**`grid_alias`** — "X grid is same as Y grid"
+```json
+{
+  "clause_type": "grid_alias",
+  "text": "Electric / LPG / CNG pay-out grid same as Petrol grid",
+  "when": {"product_name": "Private Car", "fuel_type": ["electric", "lpg", "cng"]},
+  "effect": {"inherit_from": {"fuel_type": "petrol"}}
+}
+```
+
+**`mandatory_requirement`** — "X is mandatory / X must be collected"
+```json
+{
+  "clause_type": "mandatory_requirement",
+  "text": "CPA must be collected for individual Name Mandatorily",
+  "when": {"product_name": "Private Car", "coverage_type_text": ["comprehensive", "saod", "third party"], "school_bus_type": "on-individual-name"},
+  "effect": {"required": ["cpa"]}
+}
+```
+
+**`minimum_payout`** — "minimum payout of Rs. X"
+```json
+{
+  "clause_type": "minimum_payout",
+  "text": "minimum payout Rs. 100",
+  "effect": {"minimum_payout": {"value": 100, "currency": "INR"}}
+}
+```
+
+**`other`** — anything else worth structuring. Set `text` and leave `when`/`effect` empty if you cannot infer a shape with confidence.
+
+Rules for emitting `qualifying_clauses`:
+
+- Use snake_case keys inside `when` matching `RuleConditions` field names (e.g. `coverage_type_text`, `school_bus_type`, `fuel_type`, `cpa`). Values use the same canonical lowercase forms the transformer expects (e.g. `"without-cpa"`, `"on-individual-name"`, `"comprehensive"`).
+- Put a list when the clause applies to multiple values (e.g. `["comprehensive", "saod", "third party"]`).
+- `text` is the source clause verbatim or trimmed near-verbatim (≤ 200 chars).
+- Emit the SAME clause on every rule it modifies. Do not emit it just once on a placeholder rule.
+- If unsure of the shape, emit only `{clause_type: "other", text: "..."}`. The verbatim text in `other_conditions` is the safety net.
+- Do NOT invent clauses that are not in the source. Empty list is correct when no qualifying footnotes exist.
 
 ### `commission_value`
 

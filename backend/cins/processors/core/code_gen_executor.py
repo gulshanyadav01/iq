@@ -120,8 +120,34 @@ def parse_cc_range(header):
     Extract a normalised CC or KW range string from a column header.
     Examples: '150cc' -> '150', '150-350cc' -> '150-350', '> 16 KW' -> '>16',
               '7 KW Bike' -> '7', 'SCOOTER' -> '', 'Hero OEM' -> ''.
+
+    Reject GVW-shaped headers ('UPTO 3.5T', '2_UPTO_3.5T', '3500 KG',
+    'ABOVE 40T') so they fall through to parse_gvw_range — otherwise the
+    indiscriminate digit-extraction below mangles tonnage slugs into junk
+    CC ranges (e.g. '2_UPTO_3.5T[Electric]' -> '2-3.5' -> cc=(2,4)).
+    Symmetric to the CC-rejection guard in parse_gvw_range.
     \"\"\"
+    if header is None:
+        return ""
     h = header.strip().upper()
+    if not h:
+        return ""
+    # GVW-shape guards: tonnage (digit + T at word boundary), explicit KG,
+    # or GVW marker. These belong to parse_gvw_range.
+    hu_norm = h.replace("_", " ")
+    if "GVW" in hu_norm or "KG" in hu_norm.split() or hu_norm.endswith(" KG"):
+        return ""
+    i = 0
+    while i < len(hu_norm):
+        if hu_norm[i] == "T":
+            j = i - 1
+            while j >= 0 and hu_norm[j] == " ":
+                j -= 1
+            prev_digit = j >= 0 and hu_norm[j].isdigit()
+            nxt = hu_norm[i + 1] if i + 1 < len(hu_norm) else ""
+            if prev_digit and not nxt.isalpha():
+                return ""
+        i += 1
     for unit in ("CC", "KW"):
         h = h.replace(unit, " ")
     h = h.strip()
@@ -194,6 +220,76 @@ def parse_gvw_range(header):
     if any(q in hu for q in qualifiers):
         return h
     return ""
+
+def parse_nop_range(label):
+    \"\"\"
+    Extract a number-of-policies range from a row label.
+
+    Examples:
+        'NEW(UPTO 30 NOP)'    -> 'UPTO 30'
+        'NEW(30-100 NOP)'     -> '30-100'
+        'NEW(100-500 NOP)'    -> '100-500'
+        'NEW(ABOVE 500 NOP)'  -> 'ABOVE 500'
+        'NEW UPTO 30 NOP'     -> 'UPTO 30'
+        'NEW'                 -> ''
+        'ANNUAL'              -> ''
+        ''                    -> ''
+
+    Returns the bare range string (no 'NOP' suffix) or '' when no NOP
+    qualifier is present. Pass through unchanged to conditions['policies_count'];
+    the transformer parses the numeric range.
+    \"\"\"
+    if not label:
+        return ''
+    s = str(label).strip().upper()
+    if 'NOP' not in s:
+        return ''
+    # Isolate the text between the last '(' before NOP and the closing ')',
+    # or the slice ending at NOP when parens are absent.
+    nop_idx = s.find('NOP')
+    open_idx = s.rfind('(', 0, nop_idx)
+    if open_idx != -1:
+        close_idx = s.find(')', nop_idx)
+        if close_idx == -1:
+            close_idx = len(s)
+        chunk = s[open_idx + 1:close_idx]
+    else:
+        chunk = s[:nop_idx]
+    # Strip the trailing NOP token.
+    nop_pos = chunk.rfind('NOP')
+    if nop_pos != -1:
+        chunk = chunk[:nop_pos]
+    chunk = chunk.replace('\\u2013', '-').strip()
+    if not chunk:
+        return ''
+    # When parens are absent the chunk may carry a leading prefix like
+    # "NEW " before the actual range. Drop tokens until we hit something
+    # that looks like a range start (UPTO / ABOVE / a digit).
+    tokens = chunk.split()
+    while tokens and tokens[0] not in ('UPTO', 'ABOVE', 'BELOW', 'UP', 'LESS') \\
+            and not tokens[0][0].isdigit():
+        tokens.pop(0)
+    chunk = ' '.join(tokens).strip()
+    if not chunk:
+        return ''
+    # Normalise 'X to Y' to 'X-Y'. Word-bounded match to avoid eating
+    # 'UPTO' / 'ABOVE'.
+    parts = chunk.split()
+    normalised = []
+    i = 0
+    while i < len(parts):
+        token = parts[i]
+        if token == 'TO' and 0 < i < len(parts) - 1 and any(c.isdigit() for c in parts[i - 1]) and any(c.isdigit() for c in parts[i + 1]):
+            normalised[-1] = normalised[-1] + '-' + parts[i + 1]
+            i += 2
+            continue
+        normalised.append(token)
+        i += 1
+    chunk = ' '.join(normalised).strip()
+    # Collapse spaces around '-' between digits.
+    if '-' in chunk and chunk[0].isdigit():
+        chunk = chunk.replace(' - ', '-').replace(' -', '-').replace('- ', '-')
+    return chunk
 
 def get_entry_type(table_name, header):
     tl = table_name.lower()
@@ -317,6 +413,131 @@ def extract_rto_entries(table_name, header, data_rows, applies_to_hint):
     return entries
 
 """
+
+# ---------------------------------------------------------------------------
+# Host-side helper: detect_qualifying_clauses
+#
+# Scans the notes/master text blob and returns a structured list of
+# {clause_type, text, when?, effect?} entries. Injected into the codegen
+# sandbox alongside the markdown helpers so generated code can call it
+# without importing `re` (sandbox forbids imports).
+#
+# Patterns are extended over time as new carrier footnotes are observed.
+# Add a new regex + clause builder here; keep the schema stable.
+# ---------------------------------------------------------------------------
+
+import re as _re_clause
+
+_RE_APPLIED_ON_PACKAGE = _re_clause.compile(
+    r"private\s*car\s*package.*?pay-?out.*?on\s+OD\s*Cover\s*Premium",
+    _re_clause.IGNORECASE,
+)
+_RE_APPLIED_ON_LIABILITY = _re_clause.compile(
+    r"private\s*car\s*liability.*?pay-?out.*?on\s+TP\s*/?\s*PA\s*Premium",
+    _re_clause.IGNORECASE,
+)
+_RE_CPA_DEDUCTION = _re_clause.compile(
+    r"CPA\s+(?:is\s+)?not\s+collected.*?individual.*?(\d+(?:\.\d+)?)\s*%.*?OD\s*Pay-?out.*?deduct",
+    _re_clause.IGNORECASE,
+)
+_RE_CPA_MANDATORY = _re_clause.compile(
+    r"CPA\s+should\s+be\s+collected\s+for\s+individual\s+Name\s+Mandator",
+    _re_clause.IGNORECASE,
+)
+_RE_GRID_ALIAS_EV = _re_clause.compile(
+    r"(electric\s*vehicle|EV).*?(LPG|CNG).*?pay-?out\s*grid.*?same\s*as.*?petrol",
+    _re_clause.IGNORECASE,
+)
+
+
+def detect_qualifying_clauses(notes_text, provider=""):
+    """Scan free-text notes for known qualifying-clause shapes.
+
+    Returns a list of {clause_type, text, when?, effect?} dicts the
+    downstream pipeline can ingest programmatically. Empty list when the
+    input is empty or no clause matches.
+
+    Stable per (notes_text, provider) — same input always returns same list.
+
+    Recognised clause shapes (extend by adding to the patterns above):
+      - applied_on_override     : "Private Car Package pay-out is on OD Cover Premium"
+      - applied_on_override     : "Private Car Liability pay-out is on TP/PA Premium"
+      - conditional_deduction   : "if CPA not collected for individual name, X% of OD Pay-out deducted"
+      - mandatory_requirement   : "CPA should be collected for individual Name Mandatorily"
+      - grid_alias              : "Private Car Electric Vehicle or LPG/CNG pay-out grid is same as Private Car Petrol grid"
+    """
+    if not notes_text:
+        return []
+    text = " ".join(str(notes_text).split())  # collapse whitespace
+    clauses = []
+
+    if _RE_APPLIED_ON_PACKAGE.search(text):
+        clauses.append({
+            "clause_type": "applied_on_override",
+            "text": "Private Car Package pay-out is on OD Cover Premium",
+            "when": {"product_name": "Private Car", "coverage_type_text": "comprehensive"},
+            "effect": {"applied_on": "OD Cover Premium"},
+        })
+
+    if _RE_APPLIED_ON_LIABILITY.search(text):
+        clauses.append({
+            "clause_type": "applied_on_override",
+            "text": "Private Car Liability pay-out is on TP/PA Premium",
+            "when": {"product_name": "Private Car", "coverage_type_text": "third party"},
+            "effect": {"applied_on": "TP/PA Premium"},
+        })
+
+    m = _RE_CPA_DEDUCTION.search(text)
+    if m:
+        pct_str = m.group(1)
+        try:
+            pct = float(pct_str)
+        except (ValueError, TypeError):
+            pct = None
+        if pct is not None:
+            clauses.append({
+                "clause_type": "conditional_deduction",
+                "text": (
+                    "if CPA is not collected for individual name then "
+                    + pct_str
+                    + "% of OD Pay-out will be deducted"
+                ),
+                "when": {
+                    "product_name": "Private Car",
+                    "coverage_type_text": ["comprehensive", "saod", "third party"],
+                    "school_bus_type": "on-individual-name",
+                    "cpa": "without-cpa",
+                },
+                "effect": {
+                    "deduction": {
+                        "value": pct,
+                        "value_type": "percentage",
+                        "applied_on": "OD Pay-out",
+                    }
+                },
+            })
+
+    if _RE_CPA_MANDATORY.search(text):
+        clauses.append({
+            "clause_type": "mandatory_requirement",
+            "text": "CPA should be collected for individual Name Mandatorily",
+            "when": {
+                "product_name": "Private Car",
+                "coverage_type_text": ["comprehensive", "saod", "third party"],
+                "school_bus_type": "on-individual-name",
+            },
+            "effect": {"required": ["cpa"]},
+        })
+
+    if _RE_GRID_ALIAS_EV.search(text):
+        clauses.append({
+            "clause_type": "grid_alias",
+            "text": "Private Car Electric Vehicle or LPG/CNG pay-out grid is same as Private Car Petrol grid",
+            "when": {"product_name": "Private Car", "fuel_type": ["electric", "lpg", "cng"]},
+            "effect": {"inherit_from": {"fuel_type": "petrol"}},
+        })
+
+    return clauses
 
 
 class CodeGenExecutionError(Exception):
@@ -460,6 +681,12 @@ def execute_entry_code(
     # otherwise comprehensions can't see variables assigned at the top level.
     safe_globals["commission_markdown"] = commission_markdown
     exec(compile(_SANDBOX_HELPERS, "<helpers>", "exec"), safe_globals)  # noqa: S102
+
+    # Inject host-side helpers that need imports the sandbox forbids (e.g.
+    # `detect_qualifying_clauses` uses `re`). The bound function carries its
+    # own closure to the compiled patterns, so codegen can call it without
+    # writing `import re`.
+    safe_globals["detect_qualifying_clauses"] = detect_qualifying_clauses
 
     # Execution result container (shared between threads)
     exec_result = {"error": None, "done": False}

@@ -184,6 +184,7 @@ class RuleOverlapChecker:
             ("gvw_start_range", "gvw_end_range", "gvw"),
             ("cc_start_range", "cc_end_range", "cc"),
             ("seating_capacity_start_range", "seating_capacity_end_range", "seating_capacity"),
+            ("policies_count_start_range", "policies_count_end_range", "policies_count"),
         ]
         for start_key, end_key, label in range_pairs:
             if (start_key in conditions1 or end_key in conditions1) and \

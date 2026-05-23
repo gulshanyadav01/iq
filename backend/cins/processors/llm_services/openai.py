@@ -356,9 +356,14 @@ class OpenAIService(LLMServiceMixin):
     # Factory methods for common configurations
     @staticmethod
     def config_for_extraction() -> OpenAIConfig:
-        """Configuration optimized for commission data extraction"""
+        """Configuration optimized for commission data extraction.
+
+        temperature=0 for rule-count stability across reruns. Matches the
+        Gemini / Anthropic extraction configs. Residual serving-side jitter
+        remains; downstream collapse + dedupe absorbs most of it.
+        """
         return OpenAIConfig(
-            temperature=0.3,
+            temperature=0,
             top_p=0.95,
             max_completion_tokens=16000,
         )
@@ -367,7 +372,7 @@ class OpenAIService(LLMServiceMixin):
     def config_for_raw_extraction() -> OpenAIConfig:
         """Configuration for raw extraction"""
         return OpenAIConfig(
-            temperature=0.3,
+            temperature=0,
             top_p=0.95,
             max_completion_tokens=16000,
         )
@@ -390,9 +395,13 @@ class OpenAIService(LLMServiceMixin):
 
     @staticmethod
     def config_for_code_generation() -> OpenAIConfig:
-        """Configuration for code-generation fallback (plain text output, no JSON mode)"""
+        """Configuration for code-generation fallback (plain text output, no JSON mode).
+
+        Codegen needs deterministic Python output; LLM jitter at >0 produces
+        different parser code each run and inflates rule-count variance.
+        """
         return OpenAIConfig(
-            temperature=0.2,
+            temperature=0,
             top_p=0.95,
             response_format=None,
             max_completion_tokens=16000,

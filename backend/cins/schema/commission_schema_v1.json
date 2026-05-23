@@ -349,6 +349,14 @@
           "type": "integer",
           "description": "End of seating capacity range"
         },
+        "policies_count_start_range": {
+          "type": "integer",
+          "description": "Start of policies-count range (number of policies sold tier, e.g. 'UPTO 30 NOP', '30-100 NOP', '100-500 NOP')"
+        },
+        "policies_count_end_range": {
+          "type": "integer",
+          "description": "End of policies-count range"
+        },
         "school_bus_type": {
           "type": "array",
           "items": {
@@ -520,6 +528,43 @@
         "calculation_notes": {
           "type": "string",
           "description": "Additional calculation instructions or notes"
+        },
+        "applied_on": {
+          "type": "string",
+          "description": "What the commission is applied on (e.g., 'OD Premium', 'Total Premium', 'GWP')"
+        },
+        "other_conditions": {
+          "type": "string",
+          "description": "Free-text qualifying conditions or footnotes from the source — verbatim, for human review"
+        },
+        "qualifying_clauses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QualifyingClause"
+          },
+          "description": "Structured machine-ingestable representation of footnote/notes clauses that modify this outcome"
+        }
+      }
+    },
+    "QualifyingClause": {
+      "type": "object",
+      "required": ["clause_type", "text"],
+      "properties": {
+        "clause_type": {
+          "type": "string",
+          "description": "Clause shape: 'applied_on_override', 'conditional_deduction', 'grid_alias', 'mandatory_requirement', 'minimum_payout', 'other'"
+        },
+        "text": {
+          "type": "string",
+          "description": "Verbatim (or near-verbatim) source clause text, ≤ 200 chars"
+        },
+        "when": {
+          "type": "object",
+          "description": "Conditions under which the clause applies"
+        },
+        "effect": {
+          "type": "object",
+          "description": "What the clause changes"
         }
       }
     },

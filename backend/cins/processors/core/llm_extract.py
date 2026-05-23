@@ -897,6 +897,7 @@ def _extract_pass3_via_codegen(
                 state_text=entry.state_text,
                 conditions=entry.conditions,
                 other_conditions=entry.other_conditions,
+                qualifying_clauses=getattr(entry, "qualifying_clauses", []) or [],
                 applied_on_text=entry.applied_on_text,
                 gst_applicable=entry.gst_applicable,
                 source_section=entry.source_section,

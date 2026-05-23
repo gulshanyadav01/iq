@@ -248,10 +248,8 @@ services:
       - ./postgres/scripts:/scripts
 volumes:
   postgres_data:
-    external: true
     name: insur-iq_postgres_data
   minio_data:
-    external: true
     name: insur-iq_minio_data
 
 networks:

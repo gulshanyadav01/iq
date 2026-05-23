@@ -112,6 +112,33 @@ set_kv TRUSTED_ORIGINS "http://localhost:${PROXY_PORT}"
 # MinIO direct (S3 public endpoint reached from host/browser).
 set_kv AWS_S3_PUBLIC_ENDPOINT_URL "http://localhost:${MINIO_HOST_PORT}"
 
+# Merge personal secrets overlay (API keys, OAuth client secrets, etc.) that
+# must never be committed. Override path via INSUR_IQ_SECRETS env var.
+SECRETS_FILE="${INSUR_IQ_SECRETS:-$HOME/.insur-iq/secrets.env}"
+if [ -f "$SECRETS_FILE" ]; then
+  merged_count=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Strip CR, skip blanks/comments.
+    line="${line%$'\r'}"
+    case "$line" in
+      ''|\#*) continue ;;
+    esac
+    key="${line%%=*}"
+    val="${line#*=}"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    if grep -qE "^${key}=" "$ENV_FILE"; then
+      set_kv "$key" "$val"
+    else
+      printf '%s=%s\n' "$key" "$val" >> "$ENV_FILE"
+    fi
+    merged_count=$((merged_count + 1))
+  done < "$SECRETS_FILE"
+  echo "🔑 Merged ${merged_count} secret(s) from ${SECRETS_FILE}"
+else
+  echo "ℹ️  No secrets overlay at ${SECRETS_FILE} — API keys left blank."
+  echo "   Create it (chmod 600) with KEY=value lines to auto-populate."
+fi
+
 echo "✅ Generated $ENV_FILE for workspace '${WORKSPACE_NAME}'"
 echo ""
 printf "  %-22s %s\n" "API_PORT"            "$API_PORT"

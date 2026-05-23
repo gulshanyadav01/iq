@@ -599,6 +599,7 @@ class SchemaValidator:
                         ("gvw_start_range", "gvw_end_range", "GVW"),
                         ("cc_start_range", "cc_end_range", "CC"),
                         ("seating_capacity_start_range", "seating_capacity_end_range", "Seating Capacity"),
+                        ("policies_count_start_range", "policies_count_end_range", "Policies Count"),
                     ]
                     for start_key, end_key, label in range_pairs:
                         start_val = conditions.get(start_key)

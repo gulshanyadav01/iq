@@ -18,6 +18,8 @@
 | CCEndRange | Yes | Yes | Yes |
 | SeatingCapacityStartRange | Yes | - | Yes |
 | SeatingCapacityEndRange | Yes | - | Yes |
+| PoliciesCountStartRange | - | Yes | - |
+| PoliciesCountEndRange | - | Yes | - |
 | SchoolBusType | Yes | - | Yes |
 | BookingMode | Yes | Yes | Yes |
 | ZeroDep | Yes | Yes | Yes |

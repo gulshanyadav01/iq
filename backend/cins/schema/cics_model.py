@@ -33,6 +33,8 @@ class RuleConditions(BaseModel):
     cc_end_range: Optional[int] = Field(None, description="End of engine CC range")
     seating_capacity_start_range: Optional[int] = Field(None, description="Start of seating capacity range")
     seating_capacity_end_range: Optional[int] = Field(None, description="End of seating capacity range")
+    policies_count_start_range: Optional[int] = Field(None, description="Start of policies-count range (number of policies sold tier, e.g. 'UPTO 30 NOP', '30-100 NOP', '100-500 NOP')")
+    policies_count_end_range: Optional[int] = Field(None, description="End of policies-count range")
     school_bus_type: Optional[List[str]] = Field(None, description="School bus type(s): on-individual-name, on-school-name, on-company-name, on-contract-transporter")
     booking_mode: Optional[List[str]] = Field(None, description="Booking mode(s): online, offline")
     zero_dep: Optional[str] = Field(None, description="Zero depreciation: yes, no")
@@ -85,6 +87,26 @@ class Deduction(BaseModel):
     conditions: Optional[str] = Field(None, description="Conditions for deduction application")
 
 
+class QualifyingClause(BaseModel):
+    """
+    Structured representation of a footnote / notes-table clause that
+    modifies how a commission rule is applied.
+
+    Free-text other_conditions captures the raw clause verbatim for human
+    review. qualifying_clauses adds a machine-ingestable shape so deal
+    management / booking pipelines can apply the modifier programmatically.
+
+    `when` and `effect` are intentionally loose dicts — clause shapes vary
+    by carrier and clause_type. Known clause_type values and their
+    expected payload shape are documented in
+    backend/cins/prompts/pass3_rules_prompt.md.
+    """
+    clause_type: str = Field(..., description="Clause shape: 'applied_on_override', 'conditional_deduction', 'grid_alias', 'mandatory_requirement', 'minimum_payout', 'other'")
+    text: str = Field(..., description="Verbatim (or near-verbatim) source clause text, ≤ 200 chars")
+    when: Optional[Dict[str, Any]] = Field(None, description="Conditions under which the clause applies (e.g., {'product': 'Private Car', 'cpa': 'without-cpa', 'school_bus_type': 'on-individual-name'})")
+    effect: Optional[Dict[str, Any]] = Field(None, description="What the clause changes (e.g., {'deduction': {'value': 1.5, 'value_type': 'percentage', 'applied_on': 'OD Pay-out'}})")
+
+
 class CommissionOutcome(BaseModel):
     """Commission outcome when conditions are met"""
     commission_type: Literal["percentage", "flat", "tiered", "hybrid"] = Field(..., description="Type of commission calculation")
@@ -98,6 +120,8 @@ class CommissionOutcome(BaseModel):
     gst_percentage: Optional[float] = Field(None, description="GST percentage if applicable")
     calculation_notes: Optional[str] = Field(None, description="Additional calculation instructions or notes")
     applied_on: Optional[str] = Field(None, description="What the commission is applied on (e.g., 'OD Premium', 'Total Premium', 'GWP')")
+    other_conditions: Optional[str] = Field(None, description="Free-text qualifying conditions or footnotes from the source — verbatim, for human review")
+    qualifying_clauses: Optional[List[QualifyingClause]] = Field(None, description="Structured machine-ingestable representation of footnote/notes clauses that modify this outcome")
 
 
 class CommissionRule(BaseModel):

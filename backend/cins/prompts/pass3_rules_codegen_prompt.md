@@ -70,10 +70,17 @@ state_text         (str) - state name or code as found in document
 conditions         (dict) - key-value for grid dimensions. Use ONLY these canonical keys:
                      "fuel_type", "ncb", "cpa", "zero_dep", "vehicle_sub_class", "vehicle_carrier",
                      "number_of_wheels", "school_bus_type", "cc", "gvw", "seating_capacity",
-                     "vehicle_age", "vehicle_make", "vehicle_model", "od_term", "tp_term",
-                     "deal_parameter", "rto"
+                     "policies_count", "vehicle_age", "vehicle_make", "vehicle_model",
+                     "od_term", "tp_term", "deal_parameter", "rto"
                      Do NOT invent keys outside this list
 other_conditions   (str) - free-text conditions that don't fit key-value structure
+qualifying_clauses (list[dict]) - structured machine-ingestable representation of
+                     footnote / notes-table clauses (applied_on overrides,
+                     conditional deductions, grid aliases, mandatory requirements,
+                     minimum payouts). Each item shape:
+                     {clause_type, text, when?, effect?}. See section
+                     "QUALIFYING CLAUSES" below for clause_type catalogue and
+                     payload shapes. Default: []
 applied_on_text    (str) - "Net Premium", "OD Premium", "Total Premium", ""
 gst_applicable     (bool) - True or False
 source_section     (str) - table name this rule came from
@@ -131,6 +138,23 @@ parse_gvw_range(header) -> str
     Returns the verbatim label when the header encodes a GVW range
     (tonne, kg, or qualified). Pass through unchanged to conditions["gvw"];
     the transformer parses the numeric range and converts T to kg.
+
+parse_nop_range(label) -> str
+    Extract a number-of-policies range from a row label such as
+    "NEW(UPTO 30 NOP)", "NEW(30-100 NOP)", "NEW(100-500 NOP)",
+    "NEW(ABOVE 500 NOP)". Returns the bare range string ("UPTO 30",
+    "30-100", "100-500", "ABOVE 500") or "" if the label carries no
+    NOP qualifier. Strip the qualifier off the business-type before
+    setting customer_type_text — the NOP range belongs in
+    conditions["policies_count"], not customer_type_text.
+
+detect_qualifying_clauses(notes_text, provider="") -> list[dict]
+    Scan free-text notes for known qualifying-clause shapes (applied_on
+    overrides, conditional deductions, grid aliases, mandatory
+    requirements, minimum payouts). Returns a list of
+    {clause_type, text, when?, effect?} dicts ready to attach to a
+    rule's qualifying_clauses field. Empty list when notes_text is
+    empty or no known clause matches.
 ```
 
 ---
@@ -165,6 +189,7 @@ After splitting tables, for each `[type: commission]` table:
 ```python
 tables = parse_md_tables(commission_markdown)
 notes_text = extract_notes(tables)
+qualifying_clauses = detect_qualifying_clauses(notes_text)
 result = []
 
 # Pull leading context (RTO mappings, global settings) — appears as the
@@ -238,6 +263,7 @@ for table_name, ttype, lines in tables:
                 "state_text": state,
                 "conditions": dict(base_conditions),
                 "other_conditions": notes_text,
+                "qualifying_clauses": list(qualifying_clauses),
                 "applied_on_text": "Net Premium",
                 "gst_applicable": False,
                 "source_section": table_name,
@@ -263,6 +289,171 @@ indices derived by inspecting the header rows from `commission_markdown`.**
 5. **One rule per grid cell** — each state × coverage × row combination = one dict in `result`.
 6. **result must be set** as a module-level variable (not inside a function, not returned).
 7. **Never use a raw column header abbreviation as `product_name`.** Always map to the canonical name from the `### product_name` list above (e.g., `"PCCV"` → `"Commercial Vehicle"`).
+
+---
+
+## CARRIER-SPECIFIC RULES
+
+### Chola — Private Car fuel-type suffix
+
+When `**Provider**` is `Chola` AND `product_name` resolves to `Private Car`, the
+SUBCLASS / CC labels in Chola's Standalone OD grids use a trailing fuel-type
+suffix in square brackets that MUST be parsed into `conditions["fuel_type"]`:
+
+- `[P]` (e.g. `UPTO 1000 CC[P]`, `1000 TO 1500 CC[P]`, `ABOVE 1500 CC[P]`) →
+  `conditions["fuel_type"] = "Petrol"`
+- `[D]` (e.g. `UPTO 1000 CC[D]`, `ABOVE 1500 CC[D]`) →
+  `conditions["fuel_type"] = "Non Petrol"`
+
+Strip the suffix from the label before passing it to `parse_cc_range` so the CC
+range parses cleanly (`"UPTO 1000 CC[P]"` → CC range `"UPTO 1000 CC"`,
+fuel_type `"Petrol"`).
+
+This rule applies ONLY when the provider is `Chola`. Other carriers' Private
+Car grids do not use this convention — do NOT parse `[P]` / `[D]` suffixes for
+any other provider.
+
+If the SUBCLASS label has NO `[P]` / `[D]` suffix (e.g. the Package grid uses
+plain `UPTO 1000 CC`), leave `fuel_type` unset — the rule applies to all fuel
+types.
+
+### Chola — CPA deduction footnote
+
+When `**Provider**` is `Chola`, the document often contains a notes/footnote
+clause of the form "if CPA is not collected for individual name then 1.5% of
+OD Pay-out will be deducted" (wording, percentage, and premium basis may
+vary). `extract_notes(tables)` will surface it in `notes_text`. Pass it
+through verbatim on every rule's `other_conditions` field — do NOT try to
+translate the clause into the rule's `commission_value` or `conditions`
+fields. The structured rule schema cannot model a customer-type-dependent
+percentage deduction off OD Pay-out at the rule level.
+
+Additionally emit a structured representation under `qualifying_clauses`
+(see section "QUALIFYING CLAUSES" below) so downstream booking pipelines
+can ingest the modifier programmatically.
+
+This rule applies ONLY when the provider is `Chola`. Do not invent
+equivalent footnotes for other carriers.
+
+---
+
+## QUALIFYING CLAUSES
+
+Alongside the verbatim `other_conditions` text, emit a structured list of
+`qualifying_clauses` on every rule the clause applies to. Each entry is a
+literal Python dict the downstream booking pipeline ingests directly.
+
+Build the structured list by **inspecting `notes_text` (and any
+`tables[0]` leading context)** for known clause shapes. Match on regex /
+keyword heuristics — do NOT hardcode the rule values, just recognize the
+clause shape and translate it into the canonical schema.
+
+Schema per clause: `{clause_type, text, when?, effect?}`.
+
+Recognized `clause_type` values:
+
+**`applied_on_override`** — phrasing: "For X policy pay-out is on Y Premium"
+```python
+{
+    "clause_type": "applied_on_override",
+    "text": "Private Car Package pay-out is on OD Cover Premium",
+    "when": {"product_name": "Private Car", "coverage_type_text": "comprehensive"},
+    "effect": {"applied_on": "OD Cover Premium"},
+}
+```
+
+**`conditional_deduction`** — phrasing: "if X then Y% of Z will be deducted"
+```python
+{
+    "clause_type": "conditional_deduction",
+    "text": "if CPA not collected for individual name, 1.5% of OD Pay-out deducted",
+    "when": {
+        "product_name": "Private Car",
+        "coverage_type_text": ["comprehensive", "saod", "third party"],
+        "school_bus_type": "on-individual-name",
+        "cpa": "without-cpa",
+    },
+    "effect": {
+        "deduction": {"value": 1.5, "value_type": "percentage", "applied_on": "OD Pay-out"}
+    },
+}
+```
+
+**`grid_alias`** — phrasing: "X grid is same as Y grid"
+```python
+{
+    "clause_type": "grid_alias",
+    "text": "Electric / LPG / CNG pay-out grid same as Petrol grid",
+    "when": {"product_name": "Private Car", "fuel_type": ["electric", "lpg", "cng"]},
+    "effect": {"inherit_from": {"fuel_type": "petrol"}},
+}
+```
+
+**`mandatory_requirement`** — phrasing: "X is mandatory / X must be collected"
+```python
+{
+    "clause_type": "mandatory_requirement",
+    "text": "CPA must be collected for individual Name Mandatorily",
+    "when": {"product_name": "Private Car", "school_bus_type": "on-individual-name"},
+    "effect": {"required": ["cpa"]},
+}
+```
+
+**`minimum_payout`** — phrasing: "minimum payout of Rs. X"
+```python
+{
+    "clause_type": "minimum_payout",
+    "text": "minimum payout Rs. 100",
+    "effect": {"minimum_payout": {"value": 100, "currency": "INR"}},
+}
+```
+
+**`other`** — anything else worth structuring. Set `text` and leave
+`when`/`effect` empty if the shape cannot be inferred with confidence.
+
+### Building the clauses list in code
+
+`detect_qualifying_clauses(notes_text, provider="")` is pre-injected. It
+scans the notes blob and returns the structured list above, ready to
+attach. **Always call it** for any sheet that has a notes/master table —
+do NOT write your own regex. The helper centralises clause patterns so
+extending the catalogue is a one-line change in host code, not a
+per-document codegen rewrite.
+
+```python
+notes_text = extract_notes(tables)
+qualifying_clauses = detect_qualifying_clauses(notes_text, provider="Chola")
+
+# Then attach on every rule the clauses apply to (typically every rule
+# in the sheet when the footnote sits at sheet level):
+for row in md_rows[len_of_header_rows:]:
+    ...
+    result.append({
+        ...,
+        "other_conditions": notes_text,
+        "qualifying_clauses": list(qualifying_clauses),  # copy per rule
+    })
+```
+
+The helper returns `[]` when notes_text is empty or no known clause
+matches. Pass the canonical provider short code (`Chola`, `Bajaj`, `HDFC`,
+…) from Pass 1 metadata so future carrier-specific detectors can fan out
+on it.
+
+Rules for emitting `qualifying_clauses`:
+
+- Use `list(qualifying_clauses)` per rule to copy so per-rule mutations
+  stay isolated.
+- Do NOT invent clauses not present in the source. Empty list is correct
+  when no qualifying footnotes exist.
+- Do NOT hand-roll regex inside generated code — extend
+  `detect_qualifying_clauses` in `code_gen_executor.py` when a new clause
+  shape appears.
+- Schema reminder: snake_case keys inside `when` matching
+  `RuleConditions` field names (`coverage_type_text`, `school_bus_type`,
+  `fuel_type`, `cpa`, etc.). Values use canonical lowercase forms
+  (`"without-cpa"`, `"on-individual-name"`, `"comprehensive"`). Use a
+  list when the clause applies to multiple values.
 
 ---
 

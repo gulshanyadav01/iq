@@ -223,11 +223,13 @@ class AnthropicService(LLMServiceMixin):
 
     @staticmethod
     def config_for_extraction() -> AnthropicConfig:
-        return AnthropicConfig(temperature=0.3, top_p=0.95, max_tokens=16000)
+        # temperature=0 for rule-count stability across reruns. Matches the
+        # Gemini extraction configs. Residual serving-side jitter remains.
+        return AnthropicConfig(temperature=0, top_p=0.95, max_tokens=16000)
 
     @staticmethod
     def config_for_raw_extraction() -> AnthropicConfig:
-        return AnthropicConfig(temperature=0.3, top_p=0.95, max_tokens=16000)
+        return AnthropicConfig(temperature=0, top_p=0.95, max_tokens=16000)
 
     @staticmethod
     def config_for_layout_detection() -> AnthropicConfig:
@@ -239,4 +241,6 @@ class AnthropicService(LLMServiceMixin):
 
     @staticmethod
     def config_for_code_generation() -> AnthropicConfig:
-        return AnthropicConfig(temperature=0.2, top_p=0.95, max_tokens=16000)
+        # Codegen needs deterministic Python output; LLM jitter at >0 produces
+        # different parser code each run and inflates rule-count variance.
+        return AnthropicConfig(temperature=0, top_p=0.95, max_tokens=16000)

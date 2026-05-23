@@ -48,3 +48,41 @@ class Pass0AEmailCleaningPromptTests(TestCase):
         for example in ("futuregenerali.in", "bajajallianz.com", "icicilombard.com"):
             with self.subTest(example=example):
                 self.assertIn(example, self.prompt_text)
+
+
+class Pass3CholaFuelTypeSuffixTests(TestCase):
+    """
+    Pass 3 prompts (both LLM and codegen variants) MUST instruct the extractor
+    that Chola's Private Car SOD grids carry a `[P]` / `[D]` fuel-type suffix
+    in the SUBCLASS / CC labels. Without this rule, all Chola Private Car
+    rules emit `fuel_type=null` (bug observed on intake d81925b1, July Grid:
+    201/201 rules with null fuel_type).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.llm_prompt = (PROMPTS_DIR / "pass3_rules_prompt.md").read_text()
+        cls.codegen_prompt = (PROMPTS_DIR / "pass3_rules_codegen_prompt.md").read_text()
+
+    def test_llm_prompt_mentions_chola_fuel_suffix(self):
+        lowered = self.llm_prompt.lower()
+        self.assertIn("chola", lowered)
+        self.assertIn("[p]", lowered)
+        self.assertIn("[d]", lowered)
+        self.assertIn("petrol", lowered)
+        self.assertIn("non petrol", lowered)
+
+    def test_codegen_prompt_mentions_chola_fuel_suffix(self):
+        lowered = self.codegen_prompt.lower()
+        self.assertIn("chola", lowered)
+        self.assertIn("[p]", lowered)
+        self.assertIn("[d]", lowered)
+        self.assertIn("petrol", lowered)
+        self.assertIn("non petrol", lowered)
+
+    def test_rule_scoped_to_chola_only(self):
+        # The rule must explicitly restrict to Chola so other carriers'
+        # Private Car grids (which do not use [P]/[D]) aren't mis-parsed.
+        for prompt in (self.llm_prompt, self.codegen_prompt):
+            self.assertIn("only", prompt.lower())

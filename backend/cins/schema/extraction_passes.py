@@ -12,7 +12,7 @@ Each pass has a smaller, focused schema to reduce LLM cognitive load and improve
 extraction accuracy. Passes are then merged into RawExtraction format.
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from cins.schema.carriers import CarrierCode
@@ -463,6 +463,14 @@ class RuleEntry(BaseModel):
             "Do NOT put footnote definitions here."
         ),
     )
+    qualifying_clauses: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Structured machine-ingestable representation of footnote / notes-table "
+            "clauses that modify this rule's outcome. Each item: "
+            "{clause_type, text, when?, effect?}. See pass3_rules_prompt.md for shape."
+        ),
+    )
 
     # Commission modifiers
     applied_on_text: str = Field(
@@ -612,6 +620,7 @@ def merge_passes(
                 state_text=rule.state_text,
                 conditions=rule.conditions,
                 other_conditions=rule.other_conditions,
+                qualifying_clauses=rule.qualifying_clauses,
                 # Modifiers
                 applied_on_text=rule.applied_on_text,
                 gst_applicable=rule.gst_applicable,

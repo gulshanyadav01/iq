@@ -11,6 +11,7 @@ This transformer handles all deterministic transformations:
 - Source trace generation
 """
 
+import json
 import re
 import hashlib
 from datetime import datetime
@@ -31,6 +32,7 @@ from cins.schema.cics_model import (
     CommissionTier,
     Bonus,
     Deduction,
+    QualifyingClause,
     SourceTrace,
     SourceLocation,
     ChangeReference,
@@ -658,12 +660,38 @@ class RawToCICSTransformer:
         product_code = self._slugify(product_key).upper()
         product_category = self._detect_product_category(product_key, entries)
 
+        # Detect product-level metadata up-front so we can gate per-rule
+        # backfills (e.g. wheel-category extraction) by subproduct.
+        product_subproduct = self._detect_product_subproduct(product_key, entries)
+        vehicle_type = self._detect_vehicle_type(product_key, entries)
+
         # Compute priorities based on specificity
         priorities = self._compute_priorities(entries)
 
         # Extract condition hints encoded in the product key (e.g. "TW SATP Scooter")
         key_policy_type = self._extract_policy_type_from_key(product_key)
         key_sub_class = self._extract_sub_class_from_key(product_key)
+        # Wheel hint is only meaningful for commercial vehicles. "4W" in a
+        # Private Car product name does not mean number_of_wheels, it means
+        # the product itself.
+        # LLM Pass 3 normalises product_name to the canonical "Commercial
+        # Vehicle" label and strips slug suffixes, so wheel info baked into
+        # the original sheet header (e.g. ``1_GCCV_3W``) survives only in
+        # entries' source_section or in the raw global_vehicle_type_text.
+        is_commercial = bool(
+            product_subproduct
+            and product_subproduct.startswith("commercial-")
+        )
+        product_key_wheels = (
+            self._extract_wheels_from_key(product_key) if is_commercial else None
+        )
+        global_wheels = (
+            self._extract_wheels_from_key(
+                getattr(raw, "global_vehicle_type_text", "") or ""
+            )
+            if is_commercial
+            else None
+        )
 
         # Transform each entry to a rule
         rules = []
@@ -672,13 +700,66 @@ class RawToCICSTransformer:
             rule = self._transform_rule(
                 entry, product_code, i, priority, master_data, raw
             )
-            # Backfill product-key hints only when conditions lack the field
-            if rule.conditions:
+            # Backfill product-key hints. Materialise an empty RuleConditions
+            # on rules that had none so commercial-vehicle wheel inference
+            # can land. Without this, `_transform_rule` drops the conditions
+            # object whenever the LLM emitted only outcome/text fields, and
+            # downstream bifurcation never sees the rule.
+            section = getattr(entry, "source_section", "") or ""
+            entry_wheels = (
+                self._extract_wheels_from_key(section)
+                if is_commercial and section
+                else None
+            )
+            inferred_wheels = (
+                entry_wheels or product_key_wheels or global_wheels
+                if is_commercial
+                else None
+            )
+            needs_backfill = bool(
+                key_policy_type or key_sub_class or inferred_wheels
+            )
+            # GCV with no wheel hint anywhere must still surface a
+            # conditions object so bifurcation fans it out into 3W + 4W.
+            if (
+                product_subproduct == "commercial-gcv"
+                and not inferred_wheels
+            ):
+                needs_backfill = True
+            if needs_backfill and rule.conditions is None:
+                rule.conditions = RuleConditions()
+            if rule.conditions is not None:
                 if key_policy_type and not rule.conditions.policy_type:
                     rule.conditions.policy_type = key_policy_type
                 if key_sub_class and not rule.conditions.vehicle_sub_class:
                     rule.conditions.vehicle_sub_class = key_sub_class
+                if inferred_wheels and not rule.conditions.number_of_wheels:
+                    rule.conditions.number_of_wheels = inferred_wheels
             rules.append(rule)
+
+        # De-overlap GVW / CC / seating-capacity boundaries within groups of
+        # rules that share every other condition. Source documents express
+        # buckets with shared boundaries ("UPTO 3.5T" / "3.5T TO 7.5T"), which
+        # the parser maps to (0,3500) and (3500,7500). Downstream consumers
+        # treat ranges as inclusive on both ends, so a vehicle at 3500 would
+        # match two rules. Bump each successive start to prev_end + 1 so the
+        # ladder is monotonic and gap-free.
+        # Collapse identical-condition + identical-outcome duplicates before
+        # boundary dedupe. LLM extraction often emits the same logical rule
+        # multiple times with slightly different vehicle_make values (one per
+        # source-table row); leaving them confuses the boundary-bump walk,
+        # which can leave the second duplicate at the un-bumped boundary
+        # (invert-guard hits).
+        rules = self._collapse_duplicate_rules(rules)
+
+        self._dedupe_range_overlaps(rules)
+
+        # GCV rules must be scoped to a single number_of_wheels value.
+        # Source documents commonly publish one GCV row that implicitly
+        # covers both 3W and 4W & Above (or lists both in one cell), but
+        # downstream deal management requires one deal per wheel category.
+        if product_subproduct == "commercial-gcv":
+            rules = self._bifurcate_gcv_wheels(rules)
 
         # Determine sub-category
         sub_category = None
@@ -687,9 +768,6 @@ class RawToCICSTransformer:
             if first_entry.product_type:
                 sub_category = first_entry.product_type.lower()
 
-        # Detect product-level metadata from product key and entries
-        product_subproduct = self._detect_product_subproduct(product_key, entries)
-        vehicle_type = self._detect_vehicle_type(product_key, entries)
         product_name = self._normalize_product_name(product_key, entries)
 
         return Product(
@@ -759,6 +837,43 @@ class RawToCICSTransformer:
                 return [sub_class]
         return None
 
+    def _extract_wheels_from_key(self, product_key: str) -> Optional[List[str]]:
+        """Extract number_of_wheels hint encoded in a commercial-vehicle product key.
+
+        Source documents commonly publish CV grids with the wheel category
+        baked into the sheet/section header, e.g. ``"1_GCCV_3W"``,
+        ``"GCCV 4W & ABOVE"``, ``"PCV 3-Wheeler"``. The wheel value never
+        appears as a per-row condition in such grids, so without this
+        extractor the entire sheet's rules end up with no number_of_wheels.
+
+        Callers must gate this on a commercial subproduct: "4W" inside a
+        Private Car product key means the product itself, not a wheel count.
+        """
+        # Use a tokenised match so substrings inside other tokens don't trip
+        # the pattern (e.g. "g4w" or "34W"). Word-ish boundaries treat
+        # underscores, hyphens, spaces, and slashes as separators.
+        boundary = r"(?:^|[\s_\-/])"
+        after = r"(?=$|[\s_\-/])"
+        key = product_key.lower()
+
+        three_patterns = [
+            rf"{boundary}3\s*w{after}",
+            rf"{boundary}3\s*-?\s*wheeler{after}",
+            rf"{boundary}three\s*-?\s*wheeler{after}",
+        ]
+        four_patterns = [
+            rf"{boundary}4\s*w(?:\s*(?:&|and)\s*above)?{after}",
+            rf"{boundary}4\s*-?\s*wheeler{after}",
+            rf"{boundary}four\s*-?\s*wheeler{after}",
+        ]
+
+        wheels: List[str] = []
+        if any(re.search(p, key) for p in three_patterns):
+            wheels.append("3w")
+        if any(re.search(p, key) for p in four_patterns):
+            wheels.append("4w-and-above")
+        return wheels or None
+
     def _detect_product_category(
         self, product_key: str, entries: List[RawCommissionEntry]
     ) -> Optional[str]:
@@ -810,12 +925,26 @@ class RawToCICSTransformer:
         for pattern, value in mappings:
             if pattern in key_lower:
                 return value
-        # Fallback: check entries product_name for canonical names
+        # Fallback 1: probe each entry's product_type and source_section
+        # (LLM Pass 3 normalises product_name to the canonical label and
+        # strips the original slug — but the slug usually survives on
+        # product_type ("GCV") or source_section ("1_GCCV_3W")).
+        for entry in entries:
+            for source in (
+                getattr(entry, "product_type", "") or "",
+                getattr(entry, "source_section", "") or "",
+            ):
+                if not source:
+                    continue
+                source_lower = source.lower()
+                for pattern, value in mappings:
+                    if pattern in source_lower:
+                        return value
+        # Fallback 2: canonical product names (TW / Car derivable; CV needs
+        # subproduct context which the patterns above already exhausted).
         for entry in entries:
             if entry.product_name == "Two Wheeler":
                 return "two-wheeler"
-            if entry.product_name == "Commercial Vehicle":
-                return None  # need subproduct context — can't determine without more info
             if entry.product_name == "Private Car":
                 return "car"
         return None
@@ -1081,6 +1210,20 @@ class RawToCICSTransformer:
         elif seat_end is None:
             seat_end = 99
 
+        # Policies count (NOP) — number of policies sold tier. Common Chola TW
+        # qualifier on row labels: "NEW(UPTO 30 NOP)", "NEW(30-100 NOP)",
+        # "NEW(100-500 NOP)". When absent the rule applies to any count, so
+        # default to (0, 999999) — the canonical open range used elsewhere.
+        nop_start, nop_end = self._parse_range_field(
+            entry_conditions.get("policies_count")
+        )
+        if nop_start is None and nop_end is None:
+            nop_start, nop_end = 0, 999999
+        elif nop_start is None:
+            nop_start = 0
+        elif nop_end is None:
+            nop_end = 999999
+
         # Vehicle age
         vehicle_age = self._parse_int_field(entry_conditions.get("vehicle_age"))
 
@@ -1100,6 +1243,8 @@ class RawToCICSTransformer:
             cc_end_range=cc_end,
             seating_capacity_start_range=seat_start,
             seating_capacity_end_range=seat_end,
+            policies_count_start_range=nop_start,
+            policies_count_end_range=nop_end,
             school_bus_type=school_bus_type,
             booking_mode=booking_mode,
             zero_dep=zero_dep,
@@ -1128,6 +1273,13 @@ class RawToCICSTransformer:
         normalized = []
         text_lower = text.lower().strip()
 
+        # Mask matched spans so shorter overlapping keys cannot re-match inside a
+        # longer match. Without this, "Non Petrol" → "non petrol" matches AND
+        # "petrol" matches the substring within, producing both "non-petrol" and
+        # "petrol" in the output. Use a sentinel char that no key contains.
+        masked = list(text_lower)
+        sentinel = "\x00"
+
         # Sort by key length descending so longer keys match first (e.g., "new customer" before "new")
         sorted_keys = sorted(mappings.keys(), key=len, reverse=True)
         for key in sorted_keys:
@@ -1135,10 +1287,18 @@ class RawToCICSTransformer:
             # Use word-boundary matching for short keys to avoid substring false positives
             if len(key) <= 5:
                 pattern = rf"(?:^|[\s,;/\-])({re.escape(key)})(?=$|[\s,;/\-])"
+                group_index = 1
             else:
                 pattern = re.escape(key)
-            if re.search(pattern, text_lower) and value not in normalized:
-                normalized.append(value)
+                group_index = 0
+
+            current = "".join(masked)
+            for match in re.finditer(pattern, current):
+                if value not in normalized:
+                    normalized.append(value)
+                start, end = match.span(group_index)
+                for i in range(start, end):
+                    masked[i] = sentinel
 
         if not normalized:
             self.warnings.append(f"Unknown {field_name}: {text}")
@@ -1276,6 +1436,263 @@ class RawToCICSTransformer:
             return val, val
 
         return None, None
+
+    # Non-range condition fields used to decide which rules share a "group"
+    # for boundary de-overlap. Two rules collide on a range only if every
+    # other dimension matches — same logic as RuleOverlapChecker.
+    # vehicle_make and vehicle_model are deliberately excluded: source docs
+    # commonly use them for sentinel values ("All Other Make/Models") and
+    # indexer-slug leakage ("2_UPTO_3.5T[Electric]") that split otherwise-
+    # identical ladder rules into separate groups, defeating boundary dedupe.
+    # Real make-specific commission rules are rare; the validator will still
+    # surface any genuine make/model overlap.
+    _DEDUPE_LIST_FIELDS = (
+        "vehicle_sub_class", "policy_type", "state", "rto",
+        "number_of_wheels", "school_bus_type", "booking_mode",
+        "fuel_type",
+        "vehicle_carrier", "business_type", "deal_parameter",
+    )
+    _DEDUPE_SCALAR_FIELDS = (
+        "zero_dep", "cpa", "ncb", "vehicle_age", "od_term", "tp_term",
+    )
+    # (start_field, end_field) tuples to de-overlap. The "other" ranges in
+    # this list participate in the group key, so different CC buckets don't
+    # get conflated when we bump GVW boundaries.
+    _DEDUPE_RANGES = (
+        ("gvw_start_range", "gvw_end_range"),
+        ("cc_start_range", "cc_end_range"),
+        ("seating_capacity_start_range", "seating_capacity_end_range"),
+        ("policies_count_start_range", "policies_count_end_range"),
+    )
+
+    # Open-range ceilings per range type. When a ladder ends with a bare
+    # singleton (e.g. CC header "350cc" meaning ">350"), promotion extends
+    # its end to this ceiling — matching the defaults used in
+    # _build_conditions when a range field is absent entirely.
+    _RANGE_CEILINGS = {
+        "gvw_end_range": 999999,
+        "cc_end_range": 99999,
+        "seating_capacity_end_range": 99,
+        "policies_count_end_range": 999999,
+    }
+
+    # Sentinel (start, end) pairs that mean "no filter on this dimension".
+    # _transform_conditions emits these when the source entry omits the
+    # field entirely. They must NOT participate in dedupe — bumping their
+    # start would shift the boundary of an unrelated real-range rule that
+    # shares the same default lower bound (e.g. a (0, 0) gvw sentinel next
+    # to a real (0, 3500) gvw rule would push the real rule to (1, 3500)).
+    _RANGE_SENTINELS = {
+        ("gvw_start_range", "gvw_end_range"): {(0, 0)},
+        ("cc_start_range", "cc_end_range"): {(0, 99999)},
+        ("seating_capacity_start_range", "seating_capacity_end_range"): {(0, 99)},
+        ("policies_count_start_range", "policies_count_end_range"): {(0, 999999)},
+    }
+
+    # Canonical GCV wheel categories per PRODUCT_FIELD_VALUES.md.
+    _GCV_WHEEL_VALUES = ("3w", "4w-and-above")
+    _GCV_WHEEL_SUFFIX = {"3w": "3W", "4w-and-above": "4WAA"}
+
+    def _bifurcate_gcv_wheels(
+        self, rules: List[CommissionRule]
+    ) -> List[CommissionRule]:
+        """Expand each GCV rule to one rule per canonical wheel category.
+
+        Bifurcates when number_of_wheels is missing/empty (rule applies to
+        both 3W and 4W & Above) or contains more than one value. Rules
+        already scoped to a single wheel category pass through unchanged.
+
+        Cloned rules inherit priority, outcome, dates, and description from
+        the source; rule_id gets a wheel-category suffix to stay unique.
+        """
+        expanded: List[CommissionRule] = []
+        for rule in rules:
+            wheels = (
+                rule.conditions.number_of_wheels if rule.conditions else None
+            )
+            if wheels and len(wheels) == 1:
+                expanded.append(rule)
+                continue
+
+            targets = wheels if wheels else list(self._GCV_WHEEL_VALUES)
+            for wheel in targets:
+                if rule.conditions is not None:
+                    cloned_conditions = rule.conditions.model_copy(deep=True)
+                else:
+                    cloned_conditions = RuleConditions()
+                cloned_conditions.number_of_wheels = [wheel]
+                suffix = self._GCV_WHEEL_SUFFIX.get(wheel, wheel.upper())
+                expanded.append(
+                    CommissionRule(
+                        rule_id=f"{rule.rule_id}_{suffix}",
+                        priority=rule.priority,
+                        conditions=cloned_conditions,
+                        outcome=rule.outcome,
+                        valid_from=rule.valid_from,
+                        valid_to=rule.valid_to,
+                        rule_description=rule.rule_description,
+                    )
+                )
+        return expanded
+
+    # Condition fields excluded from duplicate-collapse identity. Same
+    # rationale as _DEDUPE_LIST_FIELDS: vehicle_make / vehicle_model commonly
+    # carry sentinel ("All Other Make/Models") or indexer-slug junk that
+    # makes two otherwise-identical rules appear distinct.
+    _COLLAPSE_IGNORE_CONDITION_FIELDS = ("vehicle_make", "vehicle_model")
+
+    def _collapse_duplicate_rules(
+        self, rules: List[CommissionRule]
+    ) -> List[CommissionRule]:
+        """Drop rules with identical conditions (modulo make/model) AND
+        identical outcome, keeping the highest-priority duplicate (lowest
+        priority number). Preserves rule order otherwise.
+
+        Lossless de-duplication: if two rules have different outcomes the
+        collapse skips them so rule_overlap_checker can surface the genuine
+        ambiguity. Source: TW July sheet emitted 1953 duplicate rules
+        differing only by vehicle_make values like 'Suzuki', 'Honda',
+        'Others' on identical commission ladders.
+        """
+        if not rules:
+            return rules
+
+        seen: Dict[str, int] = {}
+        winning_priority: Dict[str, int] = {}
+        keep = [True] * len(rules)
+
+        for i, rule in enumerate(rules):
+            key = self._duplicate_collapse_key(rule)
+            if key not in seen:
+                seen[key] = i
+                winning_priority[key] = rule.priority
+                continue
+            if rule.priority < winning_priority[key]:
+                keep[seen[key]] = False
+                seen[key] = i
+                winning_priority[key] = rule.priority
+            else:
+                keep[i] = False
+
+        return [r for r, k in zip(rules, keep) if k]
+
+    def _duplicate_collapse_key(self, rule: CommissionRule) -> str:
+        """Build a stable string key from a rule's conditions+outcome for
+        duplicate collapse. Excludes make/model fields from conditions.
+        """
+        cond_dump: Dict[str, Any] = {}
+        if rule.conditions is not None:
+            cond_dump = rule.conditions.model_dump(exclude_none=False)
+            for field in self._COLLAPSE_IGNORE_CONDITION_FIELDS:
+                cond_dump.pop(field, None)
+            # Normalize list ordering so [a, b] and [b, a] collapse.
+            for k, v in list(cond_dump.items()):
+                if isinstance(v, list):
+                    cond_dump[k] = sorted(v, key=str)
+
+        outcome_dump: Dict[str, Any] = {}
+        if rule.outcome is not None:
+            outcome_dump = rule.outcome.model_dump(exclude_none=False)
+
+        return json.dumps(
+            {"conditions": cond_dump, "outcome": outcome_dump},
+            sort_keys=True,
+            default=str,
+        )
+
+    def _dedupe_range_overlaps(self, rules: List[CommissionRule]) -> None:
+        """Bump successive start = prev_end + 1 for GVW/CC/seating/policies
+        ranges within rules that share all other conditions. Mutates rules
+        in place.
+
+        Also promotes ladder-edge singletons: if the lowest rule in a group
+        has start == end and shares its boundary with the next rule's
+        start, it's the "UPTO N" bucket — extend its start to 0. Same for
+        the highest rule against the prior rule's end — extend to the
+        canonical ceiling. Source: Chola TW July grid encodes CC buckets
+        as headers "150cc | 150_350cc | 350cc" where the bare singletons
+        are open-ended boundary buckets, not point ranges.
+        """
+        for start_field, end_field in self._DEDUPE_RANGES:
+            sentinels = self._RANGE_SENTINELS.get((start_field, end_field), set())
+            groups: Dict[Tuple, List[CommissionRule]] = {}
+            for rule in rules:
+                if not rule.conditions:
+                    continue
+                start = getattr(rule.conditions, start_field, None)
+                end = getattr(rule.conditions, end_field, None)
+                if start is None or end is None:
+                    continue
+                # Skip "no filter" placeholders so they don't shift adjacent
+                # real-range rules.
+                if (start, end) in sentinels:
+                    continue
+                key = self._dedupe_group_key(rule.conditions, start_field, end_field)
+                groups.setdefault(key, []).append(rule)
+
+            ceiling = self._RANGE_CEILINGS.get(end_field)
+
+            for group_rules in groups.values():
+                if len(group_rules) < 2:
+                    continue
+                group_rules.sort(key=lambda r: (
+                    getattr(r.conditions, start_field),
+                    getattr(r.conditions, end_field),
+                ))
+
+                # Ladder-edge singleton promotion (before overlap-bump so
+                # the bump step normalises the resulting shared boundary).
+                first = group_rules[0].conditions
+                first_start = getattr(first, start_field)
+                first_end = getattr(first, end_field)
+                if (
+                    first_start == first_end
+                    and getattr(group_rules[1].conditions, start_field) == first_end
+                ):
+                    setattr(first, start_field, 0)
+
+                last = group_rules[-1].conditions
+                last_start = getattr(last, start_field)
+                last_end = getattr(last, end_field)
+                if (
+                    ceiling is not None
+                    and last_start == last_end
+                    and getattr(group_rules[-2].conditions, end_field) == last_start
+                ):
+                    setattr(last, end_field, ceiling)
+
+                prev_end = getattr(group_rules[0].conditions, end_field)
+                for rule in group_rules[1:]:
+                    start = getattr(rule.conditions, start_field)
+                    end = getattr(rule.conditions, end_field)
+                    if start <= prev_end:
+                        new_start = prev_end + 1
+                        # Don't create an inverted range; skip the bump
+                        # and let validator surface the genuine overlap.
+                        if new_start <= end:
+                            setattr(rule.conditions, start_field, new_start)
+                            start = new_start
+                    prev_end = max(prev_end, end)
+
+    def _dedupe_group_key(
+        self, conditions: RuleConditions, skip_start: str, skip_end: str
+    ) -> Tuple:
+        """Build a hashable key from all non-range conditions plus the
+        OTHER two range fields. The range field being de-overlapped is
+        excluded so its buckets get grouped together.
+        """
+        parts: List[Any] = []
+        for field in self._DEDUPE_LIST_FIELDS:
+            value = getattr(conditions, field, None)
+            parts.append(tuple(sorted(value)) if value else None)
+        for field in self._DEDUPE_SCALAR_FIELDS:
+            parts.append(getattr(conditions, field, None))
+        for start_field, end_field in self._DEDUPE_RANGES:
+            if start_field == skip_start:
+                continue
+            parts.append(getattr(conditions, start_field, None))
+            parts.append(getattr(conditions, end_field, None))
+        return tuple(parts)
 
     def _expand_state_names(
         self, state_text: Optional[str], master_data: Optional[List[RawMasterDataEntry]]
@@ -1432,6 +1849,39 @@ class RawToCICSTransformer:
             outcome_dict["deductions"] = deductions
             if commission_type == "percentage":
                 outcome_dict["commission_type"] = "hybrid"
+
+        # Preserve raw free-text conditions/footnotes (e.g. "if CPA is not
+        # collected for individual name, 1.5% of OD Pay-out is deducted").
+        # These are qualifying rules from notes/master sections that the
+        # structured Deduction parser cannot model. Surface them verbatim
+        # so downstream consumers (UI, export, manual review) keep the
+        # information.
+        other_conditions_parts = []
+        entry_other = (entry.other_conditions or "").strip()
+        if entry_other:
+            other_conditions_parts.append(entry_other)
+        global_other = (getattr(raw, "global_other_conditions", "") or "").strip()
+        if global_other and global_other not in other_conditions_parts:
+            other_conditions_parts.append(global_other)
+        if other_conditions_parts:
+            outcome_dict["other_conditions"] = " | ".join(other_conditions_parts)
+
+        # Structured machine-ingestable representation of qualifying clauses
+        # (applied_on overrides, conditional deductions, grid aliases). The LLM
+        # emits these in Pass 3 alongside other_conditions; codegen path leaves
+        # them empty. Validate each dict against QualifyingClause so malformed
+        # entries don't pollute the CICS output.
+        raw_clauses = getattr(entry, "qualifying_clauses", None) or []
+        validated_clauses: List[QualifyingClause] = []
+        for raw_clause in raw_clauses:
+            try:
+                validated_clauses.append(QualifyingClause.model_validate(raw_clause))
+            except Exception as e:
+                self.warnings.append(
+                    f"Dropping malformed qualifying_clause: {e}"
+                )
+        if validated_clauses:
+            outcome_dict["qualifying_clauses"] = validated_clauses
 
         return CommissionOutcome(**outcome_dict)
 

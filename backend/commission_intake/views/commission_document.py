@@ -1,11 +1,13 @@
 import io
+import json
+import re
 
 from django.db.models import Count, Q
 from django.http import FileResponse
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -13,6 +15,95 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from commission_intake.models import CommissionDocument
+
+
+def split_other_conditions(text):
+    """Split a free-text other_conditions blob into individual clauses.
+
+    Source clauses arrive as one long line concatenated from notes tables
+    (e.g. "Please note that ... - For X ... - For Y ..."). Split on bullet
+    markers (" - ", " • ", " | ") so each clause stands on its own.
+    """
+    if not text:
+        return []
+    s = re.sub(r"\s+", " ", str(text)).strip()
+    if not s:
+        return []
+    parts = re.split(r"\s+[-•|]\s+", s)
+    return [p.strip(" -•|\t").strip() for p in parts if p and p.strip()]
+
+
+def format_other_conditions(text):
+    """Render the other_conditions blob as a pretty-printed JSON array.
+
+    Excel cells render the JSON readably under wrap_text — one clause per
+    line, quoted, with clear array boundaries. Downstream consumers (deal
+    management, audit tooling) can also json.loads() the cell value to get
+    a structured list of clauses without re-parsing free text.
+    """
+    clauses = split_other_conditions(text)
+    if not clauses:
+        return ""
+    return json.dumps(clauses, ensure_ascii=False, indent=2)
+
+
+def format_qualifying_clauses(clauses):
+    """Render qualifying_clauses (list of dicts) as pretty-printed JSON.
+
+    Pass 3 LLM emits a structured list of {clause_type, text, when?, effect?}
+    that the downstream booking pipeline ingests programmatically. The export
+    cell preserves that exact JSON so analysts and downstream systems read
+    the same shape.
+    """
+    if not clauses:
+        return ""
+    if not isinstance(clauses, list):
+        return ""
+    return json.dumps(clauses, ensure_ascii=False, indent=2)
+
+
+def _clause_key(clause):
+    """Stable hashable key for clause / text dedup across rules."""
+    if isinstance(clause, (dict, list)):
+        return json.dumps(clause, sort_keys=True, ensure_ascii=False)
+    return str(clause or "")
+
+
+def partition_global_modifiers(cics_doc, min_shared=2):
+    """Walk every rule once. Return (global_other_conditions, global_clauses).
+
+    A modifier is "global" when it is shared across multiple rules
+    (default ≥ 2 occurrences). Documents commonly mix products where
+    Chola-style footnotes hit every Private Car rule but no Two Wheeler
+    rule, so the strict "appears on every rule" rule misses the obvious
+    deduplication. Threshold ≥ 2 promotes anything repeated; row-specific
+    clauses (single occurrence) stay inline.
+
+    Args:
+      cics_doc: parsed CICS document dict.
+      min_shared: minimum row count for a modifier to be considered global.
+
+    Returns:
+      - set[str] of other_conditions text values that are shared
+      - set[str] of clause keys (json.dumps with sort_keys) that are shared
+    """
+    from collections import Counter
+
+    other_counts = Counter()
+    clause_counts = Counter()
+
+    for product in cics_doc.get("products", []) or []:
+        for rule in product.get("commission_rules", []) or []:
+            outcome = rule.get("outcome") or {}
+            other = outcome.get("other_conditions")
+            if other:
+                other_counts[str(other)] += 1
+            for clause in outcome.get("qualifying_clauses") or []:
+                clause_counts[_clause_key(clause)] += 1
+
+    global_other = {text for text, n in other_counts.items() if n >= min_shared}
+    global_clauses = {key for key, n in clause_counts.items() if n >= min_shared}
+    return global_other, global_clauses
 from commission_intake.serializers import (
     CommissionDocumentCreateSerializer,
     CommissionDocumentListSerializer,
@@ -377,11 +468,14 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             "VehicleSubClass", "PolicyType", "State", "RTO", "NumberOfWheels",
             "GVWStartRange", "GVWEndRange", "CCStartRange", "CCEndRange",
             "SeatingCapacityStartRange", "SeatingCapacityEndRange",
+            "PoliciesCountStartRange", "PoliciesCountEndRange",
             "SchoolBusType", "BookingMode", "ZeroDep", "NCB", "CPA",
             "FuelType", "VehicleAge", "VehicleMake", "VehicleModel",
             "VehicleCarrier", "BusinessType", "ODTerm", "TPTerm",
             "ODPercentage", "TPPercentage", "NetPercentage",
             "TPLessThanEqual3YearPercentage", "TPGreaterThanEqual4YearPercentage", "FlatAmount",
+            "OtherConditions",
+            "QualifyingClauses",
         ]
 
         def cv(v):
@@ -455,6 +549,11 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             cell.font = header_font
             cell.fill = header_fill
 
+        # Detect modifiers that apply to every rule — hoist onto a dedicated
+        # "Global Rules" worksheet so we don't repeat the same JSON blob on
+        # hundreds of rows. Per-row cells show only the row-specific subset.
+        global_other_set, global_clause_keys = partition_global_modifiers(cics_doc)
+
         row_idx = 2
         for product in cics_doc.get("products", []):
             product_name = product.get("product_name", "")
@@ -485,6 +584,8 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                     cv(conditions.get("cc_end_range")),
                     cv(conditions.get("seating_capacity_start_range")),
                     cv(conditions.get("seating_capacity_end_range")),
+                    cv(conditions.get("policies_count_start_range")),
+                    cv(conditions.get("policies_count_end_range")),
                     cv(conditions.get("school_bus_type")),
                     cv(conditions.get("booking_mode")),
                     cv(conditions.get("zero_dep")),
@@ -499,18 +600,99 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                     cv(conditions.get("od_term")),
                     cv(conditions.get("tp_term")),
                     od_pct, tp_pct, net_pct, tp_lte3, tp_gte4, flat,
+                    format_other_conditions(
+                        outcome.get("other_conditions")
+                        if outcome.get("other_conditions") not in global_other_set
+                        else ""
+                    ),
+                    format_qualifying_clauses(
+                        [
+                            c for c in (outcome.get("qualifying_clauses") or [])
+                            if _clause_key(c) not in global_clause_keys
+                        ]
+                    ),
                 ]
                 for col_idx, val in enumerate(row, start=1):
                     ws.cell(row=row_idx, column=col_idx, value=val)
                 row_idx += 1
 
+        json_col_indices = {
+            headers.index("OtherConditions") + 1,
+            headers.index("QualifyingClauses") + 1,
+        }
+        wrap_alignment = Alignment(wrap_text=True, vertical="top")
+        for r in range(2, row_idx):
+            for col_idx in json_col_indices:
+                ws.cell(row=r, column=col_idx).alignment = wrap_alignment
+
         for col_idx in range(1, len(headers) + 1):
             col_letter = get_column_letter(col_idx)
+            if col_idx in json_col_indices:
+                # JSON-formatted cell — fixed width keeps the row height
+                # readable instead of stretching out for the longest clause.
+                ws.column_dimensions[col_letter].width = 60
+                continue
             max_len = max(
                 len(str(ws.cell(row=r, column=col_idx).value or ""))
                 for r in range(1, row_idx)
             )
             ws.column_dimensions[col_letter].width = max_len + 4
+
+        # ── Global Rules sheet ──────────────────────────────────────────
+        # Hoist modifiers that apply to every rule onto their own sheet.
+        # Cleaner than repeating the same JSON blob on hundreds of rows.
+        if global_other_set or global_clause_keys:
+            gws = wb.create_sheet(title="Global Rules")
+            global_headers = ["Type", "ClauseType", "Text", "When", "Effect"]
+            for col_idx, col_name in enumerate(global_headers, start=1):
+                cell = gws.cell(row=1, column=col_idx, value=col_name)
+                cell.font = header_font
+                cell.fill = header_fill
+
+            g_row = 2
+            for text in sorted(global_other_set):
+                gws.cell(row=g_row, column=1, value="other_conditions")
+                gws.cell(row=g_row, column=3, value=format_other_conditions(text))
+                g_row += 1
+
+            # Re-materialise clauses from their stable keys so the sheet
+            # shows the full structured payload.
+            seen_keys = set()
+            for product in cics_doc.get("products", []) or []:
+                for rule in product.get("commission_rules", []) or []:
+                    for clause in (rule.get("outcome") or {}).get("qualifying_clauses") or []:
+                        key = _clause_key(clause)
+                        if key not in global_clause_keys or key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        if not isinstance(clause, dict):
+                            continue
+                        gws.cell(row=g_row, column=1, value="qualifying_clause")
+                        gws.cell(row=g_row, column=2, value=clause.get("clause_type", ""))
+                        gws.cell(row=g_row, column=3, value=clause.get("text", ""))
+                        when = clause.get("when")
+                        if when:
+                            gws.cell(
+                                row=g_row, column=4,
+                                value=json.dumps(when, ensure_ascii=False, indent=2),
+                            )
+                        effect = clause.get("effect")
+                        if effect:
+                            gws.cell(
+                                row=g_row, column=5,
+                                value=json.dumps(effect, ensure_ascii=False, indent=2),
+                            )
+                        g_row += 1
+
+            for r in range(2, g_row):
+                for col_idx in (3, 4, 5):
+                    gws.cell(row=r, column=col_idx).alignment = wrap_alignment
+
+            gws.column_dimensions["A"].width = 22
+            gws.column_dimensions["B"].width = 24
+            gws.column_dimensions["C"].width = 80
+            gws.column_dimensions["D"].width = 50
+            gws.column_dimensions["E"].width = 50
 
         buf = io.BytesIO()
         wb.save(buf)
