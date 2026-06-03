@@ -137,7 +137,7 @@ class GeminiService(LLMServiceMixin):
             try:
                 from google import genai
 
-                self._client = genai.Client(api_key=self._api_key)
+                self._client = genai.Client(vertexai=True, api_key=self._api_key)
             except ImportError:
                 raise GeminiServiceError(
                     "Google GenAI library not installed. Run: pip install google-genai"
