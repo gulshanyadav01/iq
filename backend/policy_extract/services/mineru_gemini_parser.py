@@ -51,7 +51,8 @@ class MineruGeminiParser:
                               Pass a validation set path to co-locate with the set.
         """
         self.model_name = model
-        self._client = genai.Client(api_key=api_key or os.getenv("GOOGLE_API_KEY"))
+        # Use the Vertex AI backend (express mode) — same as cins GeminiService.
+        self._client = genai.Client(vertexai=True, api_key=api_key or os.getenv("GOOGLE_API_KEY"))
 
         # Master-data resolver — backed by the `master_data` Django app.
         # Loaded once per parser instance (~7 small SELECTs); negligible vs
