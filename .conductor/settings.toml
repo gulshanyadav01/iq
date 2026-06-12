@@ -1,0 +1,7 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+[scripts]
+archive = "pnpm dev:down"
+run = "pnpm dev:down && pnpm dev:up"
+run_mode = "concurrent"
+setup = "pnpm i && pnpm setup:env --force"
