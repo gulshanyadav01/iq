@@ -65,3 +65,4 @@ node_modules
 .turbo
 
 web/test-results/*
+.gstack/

@@ -14,6 +14,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from cins.processors.core.cpa_split import applied_on_to_column, derive_applied_on
 from commission_intake.models import CommissionDocument
 
 
@@ -494,10 +495,15 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                 return default
             return cv(v)
 
-        def outcome_percentages(outcome, deal_param):
+        def outcome_percentages(outcome, deal_param, conditions=None):
             """
             Map a single CommissionOutcome to the 6 commission columns.
-            Column assignment is driven by deal_parameter and commission_type.
+
+            A rule carries exactly one percentage. Its column is derived from the
+            rule's applied_on basis (resolved via derive_applied_on, which honors
+            coverage-conditional applied_on_override clauses) — applied_on is
+            authoritative over deal_parameter. When applied_on does not name a
+            known basis, fall back to deal_parameter routing.
             """
             od_pct = tp_pct = net_pct = tp_lte3 = tp_gte4 = flat = ""
             if not outcome:
@@ -509,8 +515,18 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
 
             params = [p.strip().lower() for p in (deal_param or "").split(",") if p.strip()]
 
+            # applied_on-derived column wins (Option B). Flat outcomes still go to
+            # the flat column regardless of basis.
+            column = applied_on_to_column(derive_applied_on(conditions or {}, outcome))
+
             if c_type == "flat" and flat_val is not None:
                 flat = flat_val
+            elif column == "od":
+                od_pct = pct if pct is not None else ""
+            elif column == "tp":
+                tp_pct = pct if pct is not None else ""
+            elif column == "net":
+                net_pct = pct if pct is not None else ""
             elif "od" in params:
                 od_pct = pct if pct is not None else ""
             elif "net" in params:
@@ -554,6 +570,11 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         # hundreds of rows. Per-row cells show only the row-specific subset.
         global_other_set, global_clause_keys = partition_global_modifiers(cics_doc)
 
+        # CPA-deduction rules are already bifurcated into With/Without-CPA rows
+        # at transform time (cins.processors.core.cpa_split.materialize_cpa_split),
+        # so the export is a pure renderer: one row per rule.
+        _CPA_LABELS = {"with-cpa": "With CPA", "without-cpa": "Without CPA"}
+
         row_idx = 2
         for product in cics_doc.get("products", []):
             product_name = product.get("product_name", "")
@@ -562,7 +583,11 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                 conditions = rule.get("conditions") or {}
                 outcome = rule.get("outcome") or {}
                 deal_param = cv(conditions.get("deal_parameter"))
-                od_pct, tp_pct, net_pct, tp_lte3, tp_gte4, flat = outcome_percentages(outcome, deal_param)
+                od_pct, tp_pct, net_pct, tp_lte3, tp_gte4, flat = outcome_percentages(
+                    outcome, deal_param, conditions
+                )
+                cpa_val = conditions.get("cpa")
+                cpa_label = _CPA_LABELS.get(cpa_val, cv_default(cpa_val, "With CPA,Without CPA"))
 
                 row = [
                     "",                                  # DealId
@@ -590,7 +615,7 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                     cv(conditions.get("booking_mode")),
                     cv(conditions.get("zero_dep")),
                     cv_default(conditions.get("ncb"), "Yes,No"),
-                    cv_default(conditions.get("cpa"), "With CPA,Without CPA"),
+                    cpa_label,                           # CPA
                     cv_default(conditions.get("fuel_type"), "Petrol,Diesel,CNG,LPG,Electric"),
                     cv_default(conditions.get("vehicle_age"), "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"),
                     cv(conditions.get("vehicle_make")),
@@ -702,6 +727,11 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         filename = f"{base_name}_cics.xlsx"
         response = FileResponse(buf, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        # The export is regenerated from live CICS data on every request. Without
+        # this, the browser caches the GET by URL and serves a stale workbook
+        # (e.g. a pre-split download), making re-exports look unchanged after a
+        # re-extraction or a fix.
+        response["Cache-Control"] = "no-store"
         return response
 
     @extend_schema(

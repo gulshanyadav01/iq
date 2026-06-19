@@ -4,7 +4,7 @@
 # Configurable Defaults
 # ------------------------
 
-DOCKER_IMAGE=${DOCKER_IMAGE:-insure-iq-web:latest}
+DOCKER_IMAGE=${DOCKER_IMAGE:-insur-iq-web:latest}
 DOCKERFILE=${DOCKERFILE:-web/Dockerfile.dev}
 
 NUXT_PUBLIC_AUTH_BASE_URL=${NUXT_PUBLIC_AUTH_BASE_URL:-http://localhost:10000}

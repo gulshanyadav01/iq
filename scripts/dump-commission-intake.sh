@@ -31,7 +31,7 @@ fi
 
 POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-insur-iq-postgres-1}"
 DB_USER="${DB_USER:-postgres}"
-DB_NAME="${DB_NAME:-insure_iq}"
+DB_NAME="${DB_NAME:-insur_iq}"
 S3_BUCKET="${S3_BUCKET:-rhobots-temp}"
 S3_PREFIX="${S3_PREFIX:-commission-intake-dumps}"
 AWS_REGION="${AWS_REGION:-$(aws configure get region --profile "$AWS_PROFILE" 2>/dev/null || echo us-east-1)}"

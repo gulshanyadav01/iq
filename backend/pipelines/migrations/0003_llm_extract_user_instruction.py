@@ -17,7 +17,7 @@ def forwards(apps, schema_editor):
         cfg = dict(step.config or {})
         cfg.pop("prompt", None)
         cfg.setdefault("user_instruction", "")
-        cfg.setdefault("model", "gemini-2.5-flash-lite")
+        cfg.setdefault("model", "gemini-3.1-flash-lite")
         step.config = cfg
         step.save(update_fields=["config"])
 

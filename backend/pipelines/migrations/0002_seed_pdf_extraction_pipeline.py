@@ -37,7 +37,7 @@ def seed(apps, schema_editor):
             "name": "Extract Fields with Prompt",
             "config": {
                 "user_instruction": "",
-                "model": "gemini-2.5-flash-lite",
+                "model": "gemini-3.1-flash-lite",
             },
         },
     )

@@ -27,15 +27,13 @@ from pipelines.steps.registry import register_executor
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_MODEL = "gemini-3.1-flash-lite"
 
 # Gemini pricing per 1M tokens (input, output). Mirrors policy_extract values
 # so the demo's cost dashboard matches the production extractor's accounting.
 PRICING = {
-    "gemini-2.5-flash-lite": (0.075, 0.30),
-    "gemini-2.0-flash": (0.10, 0.40),
-    "gemini-2.5-flash": (0.15, 0.60),
-    "gemini-1.5-flash": (0.075, 0.30),
+    "gemini-3.1-flash-lite": (0.075, 0.30),
+    "gemini-3.5-flash": (0.15, 0.60),
     "gemini-1.5-pro": (1.25, 5.00),
 }
 

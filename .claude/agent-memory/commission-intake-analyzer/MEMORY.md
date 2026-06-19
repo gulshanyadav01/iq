@@ -1,3 +1,5 @@
 - [Provider identification pipeline](architecture_provider_identification.md) — provider name is set by Pass 1 LLM extraction from `primary_content`; no constrained list exists anywhere
 - [Email primary_content scope](architecture_email_primary_content.md) — for .eml ingestion, Pass 1 sees only `From:` + `Date:` + cleaned body — no Subject, To, or Cc
 - [Valid carriers (25 short codes)](reference_valid_carriers.md) — canonical short-code list given by user for Indian motor-insurance carriers
+- [Chola net grid + CPA-on-OD mismatch](carrier_chola_net_grid_cpa.md) — Chola grids are all `deal_parameter=net`; the real column derives from `applied_on` (override clauses → OD/TP by coverage), and the CPA deduction (`applied_on=OD Pay-out`) only bites OD-routed comprehensive rows
+- [Stale runserver code on macOS Docker](pipeline_runserver_stale_code.md) — runserver/celery don't auto-reload across the bind mount; restart backend+celery after edits, and verify via UI not just manage.py shell

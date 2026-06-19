@@ -1,2 +1,2 @@
-CREATE DATABASE insure_iq;
+CREATE DATABASE insur_iq;
 CREATE DATABASE auth;

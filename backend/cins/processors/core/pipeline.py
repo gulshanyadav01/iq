@@ -25,6 +25,7 @@ from typing import Dict, List, Optional
 
 from cins.processors.content.indexer import ContentIndexer, IndexedDocument
 from cins.processors.content.prepare_prompt import prepare_extraction_request
+from cins.processors.core.cpa_split import materialize_cpa_split
 
 logger = logging.getLogger("pipeline")
 
@@ -619,6 +620,9 @@ class Pipeline:
         transformer = RawToCICSTransformer()
         cics_doc, transform_warnings, transform_errors = transformer.transform(raw_extraction)
         cics_json = cics_doc.model_dump(exclude_none=False)
+        # Materialize CPA-deduction rules into With/Without-CPA variants so the
+        # canonical document, the validators, and every consumer see the split.
+        cics_json = materialize_cpa_split(cics_json)
 
         # Determine output file name from the folder (use folder name + .json)
         output_path = output_folder / f"{output_folder.name}.json"
@@ -738,6 +742,8 @@ class Pipeline:
             except Exception:
                 parsed_result = {}
 
+        parsed_result = materialize_cpa_split(parsed_result)
+        json_result = json.dumps(parsed_result, indent=2)
         output_path.write_text(json_result, encoding="utf-8")
 
         schema_result, overlap_result = _run_validators(output_path)
@@ -1063,6 +1069,7 @@ class Pipeline:
 
         if successful_results:
             combined_data = _merge_sheet_jsons(successful_results, base_name, output_dir)
+            combined_data = materialize_cpa_split(combined_data)
             combined_path.write_text(json.dumps(combined_data, indent=2), encoding="utf-8")
             combined_schema_result, combined_overlap_result = _run_validators(combined_path)
             logger.info(f"Combined JSON saved: {combined_path.name}")

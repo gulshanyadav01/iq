@@ -73,7 +73,7 @@ MINIO_CONSOLE_PORT=$(pick_free_port)
 REDIS_HOST_PORT=$(pick_free_port)
 POSTGRES_HOST_PORT=$(pick_free_port)
 
-NETWORK_NAME="app_template_network_${WORKSPACE_NAME}"
+NETWORK_NAME="insur_iq_network_${WORKSPACE_NAME}"
 
 cp "$EXAMPLE_FILE" "$ENV_FILE"
 
