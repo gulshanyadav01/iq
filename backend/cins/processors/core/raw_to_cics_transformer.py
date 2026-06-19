@@ -754,12 +754,40 @@ class RawToCICSTransformer:
 
         self._dedupe_range_overlaps(rules)
 
+        # Evidence-gated cross-group boundary normalization (D1=B). Closes the
+        # gap when a CC/GVW ladder is fragmented across states/RTOs so the
+        # per-group bump above can't see the lower rung. Runs before GCV
+        # bifurcation so wheel clones inherit corrected boundaries.
+        self._normalize_boundary_overlaps(rules)
+
         # GCV rules must be scoped to a single number_of_wheels value.
         # Source documents commonly publish one GCV row that implicitly
         # covers both 3W and 4W & Above (or lists both in one cell), but
         # downstream deal management requires one deal per wheel category.
         if product_subproduct == "commercial-gcv":
             rules = self._bifurcate_gcv_wheels(rules)
+
+        # Dimension-collapse guard: a commercial-vehicle product whose every
+        # rule still carries the (0, 0) "no GVW filter" sentinel almost always
+        # means the GVW dimension was lost in extraction (and _recover_gvw_range
+        # could not recover it). Surface it so the next silently-dropped
+        # dimension is visible instead of shipping wrong commission tiers.
+        if (
+            product_subproduct
+            and product_subproduct.startswith("commercial")
+            and rules
+            and all(
+                r.conditions
+                and getattr(r.conditions, "gvw_start_range", 0) == 0
+                and getattr(r.conditions, "gvw_end_range", 0) == 0
+                for r in rules
+            )
+        ):
+            self.warnings.append(
+                f"Dimension-collapse: all {len(rules)} rules in commercial "
+                f"product '{product_key}' have no GVW band — possible lost "
+                f"weight dimension"
+            )
 
         # Determine sub-category
         sub_category = None
@@ -1190,6 +1218,16 @@ class RawToCICSTransformer:
             # Open-ended upper bound ("ABOVE 40T") — use the canonical
             # gvwRange ceiling from PRODUCT_FIELD_VALUES.md (999999 kg).
             gvw_end = 999999
+
+        # GVW recovery: when the parse above hit the (0, 0) "no GVW filter"
+        # sentinel, the weight band may still be baked into a sub-class slug
+        # ("2_UPTO_3.5T"). Codegen stores grid dims under conditions["subclass"]
+        # — a key the transformer never reads — so the band is dropped at the
+        # key level on the codegen path. Recover it deterministically here.
+        if gvw_start == 0 and gvw_end == 0:
+            recovered = self._recover_gvw_range(entry_conditions, raw)
+            if recovered is not None:
+                gvw_start, gvw_end = recovered
 
         cc_start, cc_end = self._parse_range_field(entry_conditions.get("cc"))
         if cc_start is None and cc_end is None:
@@ -1693,6 +1731,168 @@ class RawToCICSTransformer:
             parts.append(getattr(conditions, start_field, None))
             parts.append(getattr(conditions, end_field, None))
         return tuple(parts)
+
+    # Fields dropped from the evidence-group key for cross-group boundary
+    # normalization. One vehicle's CC/GVW ladder is commonly split across
+    # states / RTO zones with identical engine bands; dropping these regroups
+    # the fragmented ladder so a shared tier boundary present anywhere in the
+    # same product+coverage counts as evidence. make/model already excluded
+    # from _DEDUPE_LIST_FIELDS for the same reason.
+    _BOUNDARY_DROP_FIELDS = ("state", "rto")
+
+    def _boundary_group_key(
+        self, conditions: RuleConditions, skip_start: str, skip_end: str
+    ) -> Tuple:
+        """Relaxed _dedupe_group_key: same key minus the fields that legitimately
+        fragment a single vehicle's range ladder (state, rto, make, model). Used
+        only by _normalize_boundary_overlaps so a tier boundary present anywhere
+        in the same product+coverage is treated as evidence — without collapsing
+        genuinely-different vehicle contexts (fuel, sub_class, wheels stay)."""
+        parts: List[Any] = []
+        for field in self._DEDUPE_LIST_FIELDS:
+            if field in self._BOUNDARY_DROP_FIELDS:
+                continue
+            value = getattr(conditions, field, None)
+            parts.append(tuple(sorted(value)) if value else None)
+        for field in self._DEDUPE_SCALAR_FIELDS:
+            parts.append(getattr(conditions, field, None))
+        for start_field, end_field in self._DEDUPE_RANGES:
+            if start_field == skip_start:
+                continue
+            parts.append(getattr(conditions, start_field, None))
+            parts.append(getattr(conditions, end_field, None))
+        return tuple(parts)
+
+    def _normalize_boundary_overlaps(self, rules: List[CommissionRule]) -> None:
+        """Evidence-gated boundary normalization (D1=B). Mutates rules in place.
+
+        Closes the gap left by _dedupe_range_overlaps when a CC/GVW ladder is
+        fragmented across states/RTOs so the per-group bump can't see the lower
+        rung. A band's start is bumped to start+1 ONLY when that start value
+        coincides with some band's END within the same product+coverage ladder
+        (evidence the boundary is a real shared tier edge). A start that merely
+        equals an unrelated context's end is left alone — the relaxed-but-not-
+        empty group key prevents the unsound global flip.
+
+        Floor point-range promotion (X,X) -> (0,X) only when a sibling band in
+        the same group starts at X with a wider end (the real ladder rung) — a
+        lone (X,X) point rate is never silently widened. Every change is logged.
+        """
+        for start_field, end_field in self._DEDUPE_RANGES:
+            sentinels = self._RANGE_SENTINELS.get((start_field, end_field), set())
+            groups: Dict[Tuple, List[CommissionRule]] = {}
+            for rule in rules:
+                if not rule.conditions:
+                    continue
+                start = getattr(rule.conditions, start_field, None)
+                end = getattr(rule.conditions, end_field, None)
+                if start is None or end is None:
+                    continue
+                if (start, end) in sentinels:
+                    continue
+                key = self._boundary_group_key(rule.conditions, start_field, end_field)
+                groups.setdefault(key, []).append(rule)
+
+            for group_rules in groups.values():
+                if len(group_rules) < 2:
+                    continue
+                # Snapshot original boundaries so evidence is order-independent.
+                pairs = [
+                    (getattr(r.conditions, start_field),
+                     getattr(r.conditions, end_field))
+                    for r in group_rules
+                ]
+                ends = {e for _s, e in pairs}
+                # Values where a wider band starts — confirms a ladder floor.
+                floor_starts = {s for s, e in pairs if e != s}
+
+                for rule in group_rules:
+                    cond = rule.conditions
+                    start = getattr(cond, start_field)
+                    end = getattr(cond, end_field)
+                    # Floor point-range: (X,X) with a sibling band starting at X.
+                    if start == end and start > 0 and start in floor_starts:
+                        setattr(cond, start_field, 0)
+                        self.warnings.append(
+                            f"Boundary floor-promotion {start_field} "
+                            f"({start},{end}) -> (0,{end})"
+                        )
+                        continue
+                    # Evidence-gated bump: start sits on another band's end.
+                    if 0 < start < end and start in ends:
+                        new_start = start + 1
+                        setattr(cond, start_field, new_start)
+                        self.warnings.append(
+                            f"Boundary bump {start_field} {start} -> {new_start} "
+                            f"(shared tier edge in ladder)"
+                        )
+
+    def _gvw_slug_or_empty(self, header: Optional[str]) -> str:
+        """Return the verbatim label if it encodes a GVW range (tonnage / kg /
+        qualified weight), else ''. Mirrors code_gen_executor.parse_gvw_range so
+        the deterministic recovery path applies the same shape-guard — CC/KW
+        engine-displacement headers are rejected (they belong to cc)."""
+        if header is None:
+            return ""
+        h = str(header).strip()
+        if not h:
+            return ""
+        hu = h.upper().replace("_", " ")
+        if not any(c.isdigit() for c in hu):
+            return ""
+        if "CC" in hu.split() or hu.endswith("CC") or "KW" in hu.split() or hu.endswith("KW"):
+            return ""
+        if "GVW" in hu or "KG" in hu:
+            return h
+        # Tonnage scan: a digit immediately followed by 'T' not part of another
+        # word (so "SEATER", "TRACTOR", "TO" don't trigger).
+        i = 0
+        while i < len(hu):
+            if hu[i] == "T":
+                j = i - 1
+                while j >= 0 and hu[j] == " ":
+                    j -= 1
+                prev_digit = j >= 0 and hu[j].isdigit()
+                nxt = hu[i + 1] if i + 1 < len(hu) else ""
+                if prev_digit and not nxt.isalpha():
+                    return h
+            i += 1
+        qualifiers = (
+            "UPTO", "UP TO", "ABOVE", "BELOW",
+            "GREATER THAN", "MORE THAN", "LESS THAN", ">", "<",
+        )
+        if any(q in hu for q in qualifiers):
+            return h
+        return ""
+
+    def _recover_gvw_range(
+        self, entry_conditions: Dict[str, Any], raw: RawExtraction
+    ) -> Optional[Tuple[int, int]]:
+        """Recover a GVW (start, end) from sub-class slugs when conditions["gvw"]
+        was absent. Codegen stores grid dims under conditions["subclass"] (a key
+        the transformer otherwise ignores) and weight bands are sometimes baked
+        into the sub-class slug ("2_UPTO_3.5T"). Shape-guarded via
+        _gvw_slug_or_empty so a real sub-class ("3 WHEELER", "16 SEATER") is
+        never misread. Open ends normalise to 0 / 999999. Returns None on miss."""
+        candidates = [
+            entry_conditions.get("subclass"),
+            entry_conditions.get("vehicle_sub_class"),
+            getattr(raw, "global_vehicle_type_text", None),
+        ]
+        for cand in candidates:
+            slug = self._gvw_slug_or_empty(cand)
+            if not slug:
+                continue
+            rs, re_ = self._parse_range_field(slug)
+            if rs is None and re_ is None:
+                continue
+            start = 0 if rs is None else rs
+            end = 999999 if re_ is None else re_
+            self.warnings.append(
+                f"GVW recovered from sub-class slug '{cand}' -> ({start}, {end})"
+            )
+            return start, end
+        return None
 
     def _expand_state_names(
         self, state_text: Optional[str], master_data: Optional[List[RawMasterDataEntry]]

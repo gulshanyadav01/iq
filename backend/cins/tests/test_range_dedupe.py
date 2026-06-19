@@ -12,6 +12,7 @@ Run from the backend container:
     python manage.py test cins.tests.test_range_dedupe -v 2
 """
 
+from types import SimpleNamespace
 from unittest import TestCase
 
 from cins.processors.core.raw_to_cics_transformer import RawToCICSTransformer
@@ -673,3 +674,105 @@ class DedupeEdgeCasesTests(TestCase):
         # so we leave it for the validator.
         self.assertEqual(rules[1].conditions.gvw_start_range, 3500)
         self.assertEqual(rules[1].conditions.gvw_end_range, 7500)
+
+
+class GVWSlugDetectionTests(TestCase):
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+
+    def test_weight_slugs_detected(self):
+        for slug in ("2_UPTO_3.5T", "3_3.5T_TO_7.5T", "10_ABOVE_47T",
+                     "UPTO 3.5T", "3500-7500 KG", "GVW < 2000"):
+            self.assertTrue(self.t._gvw_slug_or_empty(slug),
+                            f"{slug!r} should be GVW-shaped")
+
+    def test_non_gvw_rejected(self):
+        for slug in ("3 WHEELER", "16 SEATER", "350cc", "150-350cc",
+                     "GCCV", "SCOOTER", "7 KW", None, ""):
+            self.assertEqual(self.t._gvw_slug_or_empty(slug), "",
+                             f"{slug!r} must not be read as GVW")
+
+
+class GVWRecoveryTests(TestCase):
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+        self.raw = SimpleNamespace(global_vehicle_type_text=None)
+
+    def test_recover_from_subclass_key(self):
+        # Codegen stores the slug under the short "subclass" key.
+        self.assertEqual(
+            self.t._recover_gvw_range({"subclass": "2_UPTO_3.5T"}, self.raw),
+            (0, 3500),
+        )
+
+    def test_recover_range_and_open_ends(self):
+        self.assertEqual(
+            self.t._recover_gvw_range({"subclass": "3_3.5T_TO_7.5T"}, self.raw),
+            (3500, 7500),
+        )
+        self.assertEqual(
+            self.t._recover_gvw_range({"subclass": "10_ABOVE_47T"}, self.raw),
+            (47000, 999999),
+        )
+
+    def test_recover_from_canonical_key(self):
+        self.assertEqual(
+            self.t._recover_gvw_range({"vehicle_sub_class": "UPTO 3.5T"}, self.raw),
+            (0, 3500),
+        )
+
+    def test_no_recovery_for_non_gvw_subclass(self):
+        self.assertIsNone(
+            self.t._recover_gvw_range({"subclass": "3 WHEELER"}, self.raw)
+        )
+        self.assertIsNone(self.t._recover_gvw_range({}, self.raw))
+
+
+class BoundaryNormalizationTests(TestCase):
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+
+    def test_fragmented_ladder_bumped_across_states(self):
+        # Same CC ladder split across states (relaxed key drops state) — the
+        # (1000,1500) band should bump even though its (0,1000) rung sits in a
+        # different all-conditions group.
+        rules = [
+            _make_rule("R1", 10, state=["a"], cc_start_range=0, cc_end_range=1000),
+            _make_rule("R2", 20, state=["b"], cc_start_range=1000, cc_end_range=1500),
+            _make_rule("R3", 30, state=["b"], cc_start_range=1500, cc_end_range=99999),
+        ]
+        self.t._normalize_boundary_overlaps(rules)
+        self.assertEqual(rules[1].conditions.cc_start_range, 1001)
+        self.assertEqual(rules[2].conditions.cc_start_range, 1501)
+        self.assertEqual(rules[0].conditions.cc_start_range, 0)
+
+    def test_counter_example_not_bumped(self):
+        # Genuine gap ladder: no band ends at 1000 or 1600, so neither start is
+        # a shared tier edge — leave them alone (C2 guard).
+        rules = [
+            _make_rule("R1", 10, state=["a"], cc_start_range=1000, cc_end_range=1500),
+            _make_rule("R2", 20, state=["b"], cc_start_range=1600, cc_end_range=2000),
+        ]
+        self.t._normalize_boundary_overlaps(rules)
+        self.assertEqual(rules[0].conditions.cc_start_range, 1000)
+        self.assertEqual(rules[1].conditions.cc_start_range, 1600)
+
+    def test_floor_point_range_promoted_with_sibling(self):
+        rules = [
+            _make_rule("R1", 10, cc_start_range=1000, cc_end_range=1000),
+            _make_rule("R2", 20, cc_start_range=1000, cc_end_range=1500),
+        ]
+        self.t._normalize_boundary_overlaps(rules)
+        self.assertEqual(rules[0].conditions.cc_start_range, 0)
+        self.assertEqual(rules[0].conditions.cc_end_range, 1000)
+        self.assertEqual(rules[1].conditions.cc_start_range, 1001)
+
+    def test_lone_point_range_not_widened(self):
+        # (1000,1000) with no sibling starting at 1000 stays a point rate.
+        rules = [
+            _make_rule("R1", 10, cc_start_range=1000, cc_end_range=1000),
+            _make_rule("R2", 20, cc_start_range=2000, cc_end_range=3000),
+        ]
+        self.t._normalize_boundary_overlaps(rules)
+        self.assertEqual(rules[0].conditions.cc_start_range, 1000)
+        self.assertEqual(rules[0].conditions.cc_end_range, 1000)
