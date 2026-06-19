@@ -39,7 +39,7 @@ class MineruGeminiParser:
 
     MINERVA_API_URL = os.getenv("MINERVA_API_URL", "https://rhobots.pbpartners.com/api/mineru/file_parse")
 
-    def __init__(self, api_key: str = None, model: str = "gemini-2.5-flash-lite", intermediate_dir: str = None):
+    def __init__(self, api_key: str = None, model: str = "gemini-3.1-flash-lite", intermediate_dir: str = None):
         """
         Initialize parser
 
@@ -68,12 +68,9 @@ class MineruGeminiParser:
 
         # Gemini pricing (per 1M tokens)
         self.pricing = {
-            "gemini-2.5-flash-lite": {"input": 0.075, "output": 0.30},
-            "gemini-2.0-flash-exp": {"input": 0.00, "output": 0.00},
-            "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
+            "gemini-3.1-flash-lite": {"input": 0.075, "output": 0.30},
             "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
-            "gemini-2.5-flash": {"input": 0.15, "output": 0.60},
-            "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
+            "gemini-3.5-flash": {"input": 0.15, "output": 0.60},
         }
 
         # Intermediate data directory
@@ -1389,7 +1386,7 @@ class MineruGeminiParser:
 
         model_key = self.model_name
         if model_key not in self.pricing:
-            model_key = "gemini-2.5-flash-lite"
+            model_key = "gemini-3.1-flash-lite"
 
         input_cost = (self.total_input_tokens / 1_000_000) * self.pricing[model_key]["input"]
         output_cost = (self.total_output_tokens / 1_000_000) * self.pricing[model_key]["output"]
@@ -1501,7 +1498,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # Initialize parser
-    parser = MineruGeminiParser(api_key=api_key, model="gemini-2.5-flash-lite")
+    parser = MineruGeminiParser(api_key=api_key, model="gemini-3.1-flash-lite")
 
     # Parse a PDF
     if len(sys.argv) > 1:

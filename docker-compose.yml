@@ -3,7 +3,7 @@ services:
     build:
       dockerfile: ./backend/Dockerfile
       context: .
-    image: insure-iq-backend:latest
+    image: insur-iq-backend:latest
     volumes:
       - ./backend:/app
     command: ["bash", "./entrypoint.sh", "dev"]
@@ -24,13 +24,13 @@ services:
       DB_HOST: ${DB_HOST:-postgres}
       DB_USER: ${DB_USER:-postgres}
       DB_PASSWORD: ${DB_PASSWORD:-postgres}
-      DB_NAME: ${DB_NAME:-insure_iq}
+      DB_NAME: ${DB_NAME:-insur_iq}
       AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-http://minio:9000}
       AWS_S3_PUBLIC_ENDPOINT_URL: ${AWS_S3_PUBLIC_ENDPOINT_URL:-http://localhost:${MINIO_API_HOST_PORT:-9900}}
       AWS_S3_ADDRESSING_STYLE: ${AWS_S3_ADDRESSING_STYLE:-path}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minio}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-miniosecret}
-      AWS_STORAGE_BUCKET_NAME: ${AWS_STORAGE_BUCKET_NAME:-insure-iq}
+      AWS_STORAGE_BUCKET_NAME: ${AWS_STORAGE_BUCKET_NAME:-insur-iq}
       AWS_REGION: ${AWS_REGION:-ap-south-1}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-django-db}
       CELERY_CACHE_BACKEND: ${CELERY_CACHE_BACKEND:-django-cache}
@@ -42,7 +42,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
@@ -59,7 +59,7 @@ services:
       retries: 3
 
   celery:
-    image: insure-iq-backend:latest
+    image: insur-iq-backend:latest
     volumes:
       - ./backend:/app
     command: ["bash", "./entrypoint.sh", "celery"]
@@ -74,7 +74,7 @@ services:
     restart: always
 
   celery_policy_extract:
-    image: insure-iq-backend:latest
+    image: insur-iq-backend:latest
     volumes:
       - ./backend:/app
     command: ["bash", "./entrypoint.sh", "celery-policy-extract"]
@@ -89,7 +89,7 @@ services:
     restart: always
 
   celery_commission_intake:
-    image: insure-iq-backend:latest
+    image: insur-iq-backend:latest
     volumes:
       - ./backend:/app
     command: ["bash", "./entrypoint.sh", "celery-commission-intake"]
@@ -102,7 +102,7 @@ services:
     restart: always
 
   beat:
-    image: insure-iq-backend:latest
+    image: insur-iq-backend:latest
     volumes:
       - ./backend:/app
     command: ["bash", "./entrypoint.sh", "beat"]
@@ -116,7 +116,7 @@ services:
     restart: always
 
   web:
-    image: insure-iq-web:latest
+    image: insur-iq-web:latest
     build:
       dockerfile: ./web/Dockerfile.dev
       context: .
@@ -163,7 +163,7 @@ services:
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minio}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-miniosecret}
       AWS_REGION: ${AWS_REGION:-ap-south-1}
-      AWS_STORAGE_BUCKET_NAME: ${AWS_STORAGE_BUCKET_NAME:-insure-iq}
+      AWS_STORAGE_BUCKET_NAME: ${AWS_STORAGE_BUCKET_NAME:-insur-iq}
       AWS_SENDER_EMAIL: ${AWS_SENDER_EMAIL:-}
       WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:-mywebhooksecretkey}
       WEBHOOK_EP: ${WEBHOOK_EP:-http://backend:8000/api/auth/webhook/}
@@ -212,8 +212,8 @@ services:
     entrypoint: >
       /bin/sh -c "
         until (mc alias set myminio http://minio:9000 minio miniosecret 2>/dev/null) do echo '...' && sleep 1; done;
-        mc mb --ignore-existing myminio/insure-iq;
-        mc anonymous set download myminio/insure-iq;
+        mc mb --ignore-existing myminio/insur-iq;
+        mc anonymous set download myminio/insur-iq;
         exit 0;
       "
 
@@ -254,4 +254,4 @@ volumes:
 
 networks:
   default:
-    name: ${DOCKER_NETWORK_NAME:-insure_iq_network}
+    name: ${DOCKER_NETWORK_NAME:-insur_iq_network}

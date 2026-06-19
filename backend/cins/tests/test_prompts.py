@@ -52,11 +52,14 @@ class Pass0AEmailCleaningPromptTests(TestCase):
 
 class Pass3CholaFuelTypeSuffixTests(TestCase):
     """
-    Pass 3 prompts (both LLM and codegen variants) MUST instruct the extractor
-    that Chola's Private Car SOD grids carry a `[P]` / `[D]` fuel-type suffix
-    in the SUBCLASS / CC labels. Without this rule, all Chola Private Car
-    rules emit `fuel_type=null` (bug observed on intake d81925b1, July Grid:
-    201/201 rules with null fuel_type).
+    The Chola `[P]` / `[D]` fuel-type suffix instruction MUST reach the Pass-3
+    extractor. Without it, all Chola Private Car rules emit `fuel_type=null`
+    (bug observed on intake d81925b1, July Grid: 201/201 rules null fuel_type).
+
+    Architecture: the codegen path keeps carrier-specific rules OUT of the
+    shared base prompt and in a per-provider overlay
+    (`carrier_overlays/chola_pass3.md`) injected at runtime by provider. The
+    LLM path still carries it inline in `pass3_rules_prompt.md`.
     """
 
     @classmethod
@@ -64,6 +67,9 @@ class Pass3CholaFuelTypeSuffixTests(TestCase):
         super().setUpClass()
         cls.llm_prompt = (PROMPTS_DIR / "pass3_rules_prompt.md").read_text()
         cls.codegen_prompt = (PROMPTS_DIR / "pass3_rules_codegen_prompt.md").read_text()
+        cls.chola_overlay = (
+            PROMPTS_DIR / "carrier_overlays" / "chola_pass3.md"
+        ).read_text()
 
     def test_llm_prompt_mentions_chola_fuel_suffix(self):
         lowered = self.llm_prompt.lower()
@@ -73,16 +79,42 @@ class Pass3CholaFuelTypeSuffixTests(TestCase):
         self.assertIn("petrol", lowered)
         self.assertIn("non petrol", lowered)
 
-    def test_codegen_prompt_mentions_chola_fuel_suffix(self):
-        lowered = self.codegen_prompt.lower()
-        self.assertIn("chola", lowered)
+    def test_chola_overlay_carries_fuel_suffix(self):
+        # Codegen path: the suffix rule lives in the Chola overlay, not the base.
+        lowered = self.chola_overlay.lower()
         self.assertIn("[p]", lowered)
         self.assertIn("[d]", lowered)
         self.assertIn("petrol", lowered)
         self.assertIn("non petrol", lowered)
 
+    def test_codegen_base_prompt_has_no_carrier_specifics(self):
+        # The shared codegen base must NOT bake in carrier rules — it carries
+        # only the {carrier_overlay} placeholder. Prevents prompt bloat /
+        # cross-carrier instruction bleed.
+        base = self.codegen_prompt
+        self.assertIn("{carrier_overlay}", base)
+        self.assertNotIn("[P]", base)
+        self.assertNotIn("[D]", base)
+
+    def test_chola_overlay_injected_by_provider(self):
+        # The runtime injection wires the overlay in for Chola and leaves the
+        # prompt carrier-free for unknown providers.
+        from cins.processors.core.llm_extract import (
+            get_pass3_rules_codegen_prompt,
+            _inject_carrier_overlay,
+        )
+
+        base = get_pass3_rules_codegen_prompt()
+        chola = _inject_carrier_overlay(base, "Cholamandalam MS General Insurance")
+        self.assertIn("[P]", chola)
+        self.assertNotIn("{carrier_overlay}", chola)
+
+        unknown = _inject_carrier_overlay(base, "Some Unknown Carrier")
+        self.assertNotIn("[P]", unknown)
+        self.assertNotIn("{carrier_overlay}", unknown)
+
     def test_rule_scoped_to_chola_only(self):
         # The rule must explicitly restrict to Chola so other carriers'
         # Private Car grids (which do not use [P]/[D]) aren't mis-parsed.
-        for prompt in (self.llm_prompt, self.codegen_prompt):
-            self.assertIn("only", prompt.lower())
+        self.assertIn("only", self.llm_prompt.lower())
+        self.assertIn("only", self.chola_overlay.lower())

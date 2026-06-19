@@ -21,7 +21,7 @@ Configuration:
     MINIO_ENDPOINT_URL       (default: http://localhost:9900)
     MINIO_ACCESS_KEY         (default from .env AWS_ACCESS_KEY_ID, else "minio")
     MINIO_SECRET_KEY         (default from .env AWS_SECRET_ACCESS_KEY, else "miniosecret")
-    MINIO_BUCKET             (default from .env AWS_STORAGE_BUCKET_NAME, else "insure-iq")
+    MINIO_BUCKET             (default from .env AWS_STORAGE_BUCKET_NAME, else "insur-iq")
     MINIO_REGION             (default: us-east-1)
 
   Destination (AWS S3) — uses your aws-cli credential chain (~/.aws/...).
@@ -129,7 +129,7 @@ def main() -> int:
 
     dotenv = read_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-    src_bucket = os.environ.get("MINIO_BUCKET", dotenv.get("AWS_STORAGE_BUCKET_NAME", "insure-iq"))
+    src_bucket = os.environ.get("MINIO_BUCKET", dotenv.get("AWS_STORAGE_BUCKET_NAME", "insur-iq"))
     dst_bucket = os.environ.get("S3_BUCKET", "pbpartners-insuriq")
 
     minio = make_minio_client(dotenv)

@@ -137,13 +137,13 @@ class SheetClassifier:
         r'\baggregate'
     ]
 
-    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-2.0-flash-exp"):
+    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-3.1-flash-lite"):
         """
         Initialize classifier.
 
         Args:
             api_key: Gemini API key (default: from GEMINI_API_KEY env var)
-            model_name: Gemini model to use (default: gemini-2.0-flash-exp for cost efficiency)
+            model_name: Gemini model to use (default: gemini-3.1-flash-lite for cost efficiency)
         """
         self.api_key = api_key or os.environ.get('GEMINI_API_KEY')
         self.model_name = model_name
@@ -270,7 +270,7 @@ class SheetClassifier:
             )
 
             # Call GeminiService
-            result = self.service.generate_content(prompt, config=config, model='gemini-2.5-flash-lite')
+            result = self.service.generate_content(prompt, config=config, model='gemini-3.1-flash-lite')
 
             # Parse JSON response
             import json

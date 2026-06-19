@@ -13,11 +13,11 @@ class MergeConfigTests(TestCase):
     """Shallow-key replacement, NOT recursive deep-merge."""
 
     def test_replaces_top_level_keys(self):
-        base = {"model": "gemini-2.5-flash-lite", "prompt": "default"}
+        base = {"model": "gemini-3.1-flash-lite", "prompt": "default"}
         override = {"prompt": "custom"}
         self.assertEqual(
             merge_config(base, override),
-            {"model": "gemini-2.5-flash-lite", "prompt": "custom"},
+            {"model": "gemini-3.1-flash-lite", "prompt": "custom"},
         )
 
     def test_shallow_not_deep(self):

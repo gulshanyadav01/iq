@@ -41,6 +41,50 @@ def _render_template(text: str) -> str:
 
 
 @functools.lru_cache(maxsize=None)
+def _load_carrier_overlay_file(code, pass_id):
+    """Read a carrier overlay file by canonical code. Cached on (code, pass_id)
+    so name variants that normalize to the same carrier share one cached read."""
+    path = (
+        Path(__file__).parent.parent.parent
+        / "prompts"
+        / "carrier_overlays"
+        / f"{code}_{pass_id}.md"
+    )
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
+    except Exception as e:
+        print(f"Warning: Could not load carrier overlay {path.name}: {e}", file=sys.stderr)
+        return ""
+
+
+def get_carrier_overlay(provider_name, pass_id="pass3"):
+    """Load the provider-specific prompt overlay for a pass, or '' if none.
+
+    Carrier-specific extraction rules live in per-provider files
+    (`prompts/carrier_overlays/<code>_<pass_id>.md`) instead of bloating the
+    shared base prompt — only the matching provider's overlay is injected at
+    runtime (see `_inject_carrier_overlay`), so the prompt the LLM sees stays
+    small and on-topic for the document at hand. Returns '' for unknown
+    providers or when no overlay file exists.
+    """
+    from cins.schema.carriers import normalize_carrier  # local: Django boot order
+
+    code = normalize_carrier(provider_name or "")
+    if not code:
+        return ""
+    return _load_carrier_overlay_file(code.lower(), pass_id)
+
+
+def _inject_carrier_overlay(prompt: str, provider_name, pass_id="pass3") -> str:
+    """Substitute the `{carrier_overlay}` placeholder in a base prompt with the
+    resolved provider's overlay (or '' when there is none)."""
+    return prompt.replace("{carrier_overlay}", get_carrier_overlay(provider_name, pass_id))
+
+
+@functools.lru_cache(maxsize=None)
 def get_pass0a_email_cleaning_schema():
     """Get the EmailCleaningExtraction JSON schema from Pydantic model."""
     return EmailCleaningExtraction.model_json_schema()
@@ -673,6 +717,9 @@ def _extract_pass3_via_codegen(
     print("=" * 70, file=sys.stderr)
 
     prompt = get_pass3_rules_codegen_prompt()
+    # Inject only this document's provider overlay (carrier-specific rules) so
+    # the shared base prompt stays small and provider-agnostic.
+    prompt = _inject_carrier_overlay(prompt, metadata.provider_name, "pass3")
 
     # Build context header (same structure as the JSON pass)
     context_parts = [

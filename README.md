@@ -32,7 +32,7 @@ The setup script will:
 ### Monorepo structure
 - `backend/` — Django app, dev Dockerfile, entrypoint
 - `web/` — Vue app with Vite + Tailwind
-- `postgres/` — DB bootstrap (`auth`, `insure_iq`)
+- `postgres/` — DB bootstrap (`auth`, `insur_iq`)
 - `docker-compose.dev.yml` — full dev stack
 - `scripts/` — helper scripts (`init-db-user.sh`, `nuke.sh`)
 
@@ -90,11 +90,11 @@ Environment variables are wired in `docker-compose.dev.yml`. Defaults are provid
 ## Manual Setup
 
 ### Rename checklist (after copying the repo)
-# Linux: sed -i 's/insure_iq/your_app/g'
+# Linux: sed -i 's/insur_iq/your_app/g'
 
 # Kebab-case rename
-grep -rl "insure-iq" . | xargs sed -i '' -e 's/insure-iq/your-app/g' # macOS
-# Linux: sed -i 's/insure-iq/your-app/g'
+grep -rl "insur-iq" . | xargs sed -i '' -e 's/insur-iq/your-app/g' # macOS
+# Linux: sed -i 's/insur-iq/your-app/g'
 ```
 
 Backend Django project/module rename: If you change the Django project module name under `backend/`, also update imports and `DJANGO_SETTINGS_MODULE` where relevant. Current project module is under `backend/config` and apps under `backend/*/apps.py`.

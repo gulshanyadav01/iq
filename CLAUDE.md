@@ -1,4 +1,4 @@
-# insure_iq
+# insur_iq
 
 Full-stack monorepo: Django 5 backend + Nuxt 4 (Vue 3) frontend.
 Domain: insurance commission intake and policy data extraction.
@@ -58,7 +58,7 @@ Services in dev:
 - Frontend: `http://localhost:8080`
 - Auth: `http://localhost:8080/auth`
 - MinIO console: `http://localhost:9090`
-- Postgres: port 5432, DB `insure_iq`
+- Postgres: port 5432, DB `insur_iq`
 
 ## Environment Variables
 

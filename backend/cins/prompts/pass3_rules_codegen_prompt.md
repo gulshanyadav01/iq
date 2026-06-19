@@ -168,9 +168,22 @@ Some commission tables use 2–4 header rows encoding multiple dimensions (e.g. 
 - Inspect ALL header rows to understand what each column encodes before writing parsing logic.
 - Use `parse_cc_range(header)` on each column header to detect CC/KW ranges. If it returns a non-empty string, store it as `conditions["cc"]`.
 - Use `parse_gvw_range(header)` on commercial-vehicle headers to detect Gross Vehicle Weight ranges (tonne or kg). If it returns a non-empty string, store it verbatim as `conditions["gvw"]` — the transformer converts tonnes to kilograms.
+- **Run `parse_gvw_range` / `parse_cc_range` on the SUBCLASS *row-label* cell too**, not only column headers — commercial grids encode weight/engine bands as sub-class row values (e.g. `GCCV | 2_UPTO_3.5T`). When non-empty, route to `conditions["gvw"]`/`conditions["cc"]` and keep only the residual (non-range) part as the sub-class. Store the sub-class under the canonical key `vehicle_sub_class` (and `vehicle_make`/`vehicle_model`) — the short keys `subclass`/`make`/`model` are dropped by the transformer.
 - If a header is a brand/make name (no digits, not a CC range), store it as `conditions["vehicle_make"]`.
 - If a header identifies a vehicle sub-class (e.g. "SCOOTER", "BIKE", "BUS"), store it as `conditions["vehicle_sub_class"]`.
 - A single column may encode multiple dimensions (e.g. "7 KW Bike" = cc + sub-class); split and assign each to its canonical key.
+
+### Value-in-cell (self-describing) headers
+
+Occasionally a grid is flattened so the **commission rate is embedded inside the cell
+itself** rather than in a separate data cell — a cell that splits into **3+ `>`-separated
+parts whose LAST part is numeric** (e.g. `<dimA> > <dimB> > 0.42`). When you see that
+shape, the generic `State > Coverage` column-map is wrong (it would treat the dimensions
+as state/coverage and lose them). Parse each such cell into its dimensions + trailing
+rate, and read the row's other leading cells for the remaining dimensions. The meaning of
+each `>`-part is carrier-specific — see CARRIER-SPECIFIC RULES for any provider that uses
+this layout. Do NOT assume this layout for grids that don't exhibit the numeric-last-part
+shape.
 
 After splitting tables, for each `[type: commission]` table:
 
@@ -237,12 +250,26 @@ for table_name, ttype, lines in tables:
         model = row[MODEL_COL].strip() if MODEL_COL < len(row) else ""
 
         base_conditions = {}
-        if subclass:
-            base_conditions["subclass"] = subclass
+        # GVW/CC bands frequently appear as SUBCLASS *row labels* (e.g.
+        # "2_UPTO_3.5T", "350cc"), not only as column headers. Split them off
+        # the sub-class cell and route to the canonical range keys; the
+        # transformer parses the range (and converts tonnes to kg).
+        gvw_label = parse_gvw_range(subclass)
+        cc_label = parse_cc_range(subclass) if not gvw_label else ""
+        residual_subclass = subclass if not (gvw_label or cc_label) else ""
+        if gvw_label:
+            base_conditions["gvw"] = gvw_label
+        if cc_label:
+            base_conditions["cc"] = cc_label
+        # Use the CANONICAL keys the transformer reads — "vehicle_sub_class",
+        # "vehicle_make", "vehicle_model". Short keys ("subclass"/"make"/"model")
+        # are silently dropped (the transformer never reads them).
+        if residual_subclass:
+            base_conditions["vehicle_sub_class"] = residual_subclass
         if make:
-            base_conditions["make"] = make
+            base_conditions["vehicle_make"] = make
         if model:
-            base_conditions["model"] = model
+            base_conditions["vehicle_model"] = model
 
         customer_type = "renewal" if "[RENEWAL]" in subclass else ("new" if "[NEW]" in subclass else "")
 
@@ -294,46 +321,13 @@ indices derived by inspecting the header rows from `commission_markdown`.**
 
 ## CARRIER-SPECIFIC RULES
 
-### Chola — Private Car fuel-type suffix
+Some providers have document conventions that differ from the generic patterns above
+(special label suffixes, footnote modifiers, flattened headers). Those rules are NOT kept
+in this shared prompt — they are stored per-provider and injected here at runtime based on
+the document's resolved provider. Apply any rules in the block below; if it is empty, the
+generic patterns above are sufficient for this provider.
 
-When `**Provider**` is `Chola` AND `product_name` resolves to `Private Car`, the
-SUBCLASS / CC labels in Chola's Standalone OD grids use a trailing fuel-type
-suffix in square brackets that MUST be parsed into `conditions["fuel_type"]`:
-
-- `[P]` (e.g. `UPTO 1000 CC[P]`, `1000 TO 1500 CC[P]`, `ABOVE 1500 CC[P]`) →
-  `conditions["fuel_type"] = "Petrol"`
-- `[D]` (e.g. `UPTO 1000 CC[D]`, `ABOVE 1500 CC[D]`) →
-  `conditions["fuel_type"] = "Non Petrol"`
-
-Strip the suffix from the label before passing it to `parse_cc_range` so the CC
-range parses cleanly (`"UPTO 1000 CC[P]"` → CC range `"UPTO 1000 CC"`,
-fuel_type `"Petrol"`).
-
-This rule applies ONLY when the provider is `Chola`. Other carriers' Private
-Car grids do not use this convention — do NOT parse `[P]` / `[D]` suffixes for
-any other provider.
-
-If the SUBCLASS label has NO `[P]` / `[D]` suffix (e.g. the Package grid uses
-plain `UPTO 1000 CC`), leave `fuel_type` unset — the rule applies to all fuel
-types.
-
-### Chola — CPA deduction footnote
-
-When `**Provider**` is `Chola`, the document often contains a notes/footnote
-clause of the form "if CPA is not collected for individual name then 1.5% of
-OD Pay-out will be deducted" (wording, percentage, and premium basis may
-vary). `extract_notes(tables)` will surface it in `notes_text`. Pass it
-through verbatim on every rule's `other_conditions` field — do NOT try to
-translate the clause into the rule's `commission_value` or `conditions`
-fields. The structured rule schema cannot model a customer-type-dependent
-percentage deduction off OD Pay-out at the rule level.
-
-Additionally emit a structured representation under `qualifying_clauses`
-(see section "QUALIFYING CLAUSES" below) so downstream booking pipelines
-can ingest the modifier programmatically.
-
-This rule applies ONLY when the provider is `Chola`. Do not invent
-equivalent footnotes for other carriers.
+{carrier_overlay}
 
 ---
 

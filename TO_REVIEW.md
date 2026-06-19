@@ -1,4 +1,4 @@
-# Architecture Review — `insure_iq` backend
+# Architecture Review — `insur_iq` backend
 
 Synthesized from a 3-lens critical review (Django/DRF, Celery/pipeline, data/persistence). Findings are ranked by urgency, not by app.
 
