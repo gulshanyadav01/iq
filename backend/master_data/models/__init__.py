@@ -1,5 +1,11 @@
 from .insurer import InsurerMaster
-from .lookups import CarrierMaster, FuelTypeMaster, PlanTypeMaster, PolicyTypeMaster
+from .lookups import (
+    CarrierMaster,
+    FuelTypeMaster,
+    PlanTypeMaster,
+    PolicyTypeMaster,
+    RTOMaster,
+)
 from .upload import MasterDataUpload
 from .vehicle import VehicleClassMaster, VehicleMaster, VehicleSubClassMaster
 
@@ -12,5 +18,6 @@ __all__ = [
     "FuelTypeMaster",
     "PlanTypeMaster",
     "CarrierMaster",
+    "RTOMaster",
     "MasterDataUpload",
 ]

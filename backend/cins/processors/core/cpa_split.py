@@ -98,6 +98,27 @@ def cpa_deduction_clause(qualifying_clauses):
     return None
 
 
+def _cpa_clause_from_notes(other_conditions):
+    """Detect a without-cpa conditional_deduction clause from free-text notes.
+
+    Reuses the same footnote patterns as Pass-3 codegen so a rule whose notes
+    name the deduction ("...X% of Net/OD Payout will be deducted") gets split
+    even when no structured clause was attached upstream. Returns the clause
+    dict (same shape as `cpa_deduction_clause`) or None.
+    """
+    if not other_conditions:
+        return None
+    # Lazy import: detect_qualifying_clauses is a host-side helper in the
+    # codegen module; importing it at module load is unnecessary coupling.
+    from cins.processors.core.code_gen_executor import detect_qualifying_clauses
+
+    try:
+        clauses = detect_qualifying_clauses(str(other_conditions))
+    except Exception:
+        return None
+    return cpa_deduction_clause(clauses)
+
+
 def deduct_pct(v, amount):
     """Subtract `amount` percentage points from a numeric % cell; pass others through."""
     if v is None or v == "":
@@ -116,14 +137,18 @@ def _split_rule(rule):
     conditions = rule.get("conditions") or {}
     outcome = rule.get("outcome") or {}
     dc = cpa_deduction_clause(outcome.get("qualifying_clauses"))
+    if dc is None:
+        # Fallback: synthesize the clause from the rule's free-text notes.
+        # Chola Commercial-Vehicle grids carry the CPA-deduction footnote only
+        # in outcome.other_conditions ("...1.5% of Net Payout will be
+        # deducted"), never as a structured qualifying_clause, so without this
+        # the without-cpa deduction is silently dropped for CV.
+        dc = _cpa_clause_from_notes(outcome.get("other_conditions"))
     if dc is None or conditions.get("cpa") is not None:
         return [rule]
 
     dc_key = _clause_key(dc)
     deduction = ((dc.get("effect") or {}).get("deduction") or {}).get("value")
-    ded_col = applied_on_to_column(
-        (dc.get("effect") or {}).get("deduction", {}).get("applied_on")
-    )
     rule_col = applied_on_to_column(derive_applied_on(conditions, outcome))
 
     def variant(cpa_value, apply_deduction):
@@ -133,9 +158,14 @@ def _split_rule(rule):
         out["qualifying_clauses"] = [
             c for c in (out.get("qualifying_clauses") or []) if _clause_key(c) != dc_key
         ]
-        # Deduction only applies when the rule's commission column is the one the
-        # clause names (OD). A third-party (TP) or net rule keeps its payout.
-        if apply_deduction and ded_col is not None and ded_col == rule_col:
+        # The CPA-not-collected deduction reduces the carrier's commission
+        # *payout*, which is whatever column the rule pays in — OD (Private Car
+        # comprehensive) or Net (Commercial Vehicle). The TP/PA column is a
+        # statutory pass-through and is never reduced. So apply the deduction to
+        # the rule's own payout column when it is OD or Net, independent of the
+        # premium basis named in the clause (often a Private-Car-centric "OD
+        # Pay-out"). This fixes CV-Net rules without ever touching TP payouts.
+        if apply_deduction and rule_col in ("od", "net"):
             out["percentage_value"] = deduct_pct(out.get("percentage_value"), deduction)
         return v
 

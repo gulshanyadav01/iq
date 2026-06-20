@@ -18,7 +18,11 @@ from datetime import datetime
 from typing import List, Dict, Optional, Tuple, Any
 
 from cins.schema.carriers import CARRIER_FULL_NAMES, normalize_carrier
-from cins.schema.raw_extraction import RawExtraction, RawCommissionEntry, RawMasterDataEntry
+from cins.schema.raw_extraction import (
+    RawExtraction,
+    RawCommissionEntry,
+    RawMasterDataEntry,
+)
 from cins.schema.cics_model import (
     CICSDocument,
     DocumentMetadata,
@@ -76,18 +80,18 @@ POLICY_TYPE_MAPPINGS = {
     "comp": "comprehensive",
     "full": "comprehensive",
     "package": "comprehensive",
-    "pack": "comprehensive",       # Cholamandalam: PACK = comprehensive
+    "pack": "comprehensive",  # Cholamandalam: PACK = comprehensive
     "third-party": "third-party",
     "third party": "third-party",
     "tp": "third-party",
     "tp only": "third-party",
     "satp": "third-party",
-    "act": "third-party",          # Cholamandalam: ACT = third-party (act-only)
+    "act": "third-party",  # Cholamandalam: ACT = third-party (act-only)
     "saod": "saod",
     "sa od": "saod",
     "stand alone od": "saod",
     "standalone od": "saod",
-    "sod": "saod",                 # Cholamandalam: SOD = standalone OD
+    "sod": "saod",  # Cholamandalam: SOD = standalone OD
     "od-only": "saod",
     "od only": "saod",
     "own damage": "saod",
@@ -448,6 +452,9 @@ class RawToCICSTransformer:
         self.warnings: List[str] = []
         self.errors: List[str] = []
         self._trace_counter = 0
+        # Short carrier code (e.g. "Chola") for carrier-scoped transforms.
+        # Set per-document in transform(); empty until then.
+        self._carrier_code: str = ""
 
     def transform(
         self, raw: RawExtraction
@@ -470,6 +477,10 @@ class RawToCICSTransformer:
 
         # Transform provider
         provider = self._transform_provider(raw.provider)
+        # Resolve the carrier code once for carrier-scoped transforms (Fix i).
+        self._carrier_code = (
+            normalize_carrier(getattr(raw.provider, "name", "") or "") or ""
+        )
 
         # Transform commission period
         period = self._transform_period(raw)
@@ -679,8 +690,7 @@ class RawToCICSTransformer:
         # the original sheet header (e.g. ``1_GCCV_3W``) survives only in
         # entries' source_section or in the raw global_vehicle_type_text.
         is_commercial = bool(
-            product_subproduct
-            and product_subproduct.startswith("commercial-")
+            product_subproduct and product_subproduct.startswith("commercial-")
         )
         product_key_wheels = (
             self._extract_wheels_from_key(product_key) if is_commercial else None
@@ -705,34 +715,43 @@ class RawToCICSTransformer:
             # can land. Without this, `_transform_rule` drops the conditions
             # object whenever the LLM emitted only outcome/text fields, and
             # downstream bifurcation never sees the rule.
+            # The GCV section token (e.g. "1_3W_AUTO", "1_TRAC", "2_EXCAVATOR")
+            # commonly survives only in the rule's free text, not in
+            # source_section, so probe both for wheel- and sub-class hints.
             section = getattr(entry, "source_section", "") or ""
-            entry_wheels = (
-                self._extract_wheels_from_key(section)
-                if is_commercial and section
-                else None
-            )
+            rule_text = getattr(entry, "rule_text", "") or ""
+            entry_wheels = None
+            entry_sub_class = None
+            if is_commercial:
+                for hint_src in (section, rule_text):
+                    if not hint_src:
+                        continue
+                    entry_wheels = entry_wheels or self._extract_wheels_from_key(
+                        hint_src
+                    )
+                    entry_sub_class = (
+                        entry_sub_class or self._extract_sub_class_from_key(hint_src)
+                    )
             inferred_wheels = (
                 entry_wheels or product_key_wheels or global_wheels
                 if is_commercial
                 else None
             )
+            inferred_sub_class = key_sub_class or entry_sub_class
             needs_backfill = bool(
-                key_policy_type or key_sub_class or inferred_wheels
+                key_policy_type or inferred_sub_class or inferred_wheels
             )
             # GCV with no wheel hint anywhere must still surface a
             # conditions object so bifurcation fans it out into 3W + 4W.
-            if (
-                product_subproduct == "commercial-gcv"
-                and not inferred_wheels
-            ):
+            if product_subproduct == "commercial-gcv" and not inferred_wheels:
                 needs_backfill = True
             if needs_backfill and rule.conditions is None:
                 rule.conditions = RuleConditions()
             if rule.conditions is not None:
                 if key_policy_type and not rule.conditions.policy_type:
                     rule.conditions.policy_type = key_policy_type
-                if key_sub_class and not rule.conditions.vehicle_sub_class:
-                    rule.conditions.vehicle_sub_class = key_sub_class
+                if inferred_sub_class and not rule.conditions.vehicle_sub_class:
+                    rule.conditions.vehicle_sub_class = inferred_sub_class
                 if inferred_wheels and not rule.conditions.number_of_wheels:
                     rule.conditions.number_of_wheels = inferred_wheels
             rules.append(rule)
@@ -848,7 +867,14 @@ class RawToCICSTransformer:
     def _extract_sub_class_from_key(self, product_key: str) -> Optional[List[str]]:
         """Extract vehicle sub-class hint encoded in a product key (e.g. 'Scooter', 'School Bus')."""
         key_lower = product_key.lower()
-        # Longer patterns first to avoid partial matches
+        # Longer/more-specific patterns first to avoid partial matches.
+        # The bare tokens (school / staff / trac / excavator / harvest / maxi)
+        # match the abbreviated GCV section keys Chola bakes into the row text
+        # (e.g. "1_TRAC", "2_STAFF", "2_EXCAVATOR", "3_HARVESTOR", "4_MAXI").
+        # These special-purpose CV bodies carry no GVW band and no wheel token,
+        # so without a sub-class hint they collapse into the (0,0) catch-all and
+        # get cross-cloned into 3W by bifurcation. The matched sub-class also
+        # routes them to 4W-and-Above only (see _is_four_wheel_only_subclass).
         hints = [
             ("school bus", "school-bus"),
             ("staff bus", "staff-bus"),
@@ -856,6 +882,12 @@ class RawToCICSTransformer:
             ("mini bus", "mini-bus"),
             ("agri tractor", "agricultural-tractor"),
             ("agricultural tractor", "agricultural-tractor"),
+            ("school", "school-bus"),
+            ("staff", "staff-bus"),
+            ("excavator", "excavator"),
+            ("harvest", "harvester"),
+            ("maxi", "maxicab"),
+            ("trac", "tractor"),
             ("scooter", "scooter"),
             ("e-rickshaw", "e-rickshaw"),
             ("e rickshaw", "e-rickshaw"),
@@ -864,6 +896,41 @@ class RawToCICSTransformer:
             if pattern in key_lower:
                 return [sub_class]
         return None
+
+    # Stems of special-purpose CV bodies that are always 4-Wheel-and-Above
+    # (never 3-wheelers). A wheel-less rule scoped to one of these must
+    # bifurcate to 4W only — cloning it to 3W produces spurious rows and (0,0)
+    # catch-alls with conflicting rates. Matched by substring so plurals and
+    # variants from either our extractor or the LLM codegen all resolve (e.g.
+    # "excavator" / "excavators", "tractor" / "agricultural-tractor").
+    _FOUR_WHEEL_ONLY_SUBCLASS_STEMS = (
+        "bus",
+        "tractor",
+        "excavator",
+        "harvest",
+        "maxicab",
+        "maxi-cab",
+        "dumper",
+        "tipper",
+        "trailer",
+        "tanker",
+        "crane",
+    )
+
+    @classmethod
+    def _is_four_wheel_only_subclass(cls, conditions) -> bool:
+        """True when conditions carry a vehicle_sub_class that is 4W-only."""
+        if conditions is None:
+            return False
+        sub = getattr(conditions, "vehicle_sub_class", None)
+        if not sub:
+            return False
+        values = sub if isinstance(sub, (list, tuple)) else [sub]
+        return any(
+            stem in str(v).lower()
+            for v in values
+            for stem in cls._FOUR_WHEEL_ONLY_SUBCLASS_STEMS
+        )
 
     def _extract_wheels_from_key(self, product_key: str) -> Optional[List[str]]:
         """Extract number_of_wheels hint encoded in a commercial-vehicle product key.
@@ -1121,12 +1188,11 @@ class RawToCICSTransformer:
         # Extract domain-specific fields from entry.conditions dict
         entry_conditions = getattr(entry, "conditions", None) or {}
 
-        # Fuel type — expand "non-petrol" group to its component fuels
+        # Fuel type — expand grid-group tokens to their component fuels.
         fuel_type = self._normalize_list_field(
             entry_conditions.get("fuel_type"), FUEL_TYPE_MAPPINGS, "fuel_type"
         )
-        if fuel_type and "non-petrol" in fuel_type:
-            fuel_type = sorted(set(fuel_type) - {"non-petrol"} | {"diesel", "cng", "lpg"})
+        fuel_type = self._expand_fuel_group(fuel_type)
 
         # Number of wheels
         number_of_wheels = self._normalize_list_field(
@@ -1177,7 +1243,14 @@ class RawToCICSTransformer:
         # CPA
         cpa = self._normalize_single_field(
             entry_conditions.get("cpa"),
-            {"with cpa": "with-cpa", "with-cpa": "with-cpa", "without cpa": "without-cpa", "without-cpa": "without-cpa", "yes": "with-cpa", "no": "without-cpa"},
+            {
+                "with cpa": "with-cpa",
+                "with-cpa": "with-cpa",
+                "without cpa": "without-cpa",
+                "without-cpa": "without-cpa",
+                "yes": "with-cpa",
+                "no": "without-cpa",
+            },
             "cpa",
         )
 
@@ -1485,13 +1558,25 @@ class RawToCICSTransformer:
     # Real make-specific commission rules are rare; the validator will still
     # surface any genuine make/model overlap.
     _DEDUPE_LIST_FIELDS = (
-        "vehicle_sub_class", "policy_type", "state", "rto",
-        "number_of_wheels", "school_bus_type", "booking_mode",
+        "vehicle_sub_class",
+        "policy_type",
+        "state",
+        "rto",
+        "number_of_wheels",
+        "school_bus_type",
+        "booking_mode",
         "fuel_type",
-        "vehicle_carrier", "business_type", "deal_parameter",
+        "vehicle_carrier",
+        "business_type",
+        "deal_parameter",
     )
     _DEDUPE_SCALAR_FIELDS = (
-        "zero_dep", "cpa", "ncb", "vehicle_age", "od_term", "tp_term",
+        "zero_dep",
+        "cpa",
+        "ncb",
+        "vehicle_age",
+        "od_term",
+        "tp_term",
     )
     # (start_field, end_field) tuples to de-overlap. The "other" ranges in
     # this list participate in the group key, so different CC buckets don't
@@ -1528,8 +1613,74 @@ class RawToCICSTransformer:
     }
 
     # Canonical GCV wheel categories per PRODUCT_FIELD_VALUES.md.
+    def _expand_fuel_group(self, fuel_type):
+        """Expand grid-group fuel tokens to their component fuels.
+
+        Default (all carriers): the diesel grid token "non-petrol" expands to
+        {diesel, cng, lpg} — the historical behavior.
+
+        Chola (Cholamandalam): CNG/LPG/Electric follow the *Petrol* grid, not the
+        Diesel grid (the carrier's grid-alias rule, confirmed by client
+        reconciliation). So for Chola the diesel grid is diesel-only and the
+        petrol grid carries the alternative fuels:
+            [D] non-petrol -> {diesel}
+            [P] petrol     -> {petrol, cng, lpg, electric}
+
+        Idempotent: the "non-petrol" group token is consumed on first pass, and
+        re-adding the petrol set is a stable union, so a second pass is a no-op.
+        Returns the input unchanged when no group token is present.
+        """
+        if not fuel_type:
+            return fuel_type
+        fuels = set(fuel_type)
+        if self._carrier_code == "Chola":
+            changed = False
+            if "non-petrol" in fuels:
+                fuels = (fuels - {"non-petrol"}) | {"diesel"}
+                changed = True
+            if "petrol" in fuels:
+                fuels |= {"petrol", "cng", "lpg", "electric"}
+                changed = True
+            return sorted(fuels) if changed else fuel_type
+        # Default carriers: preserve historical non-petrol -> {diesel, cng, lpg}.
+        if "non-petrol" in fuels:
+            return sorted((fuels - {"non-petrol"}) | {"diesel", "cng", "lpg"})
+        return fuel_type
+
     _GCV_WHEEL_VALUES = ("3w", "4w-and-above")
     _GCV_WHEEL_SUFFIX = {"3w": "3W", "4w-and-above": "4WAA"}
+
+    # GVW upper bounds at/above this are treated as "all-GVW" (open-ended), not
+    # a real weight grade. Real Chola GCV bands top out at 47000kg; client
+    # all-GVW rows use 999999. Anything in between is a genuine weight grade.
+    _ALL_GVW_END_THRESHOLD = 90000
+
+    @classmethod
+    def _is_weight_graded_band(cls, conditions) -> bool:
+        """True when conditions carry a real (bounded) GVW weight grade.
+
+        A goods 3-wheeler (auto) is never weight-graded — only 4-wheel LCVs and
+        trucks carry GVW bands. So a wheel-less rule with any genuine band, light
+        (``0-3500``) or heavy (``3500-7500`` …), belongs to 4W-and-Above only.
+        Cloning such a rule to 3W produced spurious 3W rows the client never
+        publishes (client 3W exists only as all-GVW auto). The ``(0,0)`` "no
+        band" sentinel and open all-GVW bands are NOT weight grades and still
+        fan out to both wheel categories.
+        """
+        if conditions is None:
+            return False
+        start = getattr(conditions, "gvw_start_range", None)
+        end = getattr(conditions, "gvw_end_range", None)
+        try:
+            start = int(start) if start is not None else 0
+            end = int(end) if end is not None else 0
+        except (TypeError, ValueError):
+            return False
+        if start > 0:
+            return True  # lower-bounded heavy band
+        # start == 0: a finite positive upper bound is a real light grade
+        # (e.g. 0-3500). end == 0 is the sentinel; a very large end is all-GVW.
+        return 0 < end < cls._ALL_GVW_END_THRESHOLD
 
     def _bifurcate_gcv_wheels(
         self, rules: List[CommissionRule]
@@ -1540,19 +1691,40 @@ class RawToCICSTransformer:
         both 3W and 4W & Above) or contains more than one value. Rules
         already scoped to a single wheel category pass through unchanged.
 
+        GVW-aware (Fix iii): a wheel-less rule carrying a *real heavy* GVW band
+        (``gvw_start_range > 0`` — a lower-bounded band above the light/3W
+        range) maps to 4W-and-Above only. A 3-wheeler cannot carry a band that
+        starts above zero, so cloning it to 3W produced spurious rows (e.g. 3W
+        paired with a 40-tonne band) and (0,0) catch-alls with conflicting
+        rates. Bands that start at 0 (all-GVW, light bands like 0-3500, or the
+        (0,0) unknown sentinel) still fan out to both categories. An explicit
+        multi-value ``number_of_wheels`` is authoritative and always respected.
+
         Cloned rules inherit priority, outcome, dates, and description from
         the source; rule_id gets a wheel-category suffix to stay unique.
         """
         expanded: List[CommissionRule] = []
         for rule in rules:
-            wheels = (
-                rule.conditions.number_of_wheels if rule.conditions else None
-            )
+            wheels = rule.conditions.number_of_wheels if rule.conditions else None
             if wheels and len(wheels) == 1:
                 expanded.append(rule)
                 continue
 
-            targets = wheels if wheels else list(self._GCV_WHEEL_VALUES)
+            if wheels:
+                # Explicit multi-value list — authoritative, fan to each.
+                targets = wheels
+            elif self._is_four_wheel_only_subclass(rule.conditions):
+                # Wheel-less special-purpose body (tractor, bus, excavator,
+                # harvester, maxicab) -> 4W & Above only. These carry no GVW
+                # band; cloning them to 3W produced the (0,0) catch-alls with
+                # conflicting rates.
+                targets = ["4w-and-above"]
+            elif self._is_weight_graded_band(rule.conditions):
+                # Wheel-less + any real GVW weight grade (light or heavy) ->
+                # 4W & Above only. 3-wheelers are never weight-graded.
+                targets = ["4w-and-above"]
+            else:
+                targets = list(self._GCV_WHEEL_VALUES)
             for wheel in targets:
                 if rule.conditions is not None:
                     cloned_conditions = rule.conditions.model_copy(deep=True)
@@ -1673,10 +1845,12 @@ class RawToCICSTransformer:
             for group_rules in groups.values():
                 if len(group_rules) < 2:
                     continue
-                group_rules.sort(key=lambda r: (
-                    getattr(r.conditions, start_field),
-                    getattr(r.conditions, end_field),
-                ))
+                group_rules.sort(
+                    key=lambda r: (
+                        getattr(r.conditions, start_field),
+                        getattr(r.conditions, end_field),
+                    )
+                )
 
                 # Ladder-edge singleton promotion (before overlap-bump so
                 # the bump step normalises the resulting shared boundary).
@@ -1798,8 +1972,10 @@ class RawToCICSTransformer:
                     continue
                 # Snapshot original boundaries so evidence is order-independent.
                 pairs = [
-                    (getattr(r.conditions, start_field),
-                     getattr(r.conditions, end_field))
+                    (
+                        getattr(r.conditions, start_field),
+                        getattr(r.conditions, end_field),
+                    )
                     for r in group_rules
                 ]
                 ends = {e for _s, e in pairs}
@@ -1840,7 +2016,12 @@ class RawToCICSTransformer:
         hu = h.upper().replace("_", " ")
         if not any(c.isdigit() for c in hu):
             return ""
-        if "CC" in hu.split() or hu.endswith("CC") or "KW" in hu.split() or hu.endswith("KW"):
+        if (
+            "CC" in hu.split()
+            or hu.endswith("CC")
+            or "KW" in hu.split()
+            or hu.endswith("KW")
+        ):
             return ""
         if "GVW" in hu or "KG" in hu:
             return h
@@ -1858,8 +2039,15 @@ class RawToCICSTransformer:
                     return h
             i += 1
         qualifiers = (
-            "UPTO", "UP TO", "ABOVE", "BELOW",
-            "GREATER THAN", "MORE THAN", "LESS THAN", ">", "<",
+            "UPTO",
+            "UP TO",
+            "ABOVE",
+            "BELOW",
+            "GREATER THAN",
+            "MORE THAN",
+            "LESS THAN",
+            ">",
+            "<",
         )
         if any(q in hu for q in qualifiers):
             return h
@@ -2077,9 +2265,7 @@ class RawToCICSTransformer:
             try:
                 validated_clauses.append(QualifyingClause.model_validate(raw_clause))
             except Exception as e:
-                self.warnings.append(
-                    f"Dropping malformed qualifying_clause: {e}"
-                )
+                self.warnings.append(f"Dropping malformed qualifying_clause: {e}")
         if validated_clauses:
             outcome_dict["qualifying_clauses"] = validated_clauses
 

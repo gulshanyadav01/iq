@@ -105,6 +105,8 @@ def partition_global_modifiers(cics_doc, min_shared=2):
     global_other = {text for text, n in other_counts.items() if n >= min_shared}
     global_clauses = {key for key, n in clause_counts.items() if n >= min_shared}
     return global_other, global_clauses
+
+
 from commission_intake.serializers import (
     CommissionDocumentCreateSerializer,
     CommissionDocumentListSerializer,
@@ -112,7 +114,12 @@ from commission_intake.serializers import (
     ProcessingModeRequestSerializer,
     RerunPassRequestSerializer,
 )
-from commission_intake.tasks import enqueue_processing_chain, rerun_single_pass, rerun_transform, run_validation
+from commission_intake.tasks import (
+    enqueue_processing_chain,
+    rerun_single_pass,
+    rerun_transform,
+    run_validation,
+)
 
 
 class CommissionDocumentViewSet(viewsets.GenericViewSet):
@@ -154,7 +161,9 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         serializer.is_valid(raise_exception=True)
         doc = serializer.save(uploaded_by=request.user)
         enqueue_processing_chain(str(doc.id), mode=doc.processing_mode)
-        return Response(CommissionDocumentSerializer(doc).data, status=status.HTTP_201_CREATED)
+        return Response(
+            CommissionDocumentSerializer(doc).data, status=status.HTTP_201_CREATED
+        )
 
     @extend_schema(
         summary="List commission documents",
@@ -199,15 +208,25 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             )
         req_serializer = ProcessingModeRequestSerializer(data=request.data)
         req_serializer.is_valid(raise_exception=True)
-        mode = req_serializer.validated_data.get("processing_mode") or instance.processing_mode
+        mode = (
+            req_serializer.validated_data.get("processing_mode")
+            or instance.processing_mode
+        )
         instance.status = CommissionDocument.Status.INITIATED
         instance.error = None
         instance.processing_mode = mode
         instance.is_validated = False
         instance.validated_at = None
-        instance.save(update_fields=[
-            "status", "error", "processing_mode", "is_validated", "validated_at", "updated_at",
-        ])
+        instance.save(
+            update_fields=[
+                "status",
+                "error",
+                "processing_mode",
+                "is_validated",
+                "validated_at",
+                "updated_at",
+            ]
+        )
         enqueue_processing_chain(str(instance.id), mode=mode)
         return Response(CommissionDocumentSerializer(instance).data)
 
@@ -220,7 +239,10 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
     @action(detail=True, methods=["post"], url_path="index")
     def index(self, request, *args, **kwargs):
         instance = self.get_object()
-        in_flight = (CommissionDocument.Status.INDEXING, CommissionDocument.Status.EXTRACTING)
+        in_flight = (
+            CommissionDocument.Status.INDEXING,
+            CommissionDocument.Status.EXTRACTING,
+        )
         if instance.status in in_flight:
             return Response(
                 {"detail": "Document is currently being processed."},
@@ -231,9 +253,16 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         instance.processing_mode = CommissionDocument.ProcessingMode.INDEX_ONLY
         instance.is_validated = False
         instance.validated_at = None
-        instance.save(update_fields=[
-            "status", "error", "processing_mode", "is_validated", "validated_at", "updated_at",
-        ])
+        instance.save(
+            update_fields=[
+                "status",
+                "error",
+                "processing_mode",
+                "is_validated",
+                "validated_at",
+                "updated_at",
+            ]
+        )
         enqueue_processing_chain(str(instance.id), mode="index_only")
         return Response(CommissionDocumentSerializer(instance).data)
 
@@ -248,7 +277,10 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         from commission_intake.models import IndexedContent
 
         instance = self.get_object()
-        in_flight = (CommissionDocument.Status.INDEXING, CommissionDocument.Status.EXTRACTING)
+        in_flight = (
+            CommissionDocument.Status.INDEXING,
+            CommissionDocument.Status.EXTRACTING,
+        )
         if instance.status in in_flight:
             return Response(
                 {"detail": "Document is currently being processed."},
@@ -264,9 +296,16 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         instance.processing_mode = CommissionDocument.ProcessingMode.EXTRACT_ONLY
         instance.is_validated = False
         instance.validated_at = None
-        instance.save(update_fields=[
-            "status", "error", "processing_mode", "is_validated", "validated_at", "updated_at",
-        ])
+        instance.save(
+            update_fields=[
+                "status",
+                "error",
+                "processing_mode",
+                "is_validated",
+                "validated_at",
+                "updated_at",
+            ]
+        )
         enqueue_processing_chain(str(instance.id), mode="extract_only")
         return Response(CommissionDocumentSerializer(instance).data)
 
@@ -282,7 +321,10 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         from commission_intake.models import IndexedContent, ExtractionPass
 
         instance = self.get_object()
-        in_flight = (CommissionDocument.Status.INDEXING, CommissionDocument.Status.EXTRACTING)
+        in_flight = (
+            CommissionDocument.Status.INDEXING,
+            CommissionDocument.Status.EXTRACTING,
+        )
         if instance.status in in_flight:
             return Response(
                 {"detail": "Document is currently being processed."},
@@ -330,7 +372,10 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         from commission_intake.models import ExtractionPass
 
         instance = self.get_object()
-        in_flight = (CommissionDocument.Status.INDEXING, CommissionDocument.Status.EXTRACTING)
+        in_flight = (
+            CommissionDocument.Status.INDEXING,
+            CommissionDocument.Status.EXTRACTING,
+        )
         if instance.status in in_flight:
             return Response(
                 {"detail": "Document is currently being processed."},
@@ -340,7 +385,9 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             document=instance, status=ExtractionPass.Status.COMPLETED
         ).exists():
             return Response(
-                {"detail": "No completed extraction passes found. Run extraction first."},
+                {
+                    "detail": "No completed extraction passes found. Run extraction first."
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
         rerun_transform.apply_async(args=[str(instance.id)], queue="commission_intake")
@@ -357,7 +404,10 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         from commission_intake.models import CICSResult
 
         instance = self.get_object()
-        in_flight = (CommissionDocument.Status.INDEXING, CommissionDocument.Status.EXTRACTING)
+        in_flight = (
+            CommissionDocument.Status.INDEXING,
+            CommissionDocument.Status.EXTRACTING,
+        )
         if instance.status in in_flight:
             return Response(
                 {"detail": "Document is currently being processed."},
@@ -442,10 +492,12 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             )
             .order_by("-extracted")
         )
-        return Response({
-            "document_stats": document_stats,
-            "provider_stats": list(provider_stats),
-        })
+        return Response(
+            {
+                "document_stats": document_stats,
+                "provider_stats": list(provider_stats),
+            }
+        )
 
     @extend_schema(exclude=True)
     @action(detail=True, methods=["get"], url_path="export-excel")
@@ -455,7 +507,10 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
 
         instance = self.get_object()
         if not CICSResult.objects.filter(document=instance).exists():
-            return Response({"detail": "No CICS result available."}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"detail": "No CICS result available."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         cics_doc = instance.cics_result.cics_doc or {}
         provider_name = (cics_doc.get("provider") or {}).get("provider_name", "")
@@ -464,17 +519,46 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         deal_end = period.get("effective_to", "")
 
         headers = [
-            "DealId", "ReferenceDealId", "DealParameter", "DealStartDate", "DealEndDate",
-            "Insurer", "Product", "SubProduct",
-            "VehicleSubClass", "PolicyType", "State", "RTO", "NumberOfWheels",
-            "GVWStartRange", "GVWEndRange", "CCStartRange", "CCEndRange",
-            "SeatingCapacityStartRange", "SeatingCapacityEndRange",
-            "PoliciesCountStartRange", "PoliciesCountEndRange",
-            "SchoolBusType", "BookingMode", "ZeroDep", "NCB", "CPA",
-            "FuelType", "VehicleAge", "VehicleMake", "VehicleModel",
-            "VehicleCarrier", "BusinessType", "ODTerm", "TPTerm",
-            "ODPercentage", "TPPercentage", "NetPercentage",
-            "TPLessThanEqual3YearPercentage", "TPGreaterThanEqual4YearPercentage", "FlatAmount",
+            "DealId",
+            "ReferenceDealId",
+            "DealParameter",
+            "DealStartDate",
+            "DealEndDate",
+            "Insurer",
+            "Product",
+            "SubProduct",
+            "VehicleSubClass",
+            "PolicyType",
+            "State",
+            "RTO",
+            "NumberOfWheels",
+            "GVWStartRange",
+            "GVWEndRange",
+            "CCStartRange",
+            "CCEndRange",
+            "SeatingCapacityStartRange",
+            "SeatingCapacityEndRange",
+            "PoliciesCountStartRange",
+            "PoliciesCountEndRange",
+            "SchoolBusType",
+            "BookingMode",
+            "ZeroDep",
+            "NCB",
+            "CPA",
+            "FuelType",
+            "VehicleAge",
+            "VehicleMake",
+            "VehicleModel",
+            "VehicleCarrier",
+            "BusinessType",
+            "ODTerm",
+            "TPTerm",
+            "ODPercentage",
+            "TPPercentage",
+            "NetPercentage",
+            "TPLessThanEqual3YearPercentage",
+            "TPGreaterThanEqual4YearPercentage",
+            "FlatAmount",
             "OtherConditions",
             "QualifyingClauses",
         ]
@@ -513,7 +597,9 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             flat_val = outcome.get("flat_value")
             c_type = outcome.get("commission_type", "")
 
-            params = [p.strip().lower() for p in (deal_param or "").split(",") if p.strip()]
+            params = [
+                p.strip().lower() for p in (deal_param or "").split(",") if p.strip()
+            ]
 
             # applied_on-derived column wins (Option B). Flat outcomes still go to
             # the flat column regardless of basis.
@@ -538,7 +624,7 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                 tiers = outcome.get("tiers") or []
                 if tiers:
                     for tier in tiers:
-                        thresh = (tier.get("threshold") or {})
+                        thresh = tier.get("threshold") or {}
                         t_max = thresh.get("max")
                         if t_max is not None and t_max <= 3:
                             tp_lte3 = tier.get("value", "")
@@ -575,6 +661,42 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         # so the export is a pure renderer: one row per rule.
         _CPA_LABELS = {"with-cpa": "With CPA", "without-cpa": "Without CPA"}
 
+        # RTO fill (Fix v): when a rule names a state but no explicit RTO, fill
+        # the export RTO cell with the product-active RTOs for that state. Built
+        # once; degrades to the raw (empty) value if the master is unavailable.
+        try:
+            from master_data.services.resolver import MasterDataResolver
+
+            _rto_resolver = MasterDataResolver()
+        except Exception:
+            _rto_resolver = None
+
+        def _product_bucket(name):
+            """Normalise an export product_name to the {CAR,CV,TW} RTO bucket."""
+            n = (name or "").lower()
+            if any(k in n for k in ("commercial", "gcv", "pcv", "goods", "bus")):
+                return "CV"
+            if any(k in n for k in ("two", "2w", "wheeler")) and "four" not in n:
+                return "TW"
+            if any(k in n for k in ("car", "private", "taxi")):
+                return "CAR"
+            return None
+
+        def rto_cell(conditions, product_name):
+            """RTO column value: explicit rto if present, else state-derived fill."""
+            rto = conditions.get("rto")
+            if rto:  # present and non-empty -> honor explicit value
+                return cv(rto)
+            states = conditions.get("state")
+            if not states or _rto_resolver is None:
+                return cv(rto)
+            bucket = _product_bucket(product_name)
+            if bucket is None:
+                return cv(rto)
+            if not isinstance(states, list):
+                states = [states]
+            return ",".join(_rto_resolver.rtos_for_states(states, bucket))
+
         row_idx = 2
         for product in cics_doc.get("products", []):
             product_name = product.get("product_name", "")
@@ -587,21 +709,23 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                     outcome, deal_param, conditions
                 )
                 cpa_val = conditions.get("cpa")
-                cpa_label = _CPA_LABELS.get(cpa_val, cv_default(cpa_val, "With CPA,Without CPA"))
+                cpa_label = _CPA_LABELS.get(
+                    cpa_val, cv_default(cpa_val, "With CPA,Without CPA")
+                )
 
                 row = [
-                    "",                                  # DealId
-                    "",                                  # ReferenceDealId
-                    deal_param,                          # DealParameter
-                    deal_start,                          # DealStartDate
-                    deal_end,                            # DealEndDate
-                    provider_name,                       # Insurer
-                    product_name,                        # Product
-                    sub_product,                         # SubProduct
+                    "",  # DealId
+                    "",  # ReferenceDealId
+                    deal_param,  # DealParameter
+                    deal_start,  # DealStartDate
+                    deal_end,  # DealEndDate
+                    provider_name,  # Insurer
+                    product_name,  # Product
+                    sub_product,  # SubProduct
                     cv(conditions.get("vehicle_sub_class")),
                     cv(conditions.get("policy_type")),
                     cv(conditions.get("state")),
-                    cv(conditions.get("rto")),
+                    rto_cell(conditions, product_name),
                     cv(conditions.get("number_of_wheels")),
                     cv(conditions.get("gvw_start_range")),
                     cv(conditions.get("gvw_end_range")),
@@ -615,16 +739,26 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                     cv(conditions.get("booking_mode")),
                     cv(conditions.get("zero_dep")),
                     cv_default(conditions.get("ncb"), "Yes,No"),
-                    cpa_label,                           # CPA
-                    cv_default(conditions.get("fuel_type"), "Petrol,Diesel,CNG,LPG,Electric"),
-                    cv_default(conditions.get("vehicle_age"), "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"),
+                    cpa_label,  # CPA
+                    cv_default(
+                        conditions.get("fuel_type"), "Petrol,Diesel,CNG,LPG,Electric"
+                    ),
+                    cv_default(
+                        conditions.get("vehicle_age"),
+                        "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15",
+                    ),
                     cv(conditions.get("vehicle_make")),
                     cv(conditions.get("vehicle_model")),
                     cv(conditions.get("vehicle_carrier")),
                     cv(conditions.get("business_type")),
                     cv(conditions.get("od_term")),
                     cv(conditions.get("tp_term")),
-                    od_pct, tp_pct, net_pct, tp_lte3, tp_gte4, flat,
+                    od_pct,
+                    tp_pct,
+                    net_pct,
+                    tp_lte3,
+                    tp_gte4,
+                    flat,
                     format_other_conditions(
                         outcome.get("other_conditions")
                         if outcome.get("other_conditions") not in global_other_set
@@ -632,7 +766,8 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                     ),
                     format_qualifying_clauses(
                         [
-                            c for c in (outcome.get("qualifying_clauses") or [])
+                            c
+                            for c in (outcome.get("qualifying_clauses") or [])
                             if _clause_key(c) not in global_clause_keys
                         ]
                     ),
@@ -685,7 +820,9 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             seen_keys = set()
             for product in cics_doc.get("products", []) or []:
                 for rule in product.get("commission_rules", []) or []:
-                    for clause in (rule.get("outcome") or {}).get("qualifying_clauses") or []:
+                    for clause in (rule.get("outcome") or {}).get(
+                        "qualifying_clauses"
+                    ) or []:
                         key = _clause_key(clause)
                         if key not in global_clause_keys or key in seen_keys:
                             continue
@@ -693,18 +830,22 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                         if not isinstance(clause, dict):
                             continue
                         gws.cell(row=g_row, column=1, value="qualifying_clause")
-                        gws.cell(row=g_row, column=2, value=clause.get("clause_type", ""))
+                        gws.cell(
+                            row=g_row, column=2, value=clause.get("clause_type", "")
+                        )
                         gws.cell(row=g_row, column=3, value=clause.get("text", ""))
                         when = clause.get("when")
                         if when:
                             gws.cell(
-                                row=g_row, column=4,
+                                row=g_row,
+                                column=4,
                                 value=json.dumps(when, ensure_ascii=False, indent=2),
                             )
                         effect = clause.get("effect")
                         if effect:
                             gws.cell(
-                                row=g_row, column=5,
+                                row=g_row,
+                                column=5,
                                 value=json.dumps(effect, ensure_ascii=False, indent=2),
                             )
                         g_row += 1
@@ -725,7 +866,10 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
 
         base_name = instance.original_filename.rsplit(".", 1)[0]
         filename = f"{base_name}_cics.xlsx"
-        response = FileResponse(buf, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        response = FileResponse(
+            buf,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
         # The export is regenerated from live CICS data on every request. Without
         # this, the browser caches the GET by URL and serves a stale workbook
@@ -747,17 +891,24 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
 
         instance = self.get_object()
         if not instance.file:
-            return Response({"detail": "No file available."}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"detail": "No file available."}, status=status.HTTP_404_NOT_FOUND
+            )
 
         public_endpoint = getattr(settings, "AWS_S3_PUBLIC_ENDPOINT_URL", "") or None
-        addressing_style = getattr(settings, "AWS_S3_ADDRESSING_STYLE", "virtual") or "virtual"
+        addressing_style = (
+            getattr(settings, "AWS_S3_ADDRESSING_STYLE", "virtual") or "virtual"
+        )
         s3_client = boto3.client(
             "s3",
-            endpoint_url=public_endpoint or getattr(settings, "AWS_S3_ENDPOINT_URL", None),
+            endpoint_url=public_endpoint
+            or getattr(settings, "AWS_S3_ENDPOINT_URL", None),
             aws_access_key_id=settings.AWS_ACCESS_KEY_ID or None,
             aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY or None,
             region_name=settings.AWS_REGION,
-            config=Config(signature_version="s3v4", s3={"addressing_style": addressing_style}),
+            config=Config(
+                signature_version="s3v4", s3={"addressing_style": addressing_style}
+            ),
         )
         url = s3_client.generate_presigned_url(
             ClientMethod="get_object",

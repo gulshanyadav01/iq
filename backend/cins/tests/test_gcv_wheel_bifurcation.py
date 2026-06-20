@@ -47,11 +47,7 @@ class BifurcateGCVWheelsTests(TestCase):
         self.assertEqual(wheels, ["3w", "4w-and-above"])
 
     def test_both_wheels_listed_expands_to_two_rules(self):
-        rules = [
-            _make_rule(
-                "GCV_R1", 10, number_of_wheels=["3w", "4w-and-above"]
-            )
-        ]
+        rules = [_make_rule("GCV_R1", 10, number_of_wheels=["3w", "4w-and-above"])]
         result = self.transformer._bifurcate_gcv_wheels(rules)
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0].conditions.number_of_wheels, ["3w"])
@@ -77,10 +73,14 @@ class BifurcateGCVWheelsTests(TestCase):
         self.assertEqual(rule_ids, ["GCV_R1_3W", "GCV_R1_4WAA"])
 
     def test_other_conditions_preserved_on_clones(self):
+        # Use the (0,0) no-band sentinel so the rule still fans to both clones
+        # (a real weight grade now routes 4W-only).
         rules = [
             _make_rule(
-                "GCV_R1", 10,
-                gvw_start_range=0, gvw_end_range=3500,
+                "GCV_R1",
+                10,
+                gvw_start_range=0,
+                gvw_end_range=0,
                 policy_type=["third-party"],
                 state=["maharashtra"],
             )
@@ -89,16 +89,12 @@ class BifurcateGCVWheelsTests(TestCase):
         self.assertEqual(len(result), 2)
         for clone in result:
             self.assertEqual(clone.conditions.gvw_start_range, 0)
-            self.assertEqual(clone.conditions.gvw_end_range, 3500)
+            self.assertEqual(clone.conditions.gvw_end_range, 0)
             self.assertEqual(clone.conditions.policy_type, ["third-party"])
             self.assertEqual(clone.conditions.state, ["maharashtra"])
 
     def test_clones_are_independent_objects(self):
-        rules = [
-            _make_rule(
-                "GCV_R1", 10, state=["maharashtra"]
-            )
-        ]
+        rules = [_make_rule("GCV_R1", 10, state=["maharashtra"])]
         result = self.transformer._bifurcate_gcv_wheels(rules)
         # Mutating one clone's conditions must not bleed into the other.
         result[0].conditions.state.append("karnataka")
@@ -135,6 +131,134 @@ class BifurcateGCVWheelsTests(TestCase):
         result = self.transformer._bifurcate_gcv_wheels([])
         self.assertEqual(result, [])
 
+    # --- Fix iii: GVW-aware bifurcation ---
+
+    def test_heavy_band_wheelless_maps_to_4w_only(self):
+        # A lower-bounded heavy band (start > 0) cannot apply to a 3-wheeler.
+        rules = [_make_rule("GCV_R1", 10, gvw_start_range=12000, gvw_end_range=25000)]
+        result = self.transformer._bifurcate_gcv_wheels(rules)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].conditions.number_of_wheels, ["4w-and-above"])
+
+    def test_light_band_maps_to_4w_only(self):
+        # A finite "UPTO 3.5T" weight grade is a real band -> 4W-only. A goods
+        # 3-wheeler (auto) is never weight-graded; the client publishes no 3W at
+        # 0-3500, so cloning these into 3W produced spurious rows.
+        rules = [_make_rule("GCV_R1", 10, gvw_start_range=0, gvw_end_range=3500)]
+        result = self.transformer._bifurcate_gcv_wheels(rules)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].conditions.number_of_wheels, ["4w-and-above"])
+
+    def test_zero_zero_sentinel_fans_to_both(self):
+        # (0,0) is the "no band" sentinel (not a weight grade) -> still both.
+        rules = [_make_rule("GCV_R1", 10, gvw_start_range=0, gvw_end_range=0)]
+        result = self.transformer._bifurcate_gcv_wheels(rules)
+        self.assertEqual(len(result), 2)
+
+    def test_all_gvw_open_band_fans_to_both(self):
+        # An open all-GVW band (huge upper bound) is NOT a weight grade; client
+        # 3W auto lives here, so it must remain applicable to both categories.
+        rules = [_make_rule("GCV_R1", 10, gvw_start_range=0, gvw_end_range=999999)]
+        result = self.transformer._bifurcate_gcv_wheels(rules)
+        self.assertEqual(len(result), 2)
+
+    def test_explicit_multi_wheel_band_is_respected(self):
+        # Explicit number_of_wheels is authoritative even with a heavy band.
+        rules = [
+            _make_rule(
+                "GCV_R1",
+                10,
+                number_of_wheels=["3w", "4w-and-above"],
+                gvw_start_range=12000,
+                gvw_end_range=25000,
+            )
+        ]
+        result = self.transformer._bifurcate_gcv_wheels(rules)
+        self.assertEqual(len(result), 2)
+
+    def test_no_spurious_3w_at_heavy_band(self):
+        rules = [_make_rule("GCV_R1", 10, gvw_start_range=40000, gvw_end_range=49000)]
+        result = self.transformer._bifurcate_gcv_wheels(rules)
+        self.assertTrue(
+            all(r.conditions.number_of_wheels == ["4w-and-above"] for r in result)
+        )
+
+    # --- Fix iii (b): special-purpose sub-class is 4W-only ---
+
+    def test_four_wheel_only_subclass_maps_to_4w_only(self):
+        # Tractor/bus/excavator/harvester/maxicab carry no GVW band and no
+        # wheel token; they must NOT clone into 3W (was the source of the
+        # (0,0) catch-all with conflicting rates).
+        for sub in [
+            "tractor",
+            "school-bus",
+            "staff-bus",
+            "excavator",
+            "excavators",  # LLM-emitted plural must also route 4W-only
+            "harvester",
+            "maxicab",
+        ]:
+            rules = [_make_rule("GCV_R1", 10, vehicle_sub_class=[sub])]
+            result = self.transformer._bifurcate_gcv_wheels(rules)
+            self.assertEqual(len(result), 1, sub)
+            self.assertEqual(
+                result[0].conditions.number_of_wheels, ["4w-and-above"], sub
+            )
+
+    def test_explicit_wheels_override_subclass_routing(self):
+        # Explicit number_of_wheels is authoritative even for a 4W-only body.
+        rules = [
+            _make_rule(
+                "GCV_R1", 10, number_of_wheels=["3w"], vehicle_sub_class=["tractor"]
+            )
+        ]
+        result = self.transformer._bifurcate_gcv_wheels(rules)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].conditions.number_of_wheels, ["3w"])
+
+    def test_non_special_subclass_still_fans_to_both(self):
+        # A generic sub-class with no band stays applicable to both categories.
+        rules = [_make_rule("GCV_R1", 10, vehicle_sub_class=["scooter"])]
+        result = self.transformer._bifurcate_gcv_wheels(rules)
+        wheels = sorted(r.conditions.number_of_wheels[0] for r in result)
+        self.assertEqual(wheels, ["3w", "4w-and-above"])
+
+
+class ExtractSubClassFromKeyTests(TestCase):
+    """Abbreviated GCV section tokens (``1_TRAC``, ``2_EXCAVATOR``, …) must
+    resolve to a vehicle_sub_class so the rows are distinguished and routed to
+    4W-and-Above instead of collapsing into a 3W catch-all.
+    """
+
+    def setUp(self):
+        self.transformer = RawToCICSTransformer()
+
+    def test_special_section_tokens(self):
+        cases = {
+            "Commercial Vehicle 1_TRAC AP ACT": ["tractor"],
+            "Commercial Vehicle 1_SCHOOL AP PACK": ["school-bus"],
+            "Commercial Vehicle 2_STAFF MH ACT": ["staff-bus"],
+            "Commercial Vehicle 2_EXCAVATOR GJ PACK": ["excavator"],
+            "Commercial Vehicle 3_HARVESTOR UP ACT": ["harvester"],
+            "Commercial Vehicle 4_MAXI KA PACK": ["maxicab"],
+        }
+        for key, expected in cases.items():
+            self.assertEqual(
+                self.transformer._extract_sub_class_from_key(key), expected, key
+            )
+
+    def test_agricultural_tractor_still_specific(self):
+        # The longer "agri tractor" phrase keeps its canonical slug.
+        self.assertEqual(
+            self.transformer._extract_sub_class_from_key("GCV agri tractor"),
+            ["agricultural-tractor"],
+        )
+
+    def test_no_subclass_token_returns_none(self):
+        self.assertIsNone(
+            self.transformer._extract_sub_class_from_key("Commercial Vehicle 8_40T")
+        )
+
 
 class ExtractWheelsFromKeyTests(TestCase):
     """Wheel category baked into GCV/PCV sheet headers (e.g. ``1_GCCV_3W``)
@@ -146,9 +270,7 @@ class ExtractWheelsFromKeyTests(TestCase):
         self.transformer = RawToCICSTransformer()
 
     def test_underscore_slug_3w(self):
-        self.assertEqual(
-            self.transformer._extract_wheels_from_key("1_GCCV_3W"), ["3w"]
-        )
+        self.assertEqual(self.transformer._extract_wheels_from_key("1_GCCV_3W"), ["3w"])
 
     def test_underscore_slug_4w(self):
         self.assertEqual(
@@ -177,27 +299,17 @@ class ExtractWheelsFromKeyTests(TestCase):
     def test_both_wheels_in_one_key(self):
         # Some sheets bundle both 3W and 4W rows under one header.
         self.assertEqual(
-            sorted(
-                self.transformer._extract_wheels_from_key(
-                    "GCCV 3W / 4W & ABOVE"
-                )
-            ),
+            sorted(self.transformer._extract_wheels_from_key("GCCV 3W / 4W & ABOVE")),
             ["3w", "4w-and-above"],
         )
 
     def test_no_wheel_hint_returns_none(self):
-        self.assertIsNone(
-            self.transformer._extract_wheels_from_key("GCCV - UPTO 3.5T")
-        )
+        self.assertIsNone(self.transformer._extract_wheels_from_key("GCCV - UPTO 3.5T"))
 
     def test_unrelated_digits_do_not_match(self):
         # "34W" must not match 4W; "g4w" must not match either.
-        self.assertIsNone(
-            self.transformer._extract_wheels_from_key("GCCV 34W BUCKET")
-        )
-        self.assertIsNone(
-            self.transformer._extract_wheels_from_key("g4w_thing")
-        )
+        self.assertIsNone(self.transformer._extract_wheels_from_key("GCCV 34W BUCKET"))
+        self.assertIsNone(self.transformer._extract_wheels_from_key("g4w_thing"))
 
     def test_empty_key_returns_none(self):
         self.assertIsNone(self.transformer._extract_wheels_from_key(""))
@@ -252,9 +364,7 @@ class TransformProductWheelBackfillTests(TestCase):
             product_type="GCV",
         )
         raw = self._make_raw([entry])
-        product = self.transformer._transform_product(
-            "1_GCCV_4W", [entry], None, raw
-        )
+        product = self.transformer._transform_product("1_GCCV_4W", [entry], None, raw)
         self.assertEqual(len(product.commission_rules), 1)
         self.assertEqual(
             product.commission_rules[0].conditions.number_of_wheels,
@@ -291,13 +401,9 @@ class TransformProductWheelBackfillTests(TestCase):
             source_section="Private_Car_4W",
         )
         raw = self._make_raw([entry])
-        product = self.transformer._transform_product(
-            "Private Car", [entry], None, raw
-        )
+        product = self.transformer._transform_product("Private Car", [entry], None, raw)
         self.assertEqual(len(product.commission_rules), 1)
-        self.assertIsNone(
-            product.commission_rules[0].conditions.number_of_wheels
-        )
+        self.assertIsNone(product.commission_rules[0].conditions.number_of_wheels)
 
     def test_global_vehicle_type_text_fallback(self):
         # No slug on product_key or section, but global_vehicle_type_text
@@ -364,4 +470,57 @@ class TransformProductWheelBackfillTests(TestCase):
         self.assertEqual(len(product.commission_rules), 1)
         self.assertEqual(
             product.commission_rules[0].conditions.number_of_wheels, ["3w"]
+        )
+
+    # --- Fix iii: section token survives only in rule_text ---
+
+    def test_rule_text_3w_auto_supplies_wheels_and_stays_3w(self):
+        # Mimics intake 4e8bdc78: token "1_3W_AUTO" lives in rule_text, not
+        # source_section. Must lift 3W and bifurcation must NOT clone a 4W row.
+        entry = RawCommissionEntry(
+            rule_text="Commercial Vehicle 1_3W_AUTO AP/TS ACT",
+            commission_value="10%",
+            product_name="Commercial Vehicle",
+            product_type="GCV",
+        )
+        raw = self._make_raw([entry])
+        product = self.transformer._transform_product(
+            "Commercial Vehicle", [entry], None, raw
+        )
+        self.assertEqual(len(product.commission_rules), 1)
+        self.assertEqual(
+            product.commission_rules[0].conditions.number_of_wheels, ["3w"]
+        )
+
+    def test_rule_text_tractor_routes_to_4w_only_with_subclass(self):
+        # "1_TRAC" in rule_text → vehicle_sub_class=tractor, 4W-only, no 3W clone.
+        entry = RawCommissionEntry(
+            rule_text="Commercial Vehicle 1_TRAC GJ PACK",
+            commission_value="20%",
+            product_name="Commercial Vehicle",
+            product_type="GCV",
+        )
+        raw = self._make_raw([entry])
+        product = self.transformer._transform_product(
+            "Commercial Vehicle", [entry], None, raw
+        )
+        self.assertEqual(len(product.commission_rules), 1)
+        rule = product.commission_rules[0]
+        self.assertEqual(rule.conditions.vehicle_sub_class, ["tractor"])
+        self.assertEqual(rule.conditions.number_of_wheels, ["4w-and-above"])
+
+    def test_rule_text_excavator_no_3w_clone(self):
+        entry = RawCommissionEntry(
+            rule_text="Commercial Vehicle 2_EXCAVATOR MH ACT",
+            commission_value="15%",
+            product_name="Commercial Vehicle",
+            product_type="GCV",
+        )
+        raw = self._make_raw([entry])
+        product = self.transformer._transform_product(
+            "Commercial Vehicle", [entry], None, raw
+        )
+        self.assertEqual(len(product.commission_rules), 1)
+        self.assertEqual(
+            product.commission_rules[0].conditions.number_of_wheels, ["4w-and-above"]
         )
