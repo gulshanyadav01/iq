@@ -15,6 +15,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from cins.processors.core.cpa_split import applied_on_to_column, derive_applied_on
+from cins.processors.core.cpa_split import applied_on_to_column, derive_applied_on
 from commission_intake.models import CommissionDocument
 
 
@@ -655,6 +656,11 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         # "Global Rules" worksheet so we don't repeat the same JSON blob on
         # hundreds of rows. Per-row cells show only the row-specific subset.
         global_other_set, global_clause_keys = partition_global_modifiers(cics_doc)
+
+        # CPA-deduction rules are already bifurcated into With/Without-CPA rows
+        # at transform time (cins.processors.core.cpa_split.materialize_cpa_split),
+        # so the export is a pure renderer: one row per rule.
+        _CPA_LABELS = {"with-cpa": "With CPA", "without-cpa": "Without CPA"}
 
         # CPA-deduction rules are already bifurcated into With/Without-CPA rows
         # at transform time (cins.processors.core.cpa_split.materialize_cpa_split),

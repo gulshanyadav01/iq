@@ -779,6 +779,12 @@ class RawToCICSTransformer:
         # bifurcation so wheel clones inherit corrected boundaries.
         self._normalize_boundary_overlaps(rules)
 
+        # Evidence-gated cross-group boundary normalization (D1=B). Closes the
+        # gap when a CC/GVW ladder is fragmented across states/RTOs so the
+        # per-group bump above can't see the lower rung. Runs before GCV
+        # bifurcation so wheel clones inherit corrected boundaries.
+        self._normalize_boundary_overlaps(rules)
+
         # GCV rules must be scoped to a single number_of_wheels value.
         # Source documents commonly publish one GCV row that implicitly
         # covers both 3W and 4W & Above (or lists both in one cell), but
