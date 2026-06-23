@@ -42,7 +42,8 @@ env = environ.Env(
     CELERY_RESULT_BACKEND=str,
     CELERY_CACHE_BACKEND=str,
     CELERY_BROKER_URL=str,
-    POLICY_EXTRACT_CALLBACK_URL=(str, '')
+    POLICY_EXTRACT_CALLBACK_URL=(str, ''),
+    POLICY_EXTRACT_GEMINI_MODEL=(str, 'gemini-2.5-flash-lite'),
 )
 environ.Env.read_env(os.path.join(BASE_DIR, '.env'))
 
@@ -69,6 +70,8 @@ HOST_NAME = env('HOST_NAME')
 BETTER_AUTH_URL = env('BETTER_AUTH_URL')
 
 POLICY_EXTRACT_CALLBACK_URL = env('POLICY_EXTRACT_CALLBACK_URL')
+
+POLICY_EXTRACT_GEMINI_MODEL = env('POLICY_EXTRACT_GEMINI_MODEL')
 
 # Application definition
 

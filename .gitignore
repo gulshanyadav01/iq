@@ -66,3 +66,6 @@ node_modules
 
 web/test-results/*
 .gstack/
+
+# GCP service-account key for Vertex AI (never commit)
+.gcp/

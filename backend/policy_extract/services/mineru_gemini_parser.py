@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Dict, Any
 from datetime import datetime
 
+from django.conf import settings
+
 try:
     from google import genai
 except ImportError:
@@ -39,7 +41,7 @@ class MineruGeminiParser:
 
     MINERVA_API_URL = os.getenv("MINERVA_API_URL", "https://rhobots.pbpartners.com/api/mineru/file_parse")
 
-    def __init__(self, api_key: str = None, model: str = "gemini-3.1-flash-lite", intermediate_dir: str = None):
+    def __init__(self, api_key: str = None, model: str = None, intermediate_dir: str = None):
         """
         Initialize parser
 
@@ -50,9 +52,18 @@ class MineruGeminiParser:
                               Defaults to 'minerva_gemini_intermediate_data' in cwd.
                               Pass a validation set path to co-locate with the set.
         """
-        self.model_name = model
-        # Use the Vertex AI backend (express mode) — same as cins GeminiService.
-        self._client = genai.Client(vertexai=True, api_key=api_key or os.getenv("GOOGLE_API_KEY"))
+        self.model_name = model or settings.POLICY_EXTRACT_GEMINI_MODEL
+        # Public Gemini Developer API by default. Vertex AI Express mode
+        # (vertexai=True + API key) is region-locked and 404s on models absent
+        # from the express region (e.g. gemini-2.5-flash-lite in asia-southeast1).
+        # Opt into Vertex with GOOGLE_GENAI_USE_VERTEXAI=true (project/location
+        # then come from GOOGLE_CLOUD_* env vars or ADC).
+        if os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in ("1", "true", "yes"):
+            # Location defaults to the "us" multi-region (serves
+            # gemini-2.5-flash-lite); override via GOOGLE_CLOUD_LOCATION.
+            self._client = genai.Client(vertexai=True, api_key=api_key or os.getenv("GOOGLE_API_KEY"))
+        else:
+            self._client = genai.Client(api_key=api_key or os.getenv("GOOGLE_API_KEY"))
 
         # Master-data resolver — backed by the `master_data` Django app.
         # Loaded once per parser instance (~7 small SELECTs); negligible vs
@@ -68,6 +79,7 @@ class MineruGeminiParser:
 
         # Gemini pricing (per 1M tokens)
         self.pricing = {
+            "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
             "gemini-3.1-flash-lite": {"input": 0.075, "output": 0.30},
             "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
             "gemini-3.5-flash": {"input": 0.15, "output": 0.60},
@@ -1498,7 +1510,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # Initialize parser
-    parser = MineruGeminiParser(api_key=api_key, model="gemini-3.1-flash-lite")
+    parser = MineruGeminiParser(api_key=api_key)
 
     # Parse a PDF
     if len(sys.argv) > 1:
