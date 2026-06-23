@@ -41,8 +41,12 @@ services:
     command: ["bash", "./entrypoint.sh", "prod"]
     ports:
       - "${API_PORT}:8000"
-    volumes:
+    volumes: &backend-volumes
       - operator-static:/app/static
+      # Vertex AI service-account key (read-only); only consulted when
+      # GOOGLE_GENAI_USE_VERTEXAI is set. Point GCP_CREDENTIALS_DIR at the host
+      # dir holding sa-key.json.
+      - ${GCP_CREDENTIALS_DIR:-./.gcp}:/secrets/gcp:ro
     environment: &backend-env
       DEBUG:  ${DEBUG:-false}
       APP_ENV: ${APP_ENV:-PROD}
@@ -76,6 +80,18 @@ services:
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash}
+      POLICY_EXTRACT_GEMINI_MODEL: ${POLICY_EXTRACT_GEMINI_MODEL:-gemini-2.5-flash-lite}
+      # Vertex AI backend for Gemini (opt-in). When GOOGLE_GENAI_USE_VERTEXAI is
+      # truthy the SDK routes through Vertex, sourcing project/location from
+      # these vars and credentials from GOOGLE_APPLICATION_CREDENTIALS (SA key
+      # JSON mounted read-only at /secrets/gcp from the GCP_CREDENTIALS_DIR host
+      # path). Use the "us" multi-region, which serves gemini-2.5-flash-lite;
+      # asia-southeast1 does not. Leave the flag empty for the public Gemini
+      # Developer API with GEMINI_API_KEY.
+      GOOGLE_GENAI_USE_VERTEXAI: ${GOOGLE_GENAI_USE_VERTEXAI:-}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
+      GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
@@ -93,6 +109,7 @@ services:
 
   celery:
     image: insur-iq-backend:latest
+    volumes: *backend-volumes
     command: ["bash", "./entrypoint.sh", "celery"]
     environment:
       <<: *backend-env
@@ -102,6 +119,7 @@ services:
 
   celery_policy_extract:
     image: insur-iq-backend:latest
+    volumes: *backend-volumes
     command: ["bash", "./entrypoint.sh", "celery-policy-extract"]
     environment:
       <<: *backend-env
@@ -111,6 +129,7 @@ services:
 
   celery_commission_intake:
     image: insur-iq-backend:latest
+    volumes: *backend-volumes
     command: ["bash", "./entrypoint.sh", "celery-commission-intake"]
     environment:
       <<: *backend-env
@@ -120,6 +139,7 @@ services:
 
   beat:
     image: insur-iq-backend:latest
+    volumes: *backend-volumes
     command: ["bash", "./entrypoint.sh", "beat"]
     environment:
       <<: *backend-env

@@ -227,7 +227,11 @@ class LlmExtractExecutor(StepExecutor):
         from google.genai import errors as genai_errors
         from google.genai import types as genai_types
 
-        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+        # Parse the flag to a bool: a raw env string like "false" is truthy in
+        # Python, so passing os.getenv(...) directly would enable Vertex for any
+        # non-empty value. Public Gemini Developer API is the default.
+        use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in ("1", "true", "yes")
+        client = genai.Client(vertexai=use_vertex, api_key=os.getenv("GOOGLE_API_KEY"))
 
         # Retry transient Gemini 5xx (503 UNAVAILABLE, 504 DEADLINE) with
         # exponential backoff. SDK's internal retry has been observed to

@@ -131,13 +131,40 @@ class GeminiService(LLMServiceMixin):
             )
         return model
 
+    @staticmethod
+    def _use_vertex() -> bool:
+        """Whether to route through Vertex AI instead of the public Gemini API.
+
+        Off by default. Passing ``vertexai=True`` with an API key puts the SDK
+        in Vertex AI *Express* mode, which is region-locked and does not serve
+        every model in every location (e.g. ``gemini-2.5-flash-lite`` is absent
+        from ``asia-southeast1``), producing a 404 NOT_FOUND. The public Gemini
+        Developer API is the correct backend for a ``GEMINI_API_KEY`` from AI
+        Studio. Set ``GOOGLE_GENAI_USE_VERTEXAI=true`` to opt into Vertex; the
+        SDK then sources project/location from ``GOOGLE_CLOUD_PROJECT`` /
+        ``GOOGLE_CLOUD_LOCATION`` / ADC.
+        """
+        _load_env()
+        return os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+
     def _get_client(self):
         """Lazy initialization of Gemini client"""
         if self._client is None:
             try:
                 from google import genai
 
-                self._client = genai.Client(vertexai=True, api_key=self._api_key)
+                if self._use_vertex():
+                    # Vertex AI: project comes from GOOGLE_CLOUD_PROJECT / ADC.
+                    # Location defaults to the "us" multi-region, which serves
+                    # gemini-2.5-flash-lite; override via GOOGLE_CLOUD_LOCATION.
+                    self._client = genai.Client(vertexai=True, api_key=self._api_key)
+                else:
+                    # Public Gemini Developer API (default).
+                    self._client = genai.Client(api_key=self._api_key)
             except ImportError:
                 raise GeminiServiceError(
                     "Google GenAI library not installed. Run: pip install google-genai"

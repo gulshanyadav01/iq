@@ -436,8 +436,11 @@ _RE_APPLIED_ON_LIABILITY = _re_clause.compile(
     r"private\s*car\s*liability.*?pay-?out.*?on\s+TP\s*/?\s*PA\s*Premium",
     _re_clause.IGNORECASE,
 )
+# Captures both the percentage and the payout basis. The basis varies by
+# product: Private-Car grids word it "OD Pay-out", Commercial-Vehicle grids
+# "Net Payout" (Chola). "Pay-?\s*out" tolerates "Payout" / "Pay-out" / "Pay out".
 _RE_CPA_DEDUCTION = _re_clause.compile(
-    r"CPA\s+(?:is\s+)?not\s+collected.*?individual.*?(\d+(?:\.\d+)?)\s*%.*?OD\s*Pay-?out.*?deduct",
+    r"CPA\s+(?:is\s+)?not\s+collected.*?individual.*?(\d+(?:\.\d+)?)\s*%.*?(OD|Net)\s*Pay-?\s*out.*?deduct",
     _re_clause.IGNORECASE,
 )
 _RE_CPA_MANDATORY = _re_clause.compile(
@@ -495,15 +498,19 @@ def detect_qualifying_clauses(notes_text, provider=""):
         except (ValueError, TypeError):
             pct = None
         if pct is not None:
+            # Reflect the actual payout basis the footnote names. cpa_split
+            # applies the deduction to the rule's own payout column (OD or Net)
+            # regardless, but carrying the right basis keeps the clause honest
+            # and lets it attach to CV (Net) rules, not just Private Car (OD).
+            basis = "Net Payout" if m.group(2).upper() == "NET" else "OD Pay-out"
             clauses.append({
                 "clause_type": "conditional_deduction",
                 "text": (
                     "if CPA is not collected for individual name then "
                     + pct_str
-                    + "% of OD Pay-out will be deducted"
+                    + "% of " + basis + " will be deducted"
                 ),
                 "when": {
-                    "product_name": "Private Car",
                     "coverage_type_text": ["comprehensive", "saod", "third party"],
                     "school_bus_type": "on-individual-name",
                     "cpa": "without-cpa",
@@ -512,7 +519,7 @@ def detect_qualifying_clauses(notes_text, provider=""):
                     "deduction": {
                         "value": pct,
                         "value_type": "percentage",
-                        "applied_on": "OD Pay-out",
+                        "applied_on": basis,
                     }
                 },
             })

@@ -78,6 +78,35 @@ class DetectQualifyingClausesTests(TestCase):
         self.assertEqual(len(deductions), 1)
         self.assertEqual(deductions[0]["effect"]["deduction"]["value"], 2.5)
 
+    def test_conditional_deduction_net_payout_basis(self):
+        # Commercial-Vehicle grids word the footnote "Net Payout", not
+        # "OD Pay-out". Regression: the regex used to require "OD Pay-out"
+        # literally, so CV deductions were silently dropped.
+        text = (
+            "For CV Package & Liability policy CPA should be collected for "
+            "individual Name Mandatorily if CPA is not collected for "
+            "individual name then 1.5% of Net Payout will be deducted"
+        )
+        deductions = _by_type(detect_qualifying_clauses(text), "conditional_deduction")
+        self.assertEqual(len(deductions), 1)
+        self.assertEqual(deductions[0]["when"]["cpa"], "without-cpa")
+        self.assertEqual(deductions[0]["effect"]["deduction"]["value"], 1.5)
+        self.assertEqual(deductions[0]["effect"]["deduction"]["applied_on"], "Net Payout")
+
+    def test_conditional_deduction_real_cv_blob(self):
+        # The exact other_conditions string persisted on Chola CV rules.
+        text = (
+            "Please note that the above payout grid -  For Commercial Vehicle "
+            "Package/Liability policy is on Net Premium -  For CV Package & "
+            "Liability policy CPA should be collected for individual Name "
+            "Mandatorily if CPA is not collected for individual name then "
+            "1.5% of Net Payout will be deducted -  GCCV EV Exceeding 3.5 "
+            "Tonnage & Passanger Carrying EV (except eAUTO) is declined"
+        )
+        deductions = _by_type(detect_qualifying_clauses(text), "conditional_deduction")
+        self.assertEqual(len(deductions), 1)
+        self.assertEqual(deductions[0]["effect"]["deduction"]["value"], 1.5)
+
     def test_applied_on_override_package(self):
         text = "Private Car Package policy pay-out is on OD Cover Premium"
         clauses = detect_qualifying_clauses(text)

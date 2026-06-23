@@ -7,7 +7,9 @@ identical no matter how the workbook arrives.
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import openpyxl
@@ -19,6 +21,7 @@ from master_data.models import (
     InsurerMaster,
     PlanTypeMaster,
     PolicyTypeMaster,
+    RTOMaster,
     VehicleClassMaster,
     VehicleMaster,
     VehicleSubClassMaster,
@@ -27,6 +30,7 @@ from master_data.services.canonical import (
     VEHICLE_SUBCLASS_CANONICAL,
     normalize_insurer_name,
 )
+from master_data.services.rto import state_slug_for_code
 
 
 @dataclass
@@ -36,7 +40,11 @@ class SheetResult:
     skipped: int = 0
 
     def as_dict(self) -> dict:
-        return {"created": self.created, "updated": self.updated, "skipped": self.skipped}
+        return {
+            "created": self.created,
+            "updated": self.updated,
+            "skipped": self.skipped,
+        }
 
 
 @dataclass
@@ -57,6 +65,11 @@ SHEET_NAMES = {
     "subclass": "SubClass Master",
     "insurer": "Insurer Master",
 }
+
+# RTO master lives as a committed, diff-friendly CSV in the repo (the source is
+# the GetAllRTOMaster export, flattened to rto_id,code,value,car_zone,tw_zone,
+# cv_zone). It is NOT a sheet in the Master Mapper workbook.
+RTO_CSV_PATH = Path(__file__).resolve().parents[1] / "data" / "rto_master.csv"
 
 
 class MasterDataLoader:
@@ -79,6 +92,7 @@ class MasterDataLoader:
         self._load_vehicle(workbook)
         self._load_subclass(workbook)
         self._load_insurer(workbook)
+        self._load_rto()
         return self.result
 
     def load_path(self, path) -> LoadResult:
@@ -254,6 +268,48 @@ class MasterDataLoader:
                 },
             )
             self._track("SubClass", created)
+
+    def _load_rto(self, path: Path | None = None) -> None:
+        """Load the RTO master from the committed CSV (``rto_master.csv``).
+
+        Tolerant of absence (a missing CSV is a no-op, not an error). Derives
+        ``state_slug`` from the 2-letter code prefix and ``group`` from the
+        ``(Group X)`` suffix in the display value; rows whose prefix is unmapped
+        (or which lack a code / id / value) are skipped and counted so seeding
+        gaps surface in the command output.
+        """
+        csv_path = path or RTO_CSV_PATH
+        if not csv_path.exists():
+            return  # RTO CSV not present — nothing to load.
+        with open(csv_path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                rto_id = self._int(row.get("rto_id"))
+                code = self._str(row.get("code"))
+                value = self._str(row.get("value"))
+                if rto_id is None or not code or not value:
+                    self._skip("RTO")
+                    continue
+                state_slug = state_slug_for_code(code)
+                if not state_slug:
+                    # Unmapped registration prefix — skip loudly via the count.
+                    self._skip("RTO")
+                    continue
+                group = ""
+                if "(Group " in value:
+                    group = value.split("(Group ", 1)[1].rstrip(")").strip()
+                _, created = RTOMaster.objects.update_or_create(
+                    code=code,
+                    defaults={
+                        "rto_id": rto_id,
+                        "value": value,
+                        "state_slug": state_slug,
+                        "group": group,
+                        "car_zone": self._int(row.get("car_zone")),
+                        "tw_zone": self._int(row.get("tw_zone")),
+                        "cv_zone": self._int(row.get("cv_zone")),
+                    },
+                )
+                self._track("RTO", created)
 
     def _load_insurer(self, wb) -> None:
         sheet = self._get_sheet(wb, "insurer")

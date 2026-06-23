@@ -17,11 +17,16 @@ from master_data.models import (
     InsurerMaster,
     PlanTypeMaster,
     PolicyTypeMaster,
+    RTOMaster,
     VehicleClassMaster,
     VehicleMaster,
     VehicleSubClassMaster,
 )
 from master_data.services.canonical import normalize_insurer_name
+
+# Export product bucket -> the RTOMaster zone column that marks the RTO active
+# for that product. An RTO is listed for a product only when its zone is non-null.
+_PRODUCT_ZONE_ATTR = {"CAR": "car_zone", "CV": "cv_zone", "TW": "tw_zone"}
 
 
 @dataclass
@@ -100,6 +105,18 @@ class MasterDataResolver:
         self._subclass_by_product: dict[str, list[VehicleSubClassMaster]] = {}
         for r in VehicleSubClassMaster.objects.all():
             self._subclass_by_product.setdefault(r.product, []).append(r)
+        # RTO: per state slug, the display value + per-product active flags.
+        # Built once so rtos_for_states is a pure in-memory filter.
+        self._rto_by_state: dict[str, list[dict]] = {}
+        for r in RTOMaster.objects.all():
+            self._rto_by_state.setdefault(r.state_slug, []).append(
+                {
+                    "value": r.value,
+                    "car_zone": r.car_zone,
+                    "cv_zone": r.cv_zone,
+                    "tw_zone": r.tw_zone,
+                }
+            )
 
     # --------------------------- small enums ---------------------------
 
@@ -157,6 +174,28 @@ class MasterDataResolver:
             # vehicle_class_id can legitimately be the string "Blank".
             return Resolution(id=None, canonical=canonical, matched=True)
 
+    # ------------------------------ rto ------------------------------
+
+    def rtos_for_states(self, slugs, product) -> list:
+        """Return the product-active RTO display values for the given states.
+
+        ``slugs`` is an iterable of canonical state slugs (e.g.
+        ``["andhra-pradesh"]``); ``product`` is the export bucket CAR/CV/TW. An
+        RTO is included only when its per-product zone is non-null (the master
+        marks it active for that product). Returns a sorted, de-duplicated list.
+        Returns ``[]`` for an unknown product, empty slugs, or states with no
+        product-active RTOs — callers treat ``[]`` as "leave the cell empty".
+        """
+        zone_attr = _PRODUCT_ZONE_ATTR.get(str(product or "").strip().upper())
+        if zone_attr is None or not slugs:
+            return []
+        out: set[str] = set()
+        for slug in slugs:
+            for rto in self._rto_by_state.get(slug, []):
+                if rto.get(zone_attr) is not None:
+                    out.add(rto["value"])
+        return sorted(out)
+
     # ------------------------------ plan ------------------------------
 
     def resolve_plan_type(self, value: str, is_zero_dep: bool) -> Resolution:
@@ -183,14 +222,16 @@ class MasterDataResolver:
             return Resolution(id=None, canonical="", matched=False)
 
         plan_id, name = hit
-        canonical_label = f"{name} + ZD" if is_zero_dep and (canonical_key, True) in self._plan else name
+        canonical_label = (
+            f"{name} + ZD"
+            if is_zero_dep and (canonical_key, True) in self._plan
+            else name
+        )
         return Resolution(id=int(plan_id), canonical=canonical_label, matched=True)
 
     # ----------------------------- insurer -----------------------------
 
-    def resolve_insurer(
-        self, name: str, product_id: Optional[int]
-    ) -> Resolution:
+    def resolve_insurer(self, name: str, product_id: Optional[int]) -> Resolution:
         if not name:
             return Resolution(id=None, canonical="", matched=False)
 
@@ -238,18 +279,30 @@ class MasterDataResolver:
         # 1. Exact (case-insensitive on canonical_name).
         for c in candidates:
             if c.canonical_name.upper() == text_upper:
-                return Resolution(id=int(c.pb_vehicle_subclass_id), canonical=c.canonical_name, matched=True)
+                return Resolution(
+                    id=int(c.pb_vehicle_subclass_id),
+                    canonical=c.canonical_name,
+                    matched=True,
+                )
 
         # 2. Exact on the raw subclass_name from the Excel.
         for c in candidates:
             if c.subclass_name.upper() == text_upper:
-                return Resolution(id=int(c.pb_vehicle_subclass_id), canonical=c.canonical_name, matched=True)
+                return Resolution(
+                    id=int(c.pb_vehicle_subclass_id),
+                    canonical=c.canonical_name,
+                    matched=True,
+                )
 
         # 3. Substring match either way.
         for c in candidates:
             cn = c.canonical_name.upper()
             if cn in text_upper or text_upper in cn:
-                return Resolution(id=int(c.pb_vehicle_subclass_id), canonical=c.canonical_name, matched=True)
+                return Resolution(
+                    id=int(c.pb_vehicle_subclass_id),
+                    canonical=c.canonical_name,
+                    matched=True,
+                )
 
         # 4. difflib fuzzy on canonical names.
         names = [c.canonical_name for c in candidates]
@@ -257,7 +310,11 @@ class MasterDataResolver:
         if matches:
             for c in candidates:
                 if c.canonical_name == matches[0]:
-                    return Resolution(id=int(c.pb_vehicle_subclass_id), canonical=c.canonical_name, matched=True)
+                    return Resolution(
+                        id=int(c.pb_vehicle_subclass_id),
+                        canonical=c.canonical_name,
+                        matched=True,
+                    )
 
         # 5. Product-specific safety net for Private Car (body styles like SEDAN/SUV).
         if product == "Car":

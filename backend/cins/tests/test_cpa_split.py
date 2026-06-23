@@ -124,6 +124,55 @@ class MaterializeTests(TestCase):
             types = [c["clause_type"] for c in r["outcome"]["qualifying_clauses"]]
             self.assertNotIn("conditional_deduction", types)
 
+    def test_cv_splits_from_notes_fallback_and_deducts_on_net(self):
+        # Chola CV rules carry NO structured conditional_deduction clause; the
+        # footnote lives only in outcome.other_conditions ("...1.5% of Net
+        # Payout will be deducted"). cpa_split must detect it from the notes
+        # and deduct on the Net payout column. Regression: CV without-CPA was
+        # left equal to with-CPA (overstated 1.5pp).
+        cv_notes = (
+            "For Commercial Vehicle Package/Liability policy is on Net Premium "
+            "if CPA is not collected for individual name then 1.5% of Net "
+            "Payout will be deducted"
+        )
+        rule = {
+            "rule_id": "cv",
+            "conditions": {"deal_parameter": "net", "cpa": None},
+            "outcome": {
+                "commission_type": "percentage",
+                "percentage_value": 27.5,
+                "applied_on": "Net Premium",
+                "other_conditions": cv_notes,
+            },
+        }
+        doc = {
+            "products": [
+                {"product_name": "Commercial Vehicle", "commission_rules": [rule]}
+            ]
+        }
+        materialize_cpa_split(doc)
+        rules = doc["products"][0]["commission_rules"]
+        self.assertEqual(len(rules), 2)
+        by_cpa = {r["conditions"]["cpa"]: r for r in rules}
+        self.assertEqual(by_cpa["with-cpa"]["outcome"]["percentage_value"], 27.5)
+        self.assertEqual(by_cpa["without-cpa"]["outcome"]["percentage_value"], 26.0)
+
+    def test_no_notes_no_clause_is_noop(self):
+        # A rule with neither a clause nor a deduction footnote is untouched.
+        rule = {
+            "rule_id": "cv",
+            "conditions": {"deal_parameter": "net", "cpa": None},
+            "outcome": {
+                "commission_type": "percentage",
+                "percentage_value": 27.5,
+                "applied_on": "Net Premium",
+                "other_conditions": "Generic note with no deduction clause.",
+            },
+        }
+        doc = {"products": [{"product_name": "CV", "commission_rules": [rule]}]}
+        materialize_cpa_split(doc)
+        self.assertEqual(len(doc["products"][0]["commission_rules"]), 1)
+
     def test_third_party_splits_without_deduction(self):
         # Basis is TP; the OD-Pay-out deduction is a no-op.
         doc = _doc(
@@ -133,6 +182,20 @@ class MaterializeTests(TestCase):
         rules = _rules(doc)
         self.assertEqual(len(rules), 2)
         self.assertEqual({r["outcome"]["percentage_value"] for r in rules}, {25})
+
+    def test_cv_net_splits_and_deducts_on_net(self):
+        # Fix ii: a Commercial-Vehicle Net rule carrying the CPA clause must
+        # deduct from its Net payout (the deduction follows the rule's own
+        # payout column, even though the clause names "OD Pay-out").
+        doc = _doc(
+            [_rule(None, 20, [CPA_CLAUSE], ["package"], applied_on="Net Premium")]
+        )
+        materialize_cpa_split(doc)
+        rules = _rules(doc)
+        self.assertEqual(len(rules), 2)
+        by_cpa = {r["conditions"]["cpa"]: r for r in rules}
+        self.assertEqual(by_cpa["with-cpa"]["outcome"]["percentage_value"], 20)
+        self.assertEqual(by_cpa["without-cpa"]["outcome"]["percentage_value"], 18.5)
 
     def test_explicit_cpa_rule_not_split(self):
         doc = _doc([_rule("with-cpa", 30, [CPA_CLAUSE], ["comprehensive"])])
