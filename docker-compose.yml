@@ -5,7 +5,11 @@ services:
       context: .
     image: insur-iq-backend:latest
     volumes: &backend-volumes
+    volumes: &backend-volumes
       - ./backend:/app
+      # Vertex AI service-account key (read-only). Drop sa-key.json into ./.gcp
+      # on the host; only consulted when GOOGLE_GENAI_USE_VERTEXAI is set.
+      - ${GCP_CREDENTIALS_DIR:-./.gcp}:/secrets/gcp:ro
       # Vertex AI service-account key (read-only). Drop sa-key.json into ./.gcp
       # on the host; only consulted when GOOGLE_GENAI_USE_VERTEXAI is set.
       - ${GCP_CREDENTIALS_DIR:-./.gcp}:/secrets/gcp:ro

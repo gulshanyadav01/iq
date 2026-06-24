@@ -19,6 +19,8 @@ from datetime import datetime
 
 from django.conf import settings
 
+from django.conf import settings
+
 try:
     from google import genai
 except ImportError:
