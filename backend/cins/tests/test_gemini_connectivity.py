@@ -33,7 +33,7 @@ def _live_tests_enabled() -> bool:
     if os.environ.get("RUN_LIVE_GEMINI_TESTS") != "1":
         return False
     _load_env()
-    return bool(os.environ.get("GEMINI_API_KEY"))
+    return True
 
 
 @unittest.skipUnless(

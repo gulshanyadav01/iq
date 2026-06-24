@@ -59,9 +59,35 @@ class MineruGeminiParser:
         # Opt into Vertex with GOOGLE_GENAI_USE_VERTEXAI=true (project/location
         # then come from GOOGLE_CLOUD_* env vars or ADC).
         if os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in ("1", "true", "yes"):
-            # Location defaults to the "us" multi-region (serves
-            # gemini-2.5-flash-lite); override via GOOGLE_CLOUD_LOCATION.
-            self._client = genai.Client(vertexai=True, api_key=api_key or os.getenv("GOOGLE_API_KEY"))
+            # Vertex AI via ADC — no API key (see cins gemini.py). Set
+            # GOOGLE_CLOUD_LOCATION to "global" or a regional endpoint like
+            # "us-central1" (the bare "us"/"eu" multi-region values need the
+            # .rep. hostname the SDK doesn't build and 404). Offline preflight:
+            # fail fast on misconfig instead of deferring an opaque auth failure.
+            if not os.getenv("GOOGLE_CLOUD_PROJECT"):
+                raise RuntimeError(
+                    "Vertex mode (GOOGLE_GENAI_USE_VERTEXAI=true) requires GOOGLE_CLOUD_PROJECT."
+                )
+            # Region must be set and must not be a bare "us"/"eu" multi-region
+            # value (the SDK doesn't build the .rep. endpoint, so those 404).
+            location = os.getenv("GOOGLE_CLOUD_LOCATION", "").strip()
+            if not location:
+                raise RuntimeError(
+                    "Vertex mode requires GOOGLE_CLOUD_LOCATION (use 'global' or a "
+                    "regional endpoint like 'us-central1')."
+                )
+            if location.lower() in ("us", "eu"):
+                raise RuntimeError(
+                    f"GOOGLE_CLOUD_LOCATION='{location}' is a multi-region value needing "
+                    "the .rep. endpoint this client does not set; use 'global' or a "
+                    "regional endpoint like 'us-central1'."
+                )
+            cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            if cred_path and not Path(cred_path).is_file():
+                raise RuntimeError(
+                    f"GOOGLE_APPLICATION_CREDENTIALS points to a missing file: {cred_path}"
+                )
+            self._client = genai.Client(vertexai=True)
         else:
             self._client = genai.Client(api_key=api_key or os.getenv("GOOGLE_API_KEY"))
 

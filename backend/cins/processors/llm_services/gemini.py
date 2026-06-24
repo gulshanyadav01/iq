@@ -5,14 +5,18 @@ Provides unified interface for all Gemini API interactions in CINS.
 Handles client initialization, retry logic, and configuration management.
 
 Environment variables:
-- GEMINI_API_KEY: Google API key for Gemini (required)
+- GEMINI_API_KEY: Google API key for Gemini. Required for the public Gemini
+  Developer API path; NOT required when GOOGLE_GENAI_USE_VERTEXAI=true (Vertex
+  authenticates via ADC — see _get_client).
 - GEMINI_MODEL: Model to use (required)
+- GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION /
+  GOOGLE_APPLICATION_CREDENTIALS: Vertex AI via ADC (see _use_vertex/_get_client).
 """
 
 import os
 import time
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 
@@ -97,7 +101,11 @@ class GeminiService(LLMServiceMixin):
             max_retries: Number of retry attempts on failure.
             retry_delay: Base delay between retries (exponential backoff).
         """
-        self._api_key = api_key or self._get_api_key()
+        # Vertex mode authenticates via ADC — no API key required. Only fall
+        # back to GEMINI_API_KEY (which raises if missing) on the public path.
+        self._api_key = api_key
+        if self._api_key is None and not self._use_vertex():
+            self._api_key = self._get_api_key()
         self._model = model or self._get_default_model()
         self._max_retries = max_retries
         self._retry_delay = retry_delay
@@ -158,12 +166,54 @@ class GeminiService(LLMServiceMixin):
                 from google import genai
 
                 if self._use_vertex():
-                    # Vertex AI: project comes from GOOGLE_CLOUD_PROJECT / ADC.
-                    # Location defaults to the "us" multi-region, which serves
-                    # gemini-2.5-flash-lite; override via GOOGLE_CLOUD_LOCATION.
-                    self._client = genai.Client(vertexai=True, api_key=self._api_key)
+                    # Vertex AI via ADC: credentials from GOOGLE_APPLICATION_
+                    # CREDENTIALS (mounted SA key) or any other ADC source;
+                    # project from GOOGLE_CLOUD_PROJECT, region from
+                    # GOOGLE_CLOUD_LOCATION (use "global" or a regional endpoint
+                    # like "us-central1" — the bare "us"/"eu" multi-region values
+                    # need the .rep. hostname the SDK doesn't build and 404).
+                    # No API key on this path.
+                    #
+                    # Offline preflight: fail fast with a clear, non-retryable
+                    # error at client-init instead of deferring an opaque auth
+                    # failure into generate_content's retry loop.
+                    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+                    if not project:
+                        raise GeminiServiceError(
+                            "Vertex mode (GOOGLE_GENAI_USE_VERTEXAI=true) requires "
+                            "GOOGLE_CLOUD_PROJECT."
+                        )
+                    # Validate the region too: the SDK does not build the .rep.
+                    # multi-region endpoint, so bare "us"/"eu" 404 at generate
+                    # time. Fail fast here. Use "global" or a regional endpoint.
+                    location = os.environ.get("GOOGLE_CLOUD_LOCATION", "").strip()
+                    if not location:
+                        raise GeminiServiceError(
+                            "Vertex mode requires GOOGLE_CLOUD_LOCATION (use 'global' "
+                            "or a regional endpoint like 'us-central1')."
+                        )
+                    if location.lower() in ("us", "eu"):
+                        raise GeminiServiceError(
+                            f"GOOGLE_CLOUD_LOCATION='{location}' is a multi-region value "
+                            "that needs the .rep. endpoint this client does not set; use "
+                            "'global' or a regional endpoint like 'us-central1'."
+                        )
+                    cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+                    # Validate the file only when the var is set — ADC may resolve
+                    # from other sources (attached SA / workload identity / WIF).
+                    if cred_path and not Path(cred_path).is_file():
+                        raise GeminiServiceError(
+                            "GOOGLE_APPLICATION_CREDENTIALS points to a missing "
+                            f"file: {cred_path}"
+                        )
+                    self._client = genai.Client(vertexai=True)
                 else:
-                    # Public Gemini Developer API (default).
+                    # Public Gemini Developer API (default) — API key required.
+                    if not self._api_key:
+                        raise GeminiAPIKeyMissingError(
+                            "Public Gemini API requires GEMINI_API_KEY (or enable "
+                            "Vertex with GOOGLE_GENAI_USE_VERTEXAI=true)."
+                        )
                     self._client = genai.Client(api_key=self._api_key)
             except ImportError:
                 raise GeminiServiceError(

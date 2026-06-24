@@ -51,13 +51,17 @@ services:
       # truthy the SDK routes through Vertex, sourcing project/location from
       # these vars and credentials from GOOGLE_APPLICATION_CREDENTIALS (the SA
       # key JSON dropped into ./.gcp on the host, mounted read-only at
-      # /secrets/gcp). Pick a location that serves the model — gemini-2.5-flash-
-      # lite is in the "us" multi-region, NOT asia-southeast1. Leave the flag
-      # empty to use the public Gemini Developer API with GEMINI_API_KEY.
+      # /secrets/gcp). No API key is used on the Vertex path — auth is ADC.
+      # Use "global" (default) or a regional endpoint like "us-central1". Do NOT
+      # use bare "us"/"eu" multi-region — flash-lite isn't provisioned there for
+      # this project and they need the .rep. hostname the SDK doesn't build, so
+      # they 404. Leave the flag empty to use the public Gemini Developer API
+      # with GEMINI_API_KEY. GOOGLE_CLOUD_PROJECT is required in Vertex mode (the
+      # client preflights it).
       GOOGLE_GENAI_USE_VERTEXAI: ${GOOGLE_GENAI_USE_VERTEXAI:-}
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
       GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-}
-      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/secrets/gcp/sa-key.json}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
