@@ -42,7 +42,12 @@ services:
     ports:
       - "${API_PORT}:8000"
     volumes: &backend-volumes
+    volumes: &backend-volumes
       - operator-static:/app/static
+      # Vertex AI service-account key (read-only); only consulted when
+      # GOOGLE_GENAI_USE_VERTEXAI is set. Point GCP_CREDENTIALS_DIR at the host
+      # dir holding sa-key.json.
+      - ${GCP_CREDENTIALS_DIR:-./.gcp}:/secrets/gcp:ro
       # Vertex AI service-account key (read-only); only consulted when
       # GOOGLE_GENAI_USE_VERTEXAI is set. Point GCP_CREDENTIALS_DIR at the host
       # dir holding sa-key.json.
@@ -82,16 +87,20 @@ services:
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash}
       POLICY_EXTRACT_GEMINI_MODEL: ${POLICY_EXTRACT_GEMINI_MODEL:-gemini-2.5-flash-lite}
       # Vertex AI backend for Gemini (opt-in). When GOOGLE_GENAI_USE_VERTEXAI is
-      # truthy the SDK routes through Vertex, sourcing project/location from
-      # these vars and credentials from GOOGLE_APPLICATION_CREDENTIALS (SA key
-      # JSON mounted read-only at /secrets/gcp from the GCP_CREDENTIALS_DIR host
-      # path). Use the "us" multi-region, which serves gemini-2.5-flash-lite;
-      # asia-southeast1 does not. Leave the flag empty for the public Gemini
+      # truthy the SDK routes through Vertex and authenticates via ADC (no API
+      # key), sourcing project/location from these vars and credentials from
+      # GOOGLE_APPLICATION_CREDENTIALS (SA key JSON mounted read-only at
+      # /secrets/gcp from the GCP_CREDENTIALS_DIR host path). GOOGLE_CLOUD_PROJECT
+      # is required in Vertex mode (the client preflights it and fails fast if it
+      # or the key file is missing). Use "global" or a regional endpoint like
+      # "us-central1". Do NOT use bare "us"/"eu" multi-region — flash-lite isn't
+      # provisioned there for this project and they need the .rep. hostname the
+      # SDK doesn't build, so they 404. Leave the flag empty for the public Gemini
       # Developer API with GEMINI_API_KEY.
       GOOGLE_GENAI_USE_VERTEXAI: ${GOOGLE_GENAI_USE_VERTEXAI:-}
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
       GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-}
-      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/secrets/gcp/sa-key.json}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
