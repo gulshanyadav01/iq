@@ -1,3 +1,4 @@
+from django.db.models import Count, Q
 from drf_spectacular.utils import extend_schema, OpenApiCallback
 from rest_framework import viewsets, status
 from rest_framework.permissions import AllowAny
@@ -71,15 +72,26 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
 
     @extend_schema(
         summary="List extraction requests",
-        description="List all extraction requests (newest first). Intended for inspection/admin; "
-                    "clients should rely on the configured callback for canonical results, not on polling this endpoint.",
+        description="Paginated list of extraction requests (newest first). Response includes "
+                    "DRF pagination keys (count/next/previous/results) plus an all-time `counts` "
+                    "breakdown by status. Intended for inspection/admin; clients should rely on the "
+                    "configured callback for canonical results, not on polling this endpoint.",
         tags=["Policy Extract"],
         responses={200: PolicyExtractionRequestSerializer(many=True)},
     )
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset().order_by('-created_at')
-        serializer = PolicyExtractionRequestSerializer(queryset, many=True)
-        return Response(serializer.data)
+        counts = self.get_queryset().aggregate(
+            total=Count('id'),
+            completed=Count('id', filter=Q(status='completed')),
+            failed=Count('id', filter=Q(status='failed')),
+            in_progress=Count('id', filter=Q(status__in=['initiated', 'processing'])),
+        )
+        page = self.paginate_queryset(queryset)
+        serializer = PolicyExtractionRequestSerializer(page, many=True)
+        response = self.get_paginated_response(serializer.data)
+        response.data['counts'] = counts
+        return response
 
     @extend_schema(
         summary="Get extraction request",

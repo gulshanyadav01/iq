@@ -91,7 +91,15 @@ class MineruChunkedParser:
                 headers={"accept": "application/json"},
                 timeout=self.REQUEST_TIMEOUT,
             )
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                status = e.response.status_code if e.response is not None else "?"
+                body = e.response.text if e.response is not None else ""
+                raise requests.exceptions.HTTPError(
+                    f"MinerU API error {status} for {self.MINERVA_API_URL}: {body}",
+                    response=e.response,
+                ) from e
 
         try:
             md = self._extract_md(resp.json())

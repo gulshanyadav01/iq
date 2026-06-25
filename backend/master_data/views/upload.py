@@ -2,7 +2,7 @@ import openpyxl
 from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
 from rest_framework.parsers import FormParser, MultiPartParser
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from master_data.models import MasterDataUpload
@@ -27,7 +27,7 @@ class MasterDataUploadViewSet(viewsets.GenericViewSet):
         Fetch a single upload record.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     parser_classes = [MultiPartParser, FormParser]
     queryset = MasterDataUpload.objects.all()
 

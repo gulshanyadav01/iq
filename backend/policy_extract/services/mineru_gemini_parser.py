@@ -693,6 +693,12 @@ class MineruGeminiParser:
                 print(f"   ✓ Converted in {time.time() - start_time:.1f}s ({len(markdown_content)} chars)")
                 return markdown_content
 
+            except requests.exceptions.HTTPError as e:
+                status = e.response.status_code if e.response is not None else "?"
+                body = e.response.text if e.response is not None else ""
+                msg = f"MinerU API error {status} for {self.MINERVA_API_URL}: {body}"
+                print(f"   ❌ {msg}")
+                raise requests.exceptions.HTTPError(msg, response=e.response) from e
             except requests.exceptions.RequestException as e:
                 print(f"   ❌ API request error: {e}")
                 raise
