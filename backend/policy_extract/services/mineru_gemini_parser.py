@@ -1176,8 +1176,12 @@ class MineruGeminiParser:
                     bucket['value'] = resolution.canonical
                 bucket['is_extracted'] = "TRUE"
                 bucket['do_verification'] = "FALSE"
-            elif extracted:
-                bucket['do_verification'] = "TRUE"
+            else:
+                # No confident master match: never leave a raw/echoed value in
+                # `id` (the LLM often copies the UPPERCASE value into it).
+                bucket['id'] = ""
+                if extracted:
+                    bucket['do_verification'] = "TRUE"
 
         # 1. product_id — try the explicit product_id field first, then VehicleClass.
         product_text = (structured_data.get('product_id', {}).get('value') or '').strip()
@@ -1225,6 +1229,7 @@ class MineruGeminiParser:
                     structured_data['VehicleSubClass']['do_verification'] = "FALSE"
                     print(f"   ✓ VehicleSubClass resolved: '{extracted_sub}' → [{sub_id}] {canonical}")
                 else:
+                    structured_data['VehicleSubClass']['id'] = ""
                     structured_data['VehicleSubClass']['do_verification'] = "TRUE"
                     print(f"   ⚠ VehicleSubClass no match: '{extracted_sub}' for class '{vehicle_class}'")
 
