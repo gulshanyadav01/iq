@@ -168,10 +168,14 @@ coverages:
   │                         │ Liability Paid Driver, LL Paid Driver,      │
   │                         │ Legal Liability to Paid Driver/Employee     │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "personal_accident"     │ PA Cover, Owner Driver PA, Personal         │
-  │                         │ Accident, CPA, Compulsory PA, Driver PA,    │
-  │                         │ PA for Owner Driver, Owner PA,              │
-  │                         │ Unnamed PA, Named PA                        │
+  │ "personal_accident"     │ OWNER-DRIVER / DEFAULT PA: PA, Personal     │
+  │   (owner-driver / CPA)  │ Accident, PA Cover, Owner Driver PA, CPA,   │
+  │                         │ Compulsory PA, Driver PA, PA for Owner      │
+  │                         │ Driver, Owner PA. A bare "Personal          │
+  │                         │ Accident"/"PA" with NO "Passenger" word     │
+  │                         │ is owner-driver PA → map here (default).    │
+  │                         │ Only lines naming "Passenger" go to         │
+  │                         │ pa_unnamed_passenger.                       │
   ├─────────────────────────┼──────────────────────────────────────────────┤
   │ "electrical_accessories"│ Electrical Accessories, Elec Accessories,   │
   │                         │ Electrical Fitting, Electric Accessory      │
@@ -179,9 +183,30 @@ coverages:
   │ "non_electrical_acc"    │ Non-Electrical Accessories, Non Elec,       │
   │                         │ Non-Electric Accessory, Non Electrical      │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "cng_lpg"               │ CNG/LPG Kit, CNG Kit, LPG Kit, Bi-Fuel     │
-  │                         │ Kit, CNG/LPG Cover, External CNG/LPG       │
+  │ "cng_lpg"               │ OD SIDE of the kit: CNG/LPG Kit, CNG Kit,  │
+  │   (kit OD premium)      │ LPG Kit, Bi-Fuel Kit, CNG/LPG Cover,       │
+  │                         │ External CNG/LPG. Most policies show ONLY  │
+  │                         │ this OD line.                              │
+  ├─────────────────────────┼──────────────────────────────────────────────┤
+  │ "pa_unnamed_passenger"  │ PASSENGER PA ONLY (label must say          │
+  │                         │ "Passenger"): PA to Unnamed Passengers,    │
+  │                         │ Unnamed Passenger PA, PA for Unnamed        │
+  │                         │ Passenger(s), Compulsory PA to Unnamed     │
+  │                         │ Passengers. Premium = SMALL amount paid,   │
+  │                         │ NOT the cover sum.                         │
+  ├─────────────────────────┼──────────────────────────────────────────────┤
+  │ "bifuel_kit_tp"         │ TP SIDE of the kit, ONLY if a SEPARATE     │
+  │   (kit TP premium)      │ third-party line is printed: CNG/LPG TP,   │
+  │                         │ Bi-Fuel Kit TP, TP for CNG/LPG Kit,        │
+  │                         │ CNG/LPG Kit TP Premium                      │
   └─────────────────────────┴──────────────────────────────────────────────┘
+
+  CAUTION — two pairs that must never share a rupee figure:
+  • Owner/Driver/CPA PA → "personal_accident" (pa_cover); PA explicitly for
+    PASSENGERS → "pa_unnamed_passenger".
+  • A CNG/LPG kit's single premium line is the OD side → "cng_lpg" (cngAmount).
+    Use "bifuel_kit_tp" ONLY when a SEPARATE TP line for the kit is printed.
+    Never tag the same amount as both cng_lpg and bifuel_kit_tp.
 
 - For EACH add-on found, extract:
   {"is_addon": true, "addon_name": "<from table above>", "value": "<label>", "premium": <amount or 0>, "context": "<description>"}
@@ -242,11 +267,18 @@ premiums:
   │ "tyre_protection"     │ Tyre Protection, Tyre Guard, Lamps/Tyres/    │
   │                       │ Tubes/Mudguards, External Body Parts         │
   │ "paid_driver"         │ Paid Driver, LL to Paid Driver, LL Paid      │
-  │ "personal_accident"   │ PA Cover, Owner Driver PA, CPA, Personal Acc │
+  │ "personal_accident"   │ Owner-driver/DEFAULT PA: PA, Personal Acc,   │
+  │                       │ PA Cover, Owner Driver PA, CPA, Compulsory PA,│
+  │                       │ Driver PA (bare PA w/o "Passenger" = here)   │
   │  ★ value = SMALL premium paid (e.g. 550), NOT large cover sum    │
+  │ "pa_unnamed_passenger"│ PASSENGER PA only (label says "Passenger"):  │
+  │                       │ PA to Unnamed Passengers, Unnamed Passenger  │
+  │                       │ PA (SMALL premium, not sum)                  │
   │ "electrical_acc"      │ Electrical Accessories premium               │
   │ "non_electrical_acc"  │ Non-Electrical Accessories premium           │
-  │ "cng_lpg"             │ CNG/LPG Kit premium, Bi-Fuel Kit premium     │
+  │ "cng_lpg"             │ CNG/LPG Kit OD premium, Bi-Fuel Kit premium  │
+  │ "bifuel_kit_tp"       │ CNG/LPG kit TP premium — ONLY a separate TP  │
+  │                       │ line; never the same figure as cng_lpg       │
   └───────────────────────┴───────────────────────────────────────────────┘
   - If an add-on doesn't match any entry above, use "addon_name": "other"
 

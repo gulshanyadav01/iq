@@ -577,6 +577,7 @@ class MineruGeminiParser:
                 "previous_policy_end_date": {"description": "Previous policy end/expiry date (dd/mm/yyyy) — used to derive STP/NSTP"},
                 "pa_cover": {"description": "PA cover (numeric)", "default": "0"},
                 "pa_cover_addon": {"description": "PA addon: YES/NO", "default": "NO"},
+                "paUnnamedPassengerPremium": {"description": "PA Unnamed Passenger addon premium in rupees — the SMALL premium paid, NOT the cover sum (numeric)", "default": "0"},
                 "electricalAccessoriesIDV": {"description": "Elec IDV (numeric)", "default": "0"},
                 "nonElectricalAccessoriesIDV": {"description": "Non-elec IDV (numeric)", "default": "0"},
                 "cngLPGUnitIDV": {"description": "CNG IDV (numeric)", "default": "0"},
@@ -584,6 +585,7 @@ class MineruGeminiParser:
                 "valueOfElectricalAccessories": {"description": "Elec value (numeric)", "default": "0"},
                 "valueOfNonElectricalAccessories": {"description": "Non-elec value (numeric)", "default": "0"},
                 "cngAmount": {"description": "CNG value (numeric)", "default": "0"},
+                "bifuelKitTPPremium": {"description": "Bi-fuel (CNG/LPG) kit TP (third-party) premium in rupees. Distinct from cngAmount, which is the kit OD-side premium. Only present when the policy prints a SEPARATE TP line for the kit (numeric)", "default": "0"},
                 "isZeroDepCover": {"description": "Zero dep cover", "enum": ["YES", "NO"], "default": "NO"},
                 "zeroDepPremium": {"description": "Zero dep premium (numeric)", "default": "0"},
                 "isEPCover": {"description": "Engine protection cover", "enum": ["YES", "NO"], "default": "NO"},
@@ -607,6 +609,7 @@ class MineruGeminiParser:
                 "paidDriverPremium": {"description": "Driver premium (numeric)"},
                 "addOn": {"description": "Has add-ons: TRUE/FALSE", "default": "FALSE"},
                 "addonList": {"description": "Add-ons list", "default": "[]"},
+                "totalAddonPremium": {"description": "COMPUTED in post-processing (LLM must leave 0). Sum of 9 OD-side optional add-ons: zeroDep + RTI + EP + tyre + NCBProtection + consumables + LPB + RSA + keyReplacement. DELIBERATELY EXCLUDES statutory PA, CNG/bifuel kit premiums, and the paid-driver TP add-on (numeric)", "default": "0"},
                 "branch": {"description": "Insurance branch"},
                 "intermediary_code": {"description": "Broker/Intermediary code"},
                 "intermediary_name": {"description": "Broker name"},
@@ -833,7 +836,18 @@ class MineruGeminiParser:
         'consumablesPremium', 'keyReplacement', 'nCBProtection',
         'rSAPremium', 'rtiPremium', 'lPBPremium', 'tyreProtectionPremium',
         'paidDriverPremium', 'IMT23_value', 'IMT34_value',
+        'paUnnamedPassengerPremium', 'bifuelKitTPPremium',
     }
+
+    # Sum drivers for the computed totalAddonPremium. ePPremium only —
+    # engineProtectionPremium is a duplicate alias (coalesced in _post_process)
+    # to avoid under/double-count. DELIBERATELY excludes PA, CNG/bifuel, and the
+    # paid-driver TP add-on by product definition. Keep in sync with default_zero_fields.
+    ADDON_TOTAL_FIELDS = [
+        'zeroDepPremium', 'rtiPremium', 'ePPremium', 'tyreProtectionPremium',
+        'nCBProtection', 'consumablesPremium', 'lPBPremium', 'rSAPremium',
+        'keyReplacement',
+    ]
 
     def _clean_whitespace(self, value: str, field_name: str) -> str:
         """
@@ -874,6 +888,7 @@ class MineruGeminiParser:
             'consumablesPremium', 'keyReplacement', 'nCBProtection',
             'rSAPremium', 'rtiPremium', 'lPBPremium',
             'tyreProtectionPremium', 'paidDriverPremium',
+            'paUnnamedPassengerPremium', 'bifuelKitTPPremium',
             'IMT23_value', 'IMT34_value', 'policy_term', 'pay_term',
             'od_term', 'tp_term'
         }
@@ -887,6 +902,46 @@ class MineruGeminiParser:
         # - Replace multiple spaces/newlines/tabs with single space
         normalized = re.sub(r'\s+', ' ', value.strip())
         return normalized
+
+    def _apply_total_addon_premium(self, structured_data: Dict[str, Any]) -> None:
+        """Compute totalAddonPremium = sum of the 9 OD-side add-on premiums.
+
+        Pure dict->dict (mutates structured_data in place); no DB/SDK needed, so it is
+        unit-testable in isolation. Call AFTER the rounding + default-zero loops so every
+        component is already a clean numeric string. ePPremium and engineProtectionPremium
+        are duplicate aliases for the same add-on — coalesce (max) so the EP value is
+        counted once whether the LLM filled the primary or the alt field. Marks the field
+        is_extracted="TRUE" (matches the serviceTax/net_premium derived-field convention).
+        """
+        def _addon_num(field_name: str) -> float:
+            data = structured_data.get(field_name)
+            if not isinstance(data, dict):
+                return 0.0
+            raw = data.get('value', '')
+            clean = ''.join(c for c in str(raw) if c.isdigit() or c in '.-')
+            try:
+                return abs(float(clean)) if clean else 0.0
+            except (ValueError, TypeError):
+                return 0.0
+
+        addon_total = 0.0
+        for field in self.ADDON_TOTAL_FIELDS:
+            if field == "ePPremium":
+                addon_total += max(_addon_num("ePPremium"),
+                                   _addon_num("engineProtectionPremium"))
+            else:
+                addon_total += _addon_num(field)
+
+        total_value = str(round(addon_total))
+        if isinstance(structured_data.get("totalAddonPremium"), dict):
+            structured_data["totalAddonPremium"]["value"] = total_value
+            structured_data["totalAddonPremium"]["is_extracted"] = "TRUE"
+            structured_data["totalAddonPremium"]["confidence_score"] = 0.95
+        else:
+            structured_data["totalAddonPremium"] = {
+                "id": "", "value": total_value, "confidence_score": 0.95,
+                "is_extracted": "TRUE", "do_verification": "FALSE"
+            }
 
     def _post_process(self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None) -> Dict[str, Any]:
         """Post-process extracted data - round amounts, derive fields, clean whitespace"""
@@ -918,7 +973,8 @@ class MineruGeminiParser:
         default_zero_fields = [
             "zeroDepPremium", "ePPremium", "consumablesPremium", "keyReplacement",
             "nCBProtection", "rSAPremium", "rtiPremium", "lPBPremium",
-            "tyreProtectionPremium", "finalTotalDiscount"
+            "tyreProtectionPremium", "finalTotalDiscount",
+            "paUnnamedPassengerPremium", "bifuelKitTPPremium",
         ]
 
         for field in default_zero_fields:
@@ -931,6 +987,10 @@ class MineruGeminiParser:
                     "id": "", "value": "0", "confidence_score": 1.0,
                     "is_extracted": "FALSE", "do_verification": "FALSE"
                 }
+
+        # Compute totalAddonPremium from the 9 OD-side add-on premiums (after the
+        # rounding + default-zero loops above guarantee clean numeric strings).
+        self._apply_total_addon_premium(structured_data)
 
         # Fallback: basic_od_premium ↔ od_premium when one is missing
         basic_od = (structured_data.get('basic_od_premium', {}).get('value', '') or '').strip()
