@@ -191,13 +191,23 @@ Map each Stage 2 field by looking for the matching addon_name:
   lPBPremium            ← addon_name = "personal_belongings"
   tyreProtectionPremium ← addon_name = "tyre_protection"
   paidDriverPremium     ← addon_name = "paid_driver"  (TP add-on)
-  pa_cover              ← addon_name = "personal_accident"
+  bifuelKitTPPremium    ← addon_name = "bifuel_kit_tp"  (TP add-on, like paidDriverPremium)
+    ★ This is the THIRD-PARTY premium for the CNG/LPG kit, part of tp_premium.
+    ★ cngAmount remains the OD-side kit premium — the two NEVER share a rupee figure.
+    ★ Only present when the policy prints a SEPARATE kit TP line; else default "0".
+  pa_cover              ← addon_name = "personal_accident"  (owner-driver / DEFAULT PA — a bare "Personal Accident"/"PA" line maps here)
     ★ pa_cover = the PREMIUM PAID by the customer (small amount: typically 100–1000 Rs)
     ★ Source: premiums array entry with addon_name="personal_accident" → use its "value" field
            OR coverages array entry with addon_name="personal_accident" → use its "premium" field
     ★ NEVER use the PA cover sum/limit (1,500,000 or 15 Lakhs) — that is the claim amount, NOT premium
     ★ The cover amount (1,500,000) stays in the "limits" array — DO NOT map it to pa_cover
     ★ EXAMPLE: "Add: Compulsory PA Rs. 15 Lacs (330.00)" → pa_cover = 330 (NOT 1500000)
+  paUnnamedPassengerPremium ← addon_name = "pa_unnamed_passenger"  (PASSENGER PA only)
+    ★ Use the SMALL premium paid, NOT the cover sum — same rule as pa_cover above.
+    ★ Distinct from pa_cover (owner-driver). Default "0" if no passenger-PA line.
+
+  totalAddonPremium: DO NOT extract — output value "0". It is COMPUTED in
+  post-processing as the sum of the 9 OD-side add-on premiums.
 
 Also check "coverages" array for add-ons where premium may be listed there instead.
 Extract ONLY numeric amount (no ₹/Rs/commas). Default to "0" if not found.

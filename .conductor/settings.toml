@@ -1,7 +1,29 @@
-"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+#:schema https://conductor.build/schemas/settings.repo.schema.json
+
+# Shared Conductor config for insur_iq (pnpm 10 monorepo + Docker Compose stack:
+# postgres, redis, minio, backend, web, auth, celery, nginx).
+#
+# scripts/generate-env.sh writes a WORKSPACE-SPECIFIC .env from .env.example,
+# picking random free host ports (20000-50000) and a unique DOCKER_NETWORK_NAME.
+# That isolates each workspace's stack, so multiple workspaces run in parallel
+# without port/network collisions — hence run_mode = "concurrent". Because the
+# repo owns port allocation this way (and derives service URLs from PROXY_PORT),
+# CONDUCTOR_PORT is intentionally not used here.
 
 [scripts]
-archive = "pnpm dev:down"
-run = "pnpm dev:down && pnpm dev:up"
-run_mode = "concurrent"
+# On workspace creation: install root tooling, then generate this workspace's
+# isolated .env (random free ports + unique docker network). --force overwrites
+# any partial .env so a fresh workspace always gets a clean, non-colliding stack.
 setup = "pnpm i && pnpm setup:env --force"
+
+# Run button: tear down this workspace's stack first (clears a prior or crashed
+# run), then bring it up in the foreground so logs stream to the Run panel.
+run = "pnpm dev:down && pnpm dev:up"
+
+# Each workspace's stack uses its own ports + docker network, so parallel runs
+# across workspaces are safe.
+run_mode = "concurrent"
+
+# Before archiving: stop and remove this workspace's containers. Non-destructive
+# (named volumes are left intact).
+archive = "pnpm dev:down"
