@@ -632,20 +632,30 @@ class RawToCICSTransformer:
         raw: RawExtraction,
     ) -> List[Product]:
         """Group entries by product and transform to Product objects."""
-        # Group entries by product
+        # Group entries by product. Commercial-vehicle entries additionally
+        # split by segment (GCV / PCV / Buses / MISC-D) so each becomes its own
+        # SubProduct — the source publishes them as separate tables (PROD column
+        # GCCV / PCCV<6 / PCCV>6 / MSV) but the LLM normalises product_name to a
+        # single "Commercial Vehicle", which would otherwise collapse all four
+        # into one product with one SubProduct.
         product_groups: Dict[str, List[RawCommissionEntry]] = {}
+        group_meta: Dict[str, tuple] = {}
 
         for entry in entries:
             product_key = self._get_product_key(entry)
-            if product_key not in product_groups:
-                product_groups[product_key] = []
-            product_groups[product_key].append(entry)
+            segment = self._cv_segment_label(entry) or self._car_segment_label(entry)
+            group_key = f"{product_key}::{segment}" if segment else product_key
+            if group_key not in product_groups:
+                product_groups[group_key] = []
+                group_meta[group_key] = (product_key, segment)
+            product_groups[group_key].append(entry)
 
         # Transform each product group
         products = []
-        for product_key, group_entries in product_groups.items():
+        for group_key, group_entries in product_groups.items():
+            product_key, segment = group_meta[group_key]
             product = self._transform_product(
-                product_key, group_entries, master_data, raw
+                product_key, group_entries, master_data, raw, segment=segment
             )
             products.append(product)
 
@@ -659,21 +669,49 @@ class RawToCICSTransformer:
             return entry.product_type
         return "DEFAULT_PRODUCT"
 
+    # Canonical commercial-vehicle segment label → product_subproduct value.
+    _SEGMENT_TO_SUBPRODUCT = {
+        "GCV": "commercial-gcv",
+        "PCV": "commercial-pcv",
+        "Buses": "commercial-buses",
+        "MISC-D": "commercial-miscd",
+    }
+    # Car segment labels (SubProduct for the Car product).
+    _CAR_SEGMENTS = ("Private Car", "Taxi")
+
     def _transform_product(
         self,
         product_key: str,
         entries: List[RawCommissionEntry],
         master_data: Optional[List[RawMasterDataEntry]],
         raw: RawExtraction,
+        segment: Optional[str] = None,
     ) -> Product:
-        """Transform a group of entries into a Product."""
+        """Transform a group of entries into a Product.
+
+        ``segment`` is the commercial-vehicle sub-product (GCV / PCV / Buses /
+        MISC-D) when the caller has already split the group by segment; it
+        pins product_subproduct and sub_category so each segment exports as its
+        own SubProduct.
+        """
         # Determine product code and category
         product_code = self._slugify(product_key).upper()
+        if segment:
+            seg_slug = self._slugify(segment).upper()
+            if not product_code.endswith(seg_slug):
+                product_code = f"{product_code}_{seg_slug}"
         product_category = self._detect_product_category(product_key, entries)
 
         # Detect product-level metadata up-front so we can gate per-rule
-        # backfills (e.g. wheel-category extraction) by subproduct.
-        product_subproduct = self._detect_product_subproduct(product_key, entries)
+        # backfills (e.g. wheel-category extraction) by subproduct. A commercial
+        # segment pins the commercial-* subproduct; a car segment (Private Car /
+        # Taxi) keeps the "car" subproduct while still splitting the SubProduct.
+        if segment in self._SEGMENT_TO_SUBPRODUCT:
+            product_subproduct = self._SEGMENT_TO_SUBPRODUCT[segment]
+        elif segment in self._CAR_SEGMENTS:
+            product_subproduct = "car"
+        else:
+            product_subproduct = self._detect_product_subproduct(product_key, entries)
         vehicle_type = self._detect_vehicle_type(product_key, entries)
 
         # Compute priorities based on specificity
@@ -814,9 +852,32 @@ class RawToCICSTransformer:
                 f"weight dimension"
             )
 
-        # Determine sub-category
+        # Fuel bifurcation completeness (commercial). When a commercial product
+        # carries a dedicated Electric row, the fuel-agnostic siblings
+        # (fuel_type None) implicitly mean "all fuels" — which OVERLAPS the
+        # Electric rows, and the export renders None as the full
+        # "Petrol,Diesel,CNG,LPG,Electric" default. Pin those siblings to the
+        # four non-electric fuels so Electric vs Non-Electric are clean,
+        # separate deals (the requested GCV 3W/4W fuel bifurcation).
+        if product_subproduct and product_subproduct.startswith("commercial"):
+            has_electric = any(
+                r.conditions
+                and r.conditions.fuel_type
+                and "electric" in r.conditions.fuel_type
+                for r in rules
+            )
+            if has_electric:
+                for r in rules:
+                    if r.conditions and not r.conditions.fuel_type:
+                        r.conditions.fuel_type = ["petrol", "diesel", "cng", "lpg"]
+
+        # Determine sub-category. For a split commercial group the segment is
+        # the canonical SubProduct (GCV / PCV / Buses / MISC-D) — use it
+        # verbatim so the export SubProduct column matches PRODUCT_FIELD_VALUES.
         sub_category = None
-        if entries:
+        if segment:
+            sub_category = segment
+        elif entries:
             first_entry = entries[0]
             if first_entry.product_type:
                 sub_category = first_entry.product_type.lower()
@@ -1050,6 +1111,172 @@ class RawToCICSTransformer:
                 return "car"
         return None
 
+    # Canonical PROD tokens the overlay writes onto product_type, plus tolerant
+    # aliases, mapped to the canonical SubProduct segment label.
+    _SEGMENT_CANON = {
+        "gcv": "GCV",
+        "gccv": "GCV",
+        "pcv": "PCV",
+        "pccv": "PCV",
+        "pccv<6": "PCV",
+        "pccv < 6": "PCV",
+        "buses": "Buses",
+        "bus": "Buses",
+        "pccv>6": "Buses",
+        "pccv > 6": "Buses",
+        "misc-d": "MISC-D",
+        "miscd": "MISC-D",
+        "misc d": "MISC-D",
+        "msv": "MISC-D",
+    }
+
+    # Body-slug backstops when only the sub-class survived (no PROD token).
+    _SEGMENT_BODY_BUSES = (
+        "school",
+        "staff bus",
+        "staff-bus",
+        "passenger bus",
+        "mini bus",
+        "big_tax",
+        "big tax",
+        "greater than six",
+        ">6 seat",
+    )
+    _SEGMENT_BODY_MISCD = (
+        "tractor",
+        "trac",
+        "excavator",
+        "harvest",
+        "tipper",
+        "dumper",
+        "crane",
+        "loader",
+        "grader",
+        "mixer",
+        "dozer",
+        "compactor",
+        "rig",
+        "compressor",
+        "road roller",
+        "road sweeper",
+        "fork lift",
+        "forklift",
+    )
+    _SEGMENT_BODY_PCV = (
+        "maxicab",
+        "maxi",
+        "3w_auto",
+        "3w auto",
+        "auto rickshaw",
+        "auto-rickshaw",
+    )
+
+    @staticmethod
+    def _prod_token_segment(text: str) -> Optional[str]:
+        """Map a PROD / table-name token to a canonical segment label.
+
+        Order matters: the >6 / <6 passenger variants must be tested before the
+        bare ``pccv`` / ``pcv`` token, and ``gccv`` before the ``gcv`` substring.
+        """
+        if "msv" in text or "misc" in text:
+            return "MISC-D"
+        if "pccv>6" in text or "pccv > 6" in text:
+            return "Buses"
+        if "pccv<6" in text or "pccv < 6" in text:
+            return "PCV"
+        if "gccv" in text or "gcv" in text:
+            return "GCV"
+        if "pccv" in text or "pcv" in text:
+            return "PCV"
+        return None
+
+    def _cv_segment_label(self, entry: RawCommissionEntry) -> Optional[str]:
+        """Return the commercial-vehicle SubProduct segment for an entry.
+
+        One of ``GCV`` / ``PCV`` / ``Buses`` / ``MISC-D`` for commercial
+        entries, else ``None`` (Car / Two Wheeler are never segmented).
+
+        The authoritative signal is ``source_section`` — the codegen tags each
+        rule with its source table name ("Table 1: GCCV Commission",
+        "Table 3: PCCV > 6 Commission", "Table 4: MSV Commission"), which names
+        the segment directly. Body sub-classes and an explicit canonical
+        ``product_type`` are used only as backstops.
+        """
+        section = (getattr(entry, "source_section", "") or "").lower()
+        blob = " ".join(
+            str(v)
+            for v in (
+                getattr(entry, "product_type", "") or "",
+                getattr(entry, "product_name", "") or "",
+                getattr(entry, "source_section", "") or "",
+                getattr(entry, "rule_text", "") or "",
+                (getattr(entry, "conditions", None) or {}).get("vehicle_sub_class"),
+            )
+            if v
+        ).lower()
+
+        if not self._looks_commercial(entry, blob):
+            return None
+
+        # 1) Authoritative table / PROD token (source_section names the segment).
+        for text in (section, blob):
+            seg = self._prod_token_segment(text)
+            if seg:
+                return seg
+        # 2) Body sub-class backstop (when no PROD token survived).
+        if any(b in blob for b in self._SEGMENT_BODY_BUSES):
+            return "Buses"
+        if any(b in blob for b in self._SEGMENT_BODY_MISCD):
+            return "MISC-D"
+        if any(b in blob for b in self._SEGMENT_BODY_PCV):
+            return "PCV"
+        # 3) Explicit canonical product_type (overlay may set it).
+        pt = (getattr(entry, "product_type", "") or "").strip().lower()
+        if pt in self._SEGMENT_CANON:
+            return self._SEGMENT_CANON[pt]
+        # 4) Commercial but unclassified → goods carrier (the GCCV main table).
+        return "GCV"
+
+    def _car_segment_label(self, entry: RawCommissionEntry) -> Optional[str]:
+        """Return the Car SubProduct segment for an entry.
+
+        ``Taxi`` when the row is a taxi (incl. kaali-peeli), ``Private Car`` for
+        any other car row, else ``None`` (non-car). Splitting here gives the Car
+        product two distinct SubProducts; a document with no taxi grid simply
+        yields no Taxi group.
+        """
+        blob = " ".join(
+            str(v)
+            for v in (
+                getattr(entry, "product_type", "") or "",
+                getattr(entry, "product_name", "") or "",
+                getattr(entry, "source_section", "") or "",
+                getattr(entry, "rule_text", "") or "",
+                (getattr(entry, "conditions", None) or {}).get("vehicle_sub_class"),
+            )
+            if v
+        ).lower()
+        if "taxi" in blob or "kaali" in blob:
+            return "Taxi"
+        sub = self._detect_product_subproduct(self._get_product_key(entry), [entry])
+        if sub == "car":
+            return "Private Car"
+        if (getattr(entry, "product_name", "") or "").strip().lower() in (
+            "private car",
+            "pvt car",
+        ):
+            return "Private Car"
+        return None
+
+    def _looks_commercial(self, entry: RawCommissionEntry, blob: str) -> bool:
+        """Whether an entry belongs to the Commercial Vehicle product."""
+        if "commercial" in blob or any(
+            t in blob for t in ("gccv", "pccv", "gcv", "pcv", "msv", "misc")
+        ):
+            return True
+        sub = self._detect_product_subproduct(self._get_product_key(entry), [entry])
+        return bool(sub and sub.startswith("commercial"))
+
     def _detect_vehicle_type(
         self, product_key: str, entries: List[RawCommissionEntry]
     ) -> Optional[str]:
@@ -1198,7 +1425,29 @@ class RawToCICSTransformer:
         fuel_type = self._normalize_list_field(
             entry_conditions.get("fuel_type"), FUEL_TYPE_MAPPINGS, "fuel_type"
         )
-        fuel_type = self._expand_fuel_group(fuel_type)
+        fuel_type = self._expand_fuel_group(fuel_type, entry.product_name)
+
+        # Electric-variant suffix recovery (Chola commercial-vehicle positional
+        # rows). The source marks the electric sibling of a weight/wheel band
+        # with a trailing "[Electric]" token on the SUBCLASS label (e.g.
+        # "2_UPTO_3.5T[Electric]", "1_GCCV_3W[Electric]"). On the codegen path
+        # this survives only in the raw sub-class slug / rule text and is never
+        # mapped to a fuel, so the electric and non-electric rows become
+        # indistinguishable and cannot form separate deals. Tag fuel_type when
+        # the marker is present and no fuel was parsed; the non-suffixed sibling
+        # stays fuel-agnostic (applies to all fuels).
+        if not fuel_type:
+            elec_probe = " ".join(
+                str(v)
+                for v in (
+                    entry_conditions.get("vehicle_sub_class"),
+                    getattr(entry, "rule_text", ""),
+                    getattr(entry, "source_section", ""),
+                )
+                if v
+            ).lower()
+            if "[electric]" in elec_probe:
+                fuel_type = ["electric"]
 
         # Number of wheels
         number_of_wheels = self._normalize_list_field(
@@ -1315,6 +1564,45 @@ class RawToCICSTransformer:
             cc_start = 0
         elif cc_end is None:
             cc_end = 99999
+
+        # Electric two-wheelers are kW-rated, not CC-rated, so they never carry
+        # a CC filter. Deterministic backstop: if a kW power band ("7 KW",
+        # "> 16 KW") leaked into conditions["cc"] on the codegen path it would
+        # yield a bogus tight range (e.g. cc=(7,7)) that collapses every EV
+        # band into one. Reset electric two-wheeler rules to the open sentinel.
+        if (
+            entry.product_name == "Two Wheeler"
+            and fuel_type
+            and "electric" in fuel_type
+            and (cc_start, cc_end) != (0, 99999)
+        ):
+            cc_start, cc_end = 0, 99999
+
+        # Mis-split guard (Chola flattened Two-Wheeler grid). The codegen splits
+        # each "<make> > <band> > <value>" header cell positionally; when the
+        # make is not repeated for a sub-column the band lands in vehicle_make
+        # (e.g. "150_350cc") and a rate lands in cc (e.g. "0.205"). Detect a
+        # vehicle_make item that is really a CC band, move it back to cc, and
+        # drop the bogus cc value.
+        if vehicle_make:
+            real_makes: List[str] = []
+            band_from_make: Optional[str] = None
+            for m in vehicle_make:
+                ml = str(m).strip().lower()
+                # A CC band is fully numeric with an optional range + "cc"
+                # suffix ("150", "150_350", "150cc", "150_350cc"). Match the
+                # WHOLE token so real makes that merely contain "cc"
+                # (e.g. "CCM" motorcycles) are never dropped.
+                if re.fullmatch(r"\d+(?:[_\-]\d+)?(?:cc)?", ml):
+                    band_from_make = band_from_make or ml
+                else:
+                    real_makes.append(m)
+            if band_from_make is not None:
+                vehicle_make = real_makes or None
+                band_norm = band_from_make.replace("cc", "").replace("_", "-")
+                bs, be = self._parse_range_field(band_norm)
+                cc_start = bs if bs is not None else 0
+                cc_end = be if be is not None else 99999
 
         seat_start, seat_end = self._parse_range_field(
             entry_conditions.get("seating_capacity")
@@ -1619,18 +1907,24 @@ class RawToCICSTransformer:
     }
 
     # Canonical GCV wheel categories per PRODUCT_FIELD_VALUES.md.
-    def _expand_fuel_group(self, fuel_type):
+    def _expand_fuel_group(self, fuel_type, product_name=None):
         """Expand grid-group fuel tokens to their component fuels.
 
         Default (all carriers): the diesel grid token "non-petrol" expands to
         {diesel, cng, lpg} — the historical behavior.
 
-        Chola (Cholamandalam): CNG/LPG/Electric follow the *Petrol* grid, not the
-        Diesel grid (the carrier's grid-alias rule, confirmed by client
-        reconciliation). So for Chola the diesel grid is diesel-only and the
-        petrol grid carries the alternative fuels:
+        Chola (Cholamandalam): CNG/LPG (and, for Private Car only, Electric)
+        follow the *Petrol* grid, not the Diesel grid (the carrier's grid-alias
+        rule, confirmed by client reconciliation). So for Chola the diesel grid
+        is diesel-only and the petrol grid carries the alternative fuels:
             [D] non-petrol -> {diesel}
-            [P] petrol     -> {petrol, cng, lpg, electric}
+            [P] petrol     -> {petrol, cng, lpg}          (+ electric for Private Car)
+
+        Electric is folded into the petrol grid ONLY for Private Car, whose grid
+        note says "Electric Vehicle or LPG/CNG pay-out grid is same as Petrol
+        grid". Commercial Vehicle (and Two Wheeler) publish a SEPARATE electric
+        column/row, so adding electric here would overlap those dedicated
+        electric deals — do not.
 
         Idempotent: the "non-petrol" group token is consumed on first pass, and
         re-adding the petrol set is a stable union, so a second pass is a no-op.
@@ -1645,7 +1939,10 @@ class RawToCICSTransformer:
                 fuels = (fuels - {"non-petrol"}) | {"diesel"}
                 changed = True
             if "petrol" in fuels:
-                fuels |= {"petrol", "cng", "lpg", "electric"}
+                add = {"petrol", "cng", "lpg"}
+                if product_name == "Private Car":
+                    add |= {"electric"}
+                fuels |= add
                 changed = True
             return sorted(fuels) if changed else fuel_type
         # Default carriers: preserve historical non-petrol -> {diesel, cng, lpg}.

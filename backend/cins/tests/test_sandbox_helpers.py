@@ -76,10 +76,18 @@ class ParseCcRangeGvwGuardTests(TestCase):
     def test_existing_cc_headers_unchanged(self):
         self.assertEqual(self.parse_cc_range("150cc"), "150")
         self.assertEqual(self.parse_cc_range("150-350cc"), "150-350")
-        self.assertEqual(self.parse_cc_range("> 16 KW"), ">16")
-        self.assertEqual(self.parse_cc_range("7 KW Bike"), "7")
         self.assertEqual(self.parse_cc_range("SCOOTER"), "")
         self.assertEqual(self.parse_cc_range("Hero OEM"), "")
+
+    def test_rejects_kw_power_bands(self):
+        # kW rates an electric vehicle's motor power, not engine displacement.
+        # Mapping it into CC produced garbage ranges (e.g. "7 KW" -> cc=(7,7))
+        # that collapsed every EV band. kW headers must return "".
+        self.assertEqual(self.parse_cc_range("> 16 KW"), "")
+        self.assertEqual(self.parse_cc_range("7 KW Bike"), "")
+        self.assertEqual(self.parse_cc_range("7 KW SCOOTER"), "")
+        self.assertEqual(self.parse_cc_range("7 KW - 16 KW"), "")
+        self.assertEqual(self.parse_cc_range("7KW"), "")
 
     def test_rejects_tonnage_slug(self):
         # Smoking gun from commission doc d81925b1:
