@@ -1,7 +1,10 @@
 """Tests for carrier-scoped fuel grouping (Fix i) and SAOD tagging (Fix iv).
 
-Fix i: for Chola, CNG/LPG/Electric follow the Petrol grid, not the Diesel grid:
-    [P] petrol     -> {petrol, cng, lpg, electric}
+Fix i: for Chola, CNG/LPG follow the Petrol grid, not the Diesel grid. Electric
+follows the Petrol grid ONLY for Private Car (its grid note says EV = Petrol
+grid); Commercial Vehicle / Two Wheeler publish a separate electric column, so
+electric is NOT folded into their petrol grid:
+    [P] petrol     -> {petrol, cng, lpg}          (+ electric for Private Car)
     [D] non-petrol -> {diesel}
 Other carriers keep the historical non-petrol -> {diesel, cng, lpg} expansion
 and do not expand a bare petrol grid.
@@ -25,13 +28,26 @@ class FuelGroupingTests(TestCase):
     def setUp(self):
         self.t = RawToCICSTransformer()
 
-    def _expand(self, fuels, carrier):
+    def _expand(self, fuels, carrier, product_name=None):
         self.t._carrier_code = carrier
-        return self.t._expand_fuel_group(fuels)
+        return self.t._expand_fuel_group(fuels, product_name)
 
-    def test_chola_petrol_expands_to_four_fuels(self):
+    def test_chola_petrol_commercial_excludes_electric(self):
+        # CV / default: petrol grid = petrol + cng + lpg, NO electric (electric
+        # is a separate commercial deal column).
         self.assertEqual(
             self._expand(["petrol"], "Chola"),
+            ["cng", "lpg", "petrol"],
+        )
+        self.assertEqual(
+            self._expand(["petrol"], "Chola", "Commercial Vehicle"),
+            ["cng", "lpg", "petrol"],
+        )
+
+    def test_chola_petrol_private_car_includes_electric(self):
+        # Private Car: EV follows the petrol grid → electric included.
+        self.assertEqual(
+            self._expand(["petrol"], "Chola", "Private Car"),
             ["cng", "electric", "lpg", "petrol"],
         )
 

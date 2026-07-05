@@ -82,11 +82,23 @@ Do NOT use the generic `State > Coverage` column-map here. For EACH row, parse c
     buckets stay verbatim (`Others`; `All Electric Make` → also set
     `conditions["fuel_type"]="Electric"`).
   - `part[1]` → `parse_cc_range(part[1])`; non-empty → `conditions["cc"]`. A body type
-    (`SCOOTER`, `BIKE`) → `conditions["vehicle_sub_class"]`. `7 KW`-style → `cc`.
+    (`SCOOTER`, `BIKE`) → `conditions["vehicle_sub_class"]`.
+    - **Electric kW bands** (`7 KW Bike`, `7 KW SCOOTER`, `7 KW - 16 KW`, `> 16 KW` under the
+      `All Electric Make` group) are power ratings, NOT engine CC. `parse_cc_range` returns ""
+      for them, so leave `cc` UNSET — electric two-wheelers carry no CC filter. Still set
+      `conditions["fuel_type"]="Electric"` (from the `All Electric Make` bucket) and route the
+      body word (`BIKE`/`SCOOTER`) to `conditions["vehicle_sub_class"]`. Never invent a cc from
+      the kW number (that produced the cc=(7,7) collapse bug).
   - `part[-1]` → commission value via `to_pct`.
 
 One rule per non-empty, non-zero `Make > band > value` cell, inheriting the row's state +
 policies_count + customer_type — this preserves the make × CC fan-out.
+
+**Make-not-repeated guard:** some sub-columns under one OEM omit the make and the cell is just
+`<band> > <value>` (e.g. `150_350cc > 0.3`). Do NOT treat `part[0]` as the make when it parses
+as a CC band (`parse_cc_range(part[0])` non-empty) or a body type — carry the LAST seen make
+forward, use `part[0]` as the band, and take the VALUE from `part[-1]`. Never put a CC band
+(`150_350cc`) into `vehicle_make`, and never put a rate (`0.205`) into `cc`.
 
 ### Chola — Commercial Vehicle GCCV 3-Wheeler row merged into the header
 
@@ -130,6 +142,21 @@ value, emit a 3-wheeler rule:
 The `[Electric]` token in the merged SUBCLASS label (`1_GCCV_3W > 1_GCCV_3W[Electric]`) is
 the reason a cell can carry two trailing values — it is NOT a state or coverage column.
 
+**CRITICAL codegen shape — do NOT append trailing to every data row.** The trailing
+`parts[2:]` of each HEADER cell belongs to the ONE merged `1_GCCV_3W` row, not to the
+positional weight-band data rows below. Emit the 3-wheeler rules in a SEPARATE loop over the
+header's `col_map` (once per state×coverage), each with
+`conditions["number_of_wheels"]="3W"`, `vehicle_sub_class="1_GCCV_3W"`, and NO gvw. Then run
+the normal per-data-row loop using ONLY `row[col_idx]` (never `vals.extend(trailing)`) — mixing
+the header's 3W values into every weight-band row misattributes rates and inflates the rule
+count several-fold.
+
+**Only recover the merged 3W header for the GCCV table** (`product_type == "GCV"`). Every
+table reuses the same copy-pasted header template, so the trailing `1_GCCV_3W` values also
+appear in the `PCCV < 6` / `PCCV > 6` / `MSV` headers — but there they are stale duplicates,
+NOT real data. Skip the trailing-value 3W emission for any non-GCCV table (otherwise goods
+3-wheelers leak into Buses / MISC-D as `number_of_wheels=3W` rules with no sub-class).
+
 Passenger 3-wheelers — the `1_3W_AUTO` / `1_3W_AUTO[Electric]` rows under "PCCV < 6" — appear
 as PROPER positional data rows (not merged into the header). Parse them with the normal
 `col_map`, but force `conditions["number_of_wheels"] = "3W"` and do NOT set `conditions["gvw"]`
@@ -140,3 +167,65 @@ All heavier GCCV sub-classes (`2_UPTO_3.5T`, `3_3.5T_TO_7.5T`, `4_7.5T_TO_12T`, 
 bands — parse exactly as today (`parse_gvw_range` on the sub-class label → `conditions["gvw"]`,
 `number_of_wheels = "4W & Above"`). `2_UPTO_3.5T` is a genuine 4-wheel light LCV band, NOT a
 3-wheeler.
+
+### Chola — Commercial Vehicle positional `[Electric]` fuel rows
+
+Aside from the merged 3W header (above), the heavier bands publish the **electric sibling as
+its own positional data row** whose SUBCLASS label carries a trailing `[Electric]` token
+(e.g. `2_UPTO_3.5T[Electric]`, `4_7.5T_TO_12T[Electric]`). Treat it as a distinct rule:
+
+- Strip `[Electric]` from the label BEFORE `parse_gvw_range` / sub-class extraction (so the
+  GVW band still parses, e.g. `2_UPTO_3.5T[Electric]` → gvw band `UPTO 3.5T`).
+- Set `conditions["fuel_type"] = "Electric"` on that row.
+- The non-suffixed sibling (`2_UPTO_3.5T`) leaves `fuel_type` UNSET — it applies to all fuels.
+
+This keeps Electric and Non-Electric as separate rows so downstream deal management assigns
+each its own Deal ID.
+
+### Chola — Commercial-vehicle COLUMN LAYOUT (MAKE / MODEL are load-bearing)
+
+The GCCV / PCCV / MSV data rows have a FIXED leading-column layout — read all four dimension
+columns, not just SUBCLASS. After `parse_md_row`, the leading cells are:
+
+```
+row[0], row[1]  = blank spacer columns
+row[2]          = PROD      (segment: GCCV / PCCV<6 / PCCV>6 / MSV → product_type)
+row[3]          = SUBCLASS  (weight/wheel band slug, e.g. 2_UPTO_3.5T)
+row[4]          = MAKE      → conditions["vehicle_make"]
+row[5]          = MODEL     → conditions["vehicle_model"]
+row[6:]         = the State × ACT/PACK rate cells (aligned to col_map)
+```
+
+Your generated code MUST read `row[4]` and `row[5]`. Rules:
+
+- Set `conditions["vehicle_make"]` from the MAKE cell and `conditions["vehicle_model"]` from the
+  MODEL cell (canonical keys — the short keys `make`/`model` are dropped by the transformer).
+- SKIP make/model when the MAKE cell is blank OR equals the SUBCLASS slug (the heavier bands
+  repeat the slug in MAKE/MODEL — that is not a real split, so leave make/model unset).
+- Keep generic buckets verbatim (`All Other Make/Models`).
+
+The light-LCV band `2_UPTO_3.5T` (and `2_UPTO_3.5T[Electric]`) IS graded by make/model — it
+publishes two separate data rows with DIFFERENT rates:
+
+```
+| GCCV | 2_UPTO_3.5T | TATA/ Maruti/ Mahindra | Ace, Super Ace, Yodha, Xenon, … | 0.425 | 0.475 | … |
+| GCCV | 2_UPTO_3.5T | All Other Make/Models   | All Other Make/Models           | 0.2   | 0.3   | … |
+```
+
+Each is its own data row, so the normal per-row loop already emits two rules — just make sure
+`vehicle_make`/`vehicle_model` are attached (else the two collapse to indistinguishable
+duplicates with conflicting rates).
+
+### Chola — Commercial Vehicle segment → `product_type` (SubProduct)
+
+Each commercial table names the vehicle **segment** in its PROD column / table title. Set
+`product_type` per row so the transformer splits Commercial Vehicle into its four
+sub-products; keep `product_name = "Commercial Vehicle"` for all of them:
+
+- `GCCV` table  → `product_type = "GCV"`
+- `PCCV < 6` table → `product_type = "PCV"`
+- `PCCV > 6` table → `product_type = "Buses"`
+- `MSV` table → `product_type = "MISC-D"`
+
+Do NOT fold `PCCV > 6` (school-bus / staff-bus / big-taxi rows) into PCV — buses are their
+own sub-product.

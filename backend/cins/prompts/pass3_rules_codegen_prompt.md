@@ -126,8 +126,10 @@ extract_notes(tables) -> str
     string for use as `other_conditions`.
 
 parse_cc_range(header) -> str
-    "150cc" -> "150", "150-350cc" -> "150-350", "> 16 KW" -> ">16",
-    "7 KW Bike" -> "7", "SCOOTER" -> "", "Hero OEM" -> "".
+    "150cc" -> "150", "150-350cc" -> "150-350", "SCOOTER" -> "",
+    "Hero OEM" -> "".
+    kW-rated headers return "" — EV power bands ("7 KW", "7 KW Bike",
+    "7 KW - 16 KW", "> 16 KW") are NOT engine CC and are never mapped to cc.
 
 parse_gvw_range(header) -> str
     "UPTO 3.5T" -> "UPTO 3.5T", "3.5T TO 7.5T" -> "3.5T TO 7.5T",
@@ -166,12 +168,12 @@ detect_qualifying_clauses(notes_text, provider="") -> list[dict]
 Some commission tables use 2–4 header rows encoding multiple dimensions (e.g. make group, CC range, sub-class). When you encounter such a table:
 
 - Inspect ALL header rows to understand what each column encodes before writing parsing logic.
-- Use `parse_cc_range(header)` on each column header to detect CC/KW ranges. If it returns a non-empty string, store it as `conditions["cc"]`.
+- Use `parse_cc_range(header)` on each column header to detect engine CC ranges. If it returns a non-empty string, store it as `conditions["cc"]`. kW (electric power) bands are NOT CC — `parse_cc_range` returns "" for them, so electric vehicles get no `conditions["cc"]` (they carry no CC filter).
 - Use `parse_gvw_range(header)` on commercial-vehicle headers to detect Gross Vehicle Weight ranges (tonne or kg). If it returns a non-empty string, store it verbatim as `conditions["gvw"]` — the transformer converts tonnes to kilograms.
 - **Run `parse_gvw_range` / `parse_cc_range` on the SUBCLASS *row-label* cell too**, not only column headers — commercial grids encode weight/engine bands as sub-class row values (e.g. `GCCV | 2_UPTO_3.5T`). When non-empty, route to `conditions["gvw"]`/`conditions["cc"]` and keep only the residual (non-range) part as the sub-class. Store the sub-class under the canonical key `vehicle_sub_class` (and `vehicle_make`/`vehicle_model`) — the short keys `subclass`/`make`/`model` are dropped by the transformer.
 - If a header is a brand/make name (no digits, not a CC range), store it as `conditions["vehicle_make"]`.
 - If a header identifies a vehicle sub-class (e.g. "SCOOTER", "BIKE", "BUS"), store it as `conditions["vehicle_sub_class"]`.
-- A single column may encode multiple dimensions (e.g. "7 KW Bike" = cc + sub-class); split and assign each to its canonical key.
+- A single column may encode multiple dimensions (e.g. "7 KW Bike" = an EV power band + a body sub-class). Split and assign each to its canonical key, but note the kW band is NOT cc: assign only the body word ("BIKE" -> `vehicle_sub_class`), set `conditions["fuel_type"]="Electric"`, and leave `cc` unset.
 
 ### Value-in-cell (self-describing) headers
 

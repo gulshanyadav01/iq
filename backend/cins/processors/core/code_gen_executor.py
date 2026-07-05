@@ -117,9 +117,16 @@ def extract_notes(tables):
 
 def parse_cc_range(header):
     \"\"\"
-    Extract a normalised CC or KW range string from a column header.
-    Examples: '150cc' -> '150', '150-350cc' -> '150-350', '> 16 KW' -> '>16',
-              '7 KW Bike' -> '7', 'SCOOTER' -> '', 'Hero OEM' -> ''.
+    Extract a normalised CC (engine-displacement) range string from a header.
+    Examples: '150cc' -> '150', '150-350cc' -> '150-350',
+              'SCOOTER' -> '', 'Hero OEM' -> ''.
+
+    kW-rated headers are REJECTED (return '') — electric-vehicle power bands
+    ('7 KW', '7 KW Bike', '7 KW - 16 KW', '> 16 KW') are NOT engine CC and
+    must not be modelled as a CC range. Mapping kW into CC produced garbage
+    ranges like cc=(7,7) that collapsed every EV band into one. Electric
+    vehicles carry no CC filter; the body word (Bike/Scooter) is still routed
+    to vehicle_sub_class by the caller.
 
     Reject GVW-shaped headers ('UPTO 3.5T', '2_UPTO_3.5T', '3500 KG',
     'ABOVE 40T') so they fall through to parse_gvw_range — otherwise the
@@ -137,6 +144,11 @@ def parse_cc_range(header):
     hu_norm = h.replace("_", " ")
     if "GVW" in hu_norm or "KG" in hu_norm.split() or hu_norm.endswith(" KG"):
         return ""
+    # kW-shape guard: any 'KW' token means an EV power band, not CC. Match a
+    # bare 'KW' token or a glued form ('7KW', '>16KW') so both '7 KW' and
+    # '7KW' are rejected.
+    if any(t == "KW" or t.endswith("KW") for t in hu_norm.replace("-", " ").split()):
+        return ""
     i = 0
     while i < len(hu_norm):
         if hu_norm[i] == "T":
@@ -148,9 +160,7 @@ def parse_cc_range(header):
             if prev_digit and not nxt.isalpha():
                 return ""
         i += 1
-    for unit in ("CC", "KW"):
-        h = h.replace(unit, " ")
-    h = h.strip()
+    h = h.replace("CC", " ").strip()
     for prefix in (">", ">=", "ABOVE", "GREATER THAN", "MORE THAN"):
         if h.startswith(prefix):
             rest = h[len(prefix):].strip().split()[0] if h[len(prefix):].strip() else ""
