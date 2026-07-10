@@ -61,9 +61,14 @@ jobs:
             --config backend/.pre-commit-config.yaml \
             --from-ref "${{ steps.base.outputs.ref }}" --to-ref HEAD
 
+      # Node/pnpm setup only when web source changed — otherwise setup-node's
+      # `cache: pnpm` post-step hard-fails the job (no pnpm store exists because
+      # the web block below never runs `pnpm install`).
       - name: Enable pnpm (corepack reads version from package.json)
+        if: steps.changed.outputs.web == 'true'
         run: corepack enable
       - uses: actions/setup-node@v4
+        if: steps.changed.outputs.web == 'true'
         with:
           node-version: "24"
           cache: pnpm
