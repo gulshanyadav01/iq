@@ -1,0 +1,28 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Single root entry for the pnpm workspace. Dependabot reads pnpm-workspace.yaml,
+  # updates BOTH root and web/ package.json plus the root pnpm-lock.yaml together.
+  # Do NOT add a separate /web npm entry: it bumps web/package.json without syncing
+  # the root lockfile, so the Docker build (pnpm install --frozen-lockfile) fails
+  # with ERR_PNPM_OUTDATED_LOCKFILE.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /backend
+    schedule:
+      interval: weekly
