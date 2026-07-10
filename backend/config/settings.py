@@ -44,6 +44,7 @@ env = environ.Env(
     CELERY_BROKER_URL=str,
     POLICY_EXTRACT_CALLBACK_URL=(str, ''),
     POLICY_EXTRACT_GEMINI_MODEL=(str, 'gemini-2.5-flash-lite'),
+    POLICY_EXTRACT_GEMINI_SEED=(int, 42),
 )
 environ.Env.read_env(os.path.join(BASE_DIR, '.env'))
 
@@ -72,6 +73,7 @@ BETTER_AUTH_URL = env('BETTER_AUTH_URL')
 POLICY_EXTRACT_CALLBACK_URL = env('POLICY_EXTRACT_CALLBACK_URL')
 
 POLICY_EXTRACT_GEMINI_MODEL = env('POLICY_EXTRACT_GEMINI_MODEL')
+POLICY_EXTRACT_GEMINI_SEED = env('POLICY_EXTRACT_GEMINI_SEED')
 
 # Application definition
 

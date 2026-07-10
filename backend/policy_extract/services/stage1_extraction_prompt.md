@@ -159,14 +159,21 @@ coverages:
   │                         │ EMI Protection, EMI Protector               │
   ├─────────────────────────┼──────────────────────────────────────────────┤
   │ "tyre_protection"       │ Tyre Protection, Tyre Cover, Tyre Guard,    │
-  │                         │ Tyre and Rim, Wheel Protection, Tyre Secure,│
-  │                         │ Cover for Lamps/Tyres/Tubes/Mudguards/      │
-  │                         │ Bonnet/Highlights/Paintwork, Fibre Glass    │
-  │                         │ Components, External Body Parts             │
+  │                         │ Tyre and Rim, Wheel Protection, Tyre Secure │
+  │                         │ ✗ NOT IMT-23 "Cover for Lamps/Tyres/Tubes/  │
+  │                         │ Mudguards/Bonnet/Paintwork/Fibre Glass/     │
+  │                         │ External Body Parts" — that is a STANDARD OD│
+  │                         │ endorsement bundled into Basic OD, NOT this │
+  │                         │ add-on. Do NOT tag it; it belongs in        │
+  │                         │ endorsements/premiums (no addon_name).      │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "paid_driver"           │ Paid Driver, LL to Paid Driver, Legal       │
-  │                         │ Liability Paid Driver, LL Paid Driver,      │
-  │                         │ Legal Liability to Paid Driver/Employee     │
+  │ "paid_driver"           │ Optional PAID-DRIVER add-on ONLY (e.g. a    │
+  │                         │ separately-opted driver cover).             │
+  │                         │ ✗ NOT "Legal Liability to Paid Driver/      │
+  │                         │ Conductor/Cleaner/Employee" (IMT-28/LL) —   │
+  │                         │ that is STATUTORY Section-II liability, NOT │
+  │                         │ an add-on. Do NOT tag it; it belongs in     │
+  │                         │ endorsements/premiums (no addon_name).      │
   ├─────────────────────────┼──────────────────────────────────────────────┤
   │ "personal_accident"     │ OWNER-DRIVER / DEFAULT PA: PA, Personal     │
   │   (owner-driver / CPA)  │ Accident, PA Cover, Owner Driver PA, CPA,   │
@@ -264,9 +271,12 @@ premiums:
   │ "roadside_assistance" │ RSA, Roadside Assistance, Breakdown Assist   │
   │ "return_to_invoice"   │ RTI, Return to Invoice, GAP Cover            │
   │ "personal_belongings" │ LPB, Loss of Personal Belongings             │
-  │ "tyre_protection"     │ Tyre Protection, Tyre Guard, Lamps/Tyres/    │
-  │                       │ Tubes/Mudguards, External Body Parts         │
-  │ "paid_driver"         │ Paid Driver, LL to Paid Driver, LL Paid      │
+  │ "tyre_protection"     │ Tyre Protection, Tyre Guard, Tyre Secure.    │
+  │                       │ ✗ NOT IMT-23 Lamps/Tyres/Tubes/Mudguards/    │
+  │                       │ External Body Parts (standard OD → no tag)   │
+  │ "paid_driver"         │ Optional paid-driver add-on ONLY. ✗ NOT LL   │
+  │                       │ to Paid Driver/Conductor/Cleaner (IMT-28,    │
+  │                       │ statutory liability → no addon_name)         │
   │ "personal_accident"   │ Owner-driver/DEFAULT PA: PA, Personal Acc,   │
   │                       │ PA Cover, Owner Driver PA, CPA, Compulsory PA,│
   │                       │ Driver PA (bare PA w/o "Passenger" = here)   │

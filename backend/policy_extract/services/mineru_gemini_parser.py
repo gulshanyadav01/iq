@@ -9,6 +9,7 @@ data discovery from schema mapping.
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -23,6 +24,7 @@ from django.conf import settings
 
 try:
     from google import genai
+    from google.genai import types
 except ImportError:
     print("Error: google-genai not installed")
     print("Install with: pip install google-genai")
@@ -55,6 +57,13 @@ class MineruGeminiParser:
                               Pass a validation set path to co-locate with the set.
         """
         self.model_name = model or settings.POLICY_EXTRACT_GEMINI_MODEL
+        # Pin sampling so the same input yields reproducible extractions: greedy
+        # decoding (temperature=0) plus a fixed seed. Without this, Gemini's
+        # default sampling makes fields like sum_insured/pinCode vary run-to-run.
+        self._gen_config = types.GenerateContentConfig(
+            temperature=0.0,
+            seed=settings.POLICY_EXTRACT_GEMINI_SEED,
+        )
         # Public Gemini Developer API by default. Vertex AI Express mode
         # (vertexai=True + API key) is region-locked and 404s on models absent
         # from the express region (e.g. gemini-2.5-flash-lite in asia-southeast1).
@@ -379,6 +388,7 @@ class MineruGeminiParser:
                 response = self._client.models.generate_content(
                     model=self.model_name,
                     contents=prompt,
+                    config=self._gen_config,
                 )
 
                 # Track tokens
@@ -736,6 +746,7 @@ class MineruGeminiParser:
                 response = self._client.models.generate_content(
                     model=self.model_name,
                     contents=prompt,
+                    config=self._gen_config,
                 )
 
                 # Track tokens
@@ -849,6 +860,23 @@ class MineruGeminiParser:
         'keyReplacement',
     ]
 
+    # Add-on presence flag -> (paired add-on premium field, Stage-1 addon_name).
+    # The boolean and its premium are both driven by whether addon_name is in the
+    # Stage-1 detected_addons set (see _apply_addon_flags).
+    ADDON_PAIRS = {
+        'isZeroDepCover': ('zeroDepPremium', 'zero_dep'),
+        'isEPCover': ('ePPremium', 'engine_protection'),
+        'isConsumablesCover': ('consumablesPremium', 'consumables'),
+        'isKeyReplacementCover': ('keyReplacement', 'key_replacement'),
+        'isNCBCover': ('nCBProtection', 'ncb_protection'),
+        'isRSACover': ('rSAPremium', 'roadside_assistance'),
+        'isRTICover': ('rtiPremium', 'return_to_invoice'),
+        'isLPBCover': ('lPBPremium', 'personal_belongings'),
+        'isTyreProtectionCover': ('tyreProtectionPremium', 'tyre_protection'),
+        'isInsurerPaidDriver': ('paidDriverPremium', 'paid_driver'),
+        'pa_cover_addon': ('pa_cover', 'personal_accident'),
+    }
+
     def _clean_whitespace(self, value: str, field_name: str) -> str:
         """
         Clean whitespace from string values based on field type
@@ -942,6 +970,163 @@ class MineruGeminiParser:
                 "id": "", "value": total_value, "confidence_score": 0.95,
                 "is_extracted": "TRUE", "do_verification": "FALSE"
             }
+
+    @staticmethod
+    def _is_non_addon_lookalike(text: str) -> bool:
+        """True for a STANDARD/STATUTORY cover that shares keywords with an add-on
+        but is never an opted add-on for this product (option A):
+          • IMT-23 "Cover for Lamps/Tyres/Tubes/Mudguards" — bundled into Basic OD.
+          • IMT-28 "Legal Liability to paid driver/conductor/cleaner" — statutory.
+        Matched against the coverages[].value/name and premiums[].label so that a
+        Stage-1 mis-tag (gemini-2.5-flash-lite still tags these with an addon_name
+        despite the prompt) cannot resurrect the flag downstream.
+        """
+        t = (text or '').lower()
+        if any(k in t for k in ('imt-23', 'imt 23', 'imt23', 'imt-28', 'imt 28', 'imt28')):
+            return True
+        # IMT-23 scope: lamps + tyres/tubes/mudguards (a genuine "Tyre Secure"
+        # add-on names only tyres, so it won't match this lamp+tyre combination).
+        if 'lamp' in t and 'tyre' in t:
+            return True
+        # IMT-28 statutory LL to paid driver (never a bare optional "paid driver").
+        if 'paid driver' in t and ('legal liab' in t or 'll ' in t or 'conductor' in t or 'cleaner' in t):
+            return True
+        return False
+
+    @staticmethod
+    def _num(value) -> float:
+        try:
+            return float(value or 0)
+        except (ValueError, TypeError):
+            return 0.0
+
+    def _collect_detected_addons(self, raw_data: Dict[str, Any]) -> set:
+        """Set of addon_names ACTUALLY selected — an add-on counts only when it has
+        a POSITIVE premium (money charged) in either Stage-1 source:
+          coverages[] — entry with is_addon=true, addon_name, and premium > 0.
+          premiums[]  — entry with addon_name and value > 0.
+
+        A positive premium is the only signal that survives an unreliable extractor.
+        gemini-2.5-flash-lite dumps the pre-printed "Add-on Covers" CATALOG (the full
+        list of offered add-ons, all UNticked) into coverages[] with is_addon=true and
+        premium=0; counting zero-premium coverages would mark every offered add-on as
+        selected. Requiring premium>0 rejects that catalog wholesale.
+
+        Entries whose label is a standard/statutory look-alike (IMT-23 lamps/tyres,
+        IMT-28 LL-to-paid-driver) are dropped even if Stage 1 wrongly tagged them.
+
+        Trade-off: a genuinely bundled add-on printed with no premium anywhere is not
+        detected — without a premium or an explicit "opted" marker it is
+        indistinguishable from a catalog row.
+        """
+        detected = set()
+        if not raw_data:
+            return detected
+        for cov in raw_data.get('coverages', []):
+            if not (cov.get('is_addon') and cov.get('addon_name')):
+                continue
+            label = ' '.join(str(cov.get(k) or '') for k in ('name', 'value', 'context', 'label'))
+            if self._is_non_addon_lookalike(label):
+                continue
+            if self._num(cov.get('premium')) > 0:
+                detected.add(cov['addon_name'])
+        for prem in raw_data.get('premiums', []):
+            if not prem.get('addon_name'):
+                continue
+            if self._is_non_addon_lookalike(prem.get('label')):
+                continue
+            if self._num(prem.get('value')) > 0:
+                detected.add(prem['addon_name'])
+        return detected
+
+    def _apply_addon_flags(self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None) -> None:
+        """Derive add-on presence flags, paired premiums, and addOn/addonList.
+
+        Stage-1's detected_addons is the ONLY authority. Stage 2's own YES/NO and
+        premium values are discarded, because the LLM emits YES / a premium from
+        descriptive prose or look-alike standard/statutory lines (IMT-23 lamps/
+        tyres bundled in Basic OD, IMT-28 statutory LL-to-paid-driver) even when no
+        add-on was opted. This is the deterministic backstop for those false
+        positives; totalAddonPremium is recomputed from the corrected premiums.
+        """
+        detected_addons = self._collect_detected_addons(raw_data)
+
+        for flag_field, (premium_field, addon_name) in self.ADDON_PAIRS.items():
+            is_active = addon_name in detected_addons
+            if isinstance(structured_data.get(flag_field), dict):
+                structured_data[flag_field]['value'] = "YES" if is_active else "NO"
+                structured_data[flag_field]['is_extracted'] = "TRUE"
+            # When the add-on was not selected, its add-on premium must be 0 even
+            # if Stage 2 mapped a look-alike line into it.
+            if not is_active and isinstance(structured_data.get(premium_field), dict):
+                structured_data[premium_field]['value'] = "0"
+                structured_data[premium_field]['is_extracted'] = "TRUE"
+                # ePPremium has a duplicate alias that also feeds totalAddonPremium.
+                if premium_field == 'ePPremium' and isinstance(structured_data.get('engineProtectionPremium'), dict):
+                    structured_data['engineProtectionPremium']['value'] = "0"
+                    structured_data['engineProtectionPremium']['is_extracted'] = "TRUE"
+
+        # Top-level presence: derived from the same Stage-1 signal, not Stage 2.
+        detected_upper = sorted(a.upper() for a in detected_addons)
+        if isinstance(structured_data.get('addOn'), dict):
+            structured_data['addOn']['value'] = "TRUE" if detected_addons else "FALSE"
+            structured_data['addOn']['is_extracted'] = "TRUE"
+        if isinstance(structured_data.get('addonList'), dict):
+            structured_data['addonList']['value'] = detected_upper
+            structured_data['addonList']['is_extracted'] = "TRUE"
+
+        # Premiums may have been zeroed above — recompute the OD-side total.
+        self._apply_total_addon_premium(structured_data)
+
+    def _apply_cubic_capacity_fallback(self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None) -> None:
+        """Backfill cubic_capacity_value from raw vehicles[] when it is missing/0.
+
+        gemini-2.5-flash-lite names the Stage-1 field inconsistently (cc / cc_hp_watt
+        / cubic_capacity) and Stage 2 sometimes fails to map it even when present, so
+        cubic_capacity_value comes back 0. Read the first integer from any of the
+        known keys deterministically.
+        """
+        fld = structured_data.get('cubic_capacity_value')
+        if not isinstance(fld, dict) or not raw_data:
+            return
+        cur = str(fld.get('value') or '').strip()
+        if cur and cur not in ('0', '0.0'):
+            return  # already populated
+        for veh in raw_data.get('vehicles', []):
+            if not isinstance(veh, dict):
+                continue
+            for key in ('cc', 'cc_hp_watt', 'cubic_capacity', 'cubicCapacity',
+                        'cc_hp', 'engine_cc', 'cubic_capacity_value'):
+                m = re.search(r'\d+', str(veh.get(key) or ''))
+                if m and int(m.group()) > 0:
+                    fld['value'] = str(int(m.group()))
+                    fld['is_extracted'] = "TRUE"
+                    return
+
+    def _apply_ncb_percent(self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None) -> None:
+        """Derive ncb_percent from the applied 'Deduct X % for NCB' premium line.
+
+        The lite model often captures only the NCB entitlement slab table
+        (20/25/35/45/50%) in ncb_details and leaves ncb_percent at 0. The APPLIED
+        rate is the percentage printed on the NCB discount line in the premium
+        breakdown — take it deterministically.
+        """
+        if not raw_data or not isinstance(structured_data.get('ncb_percent'), dict):
+            return
+        for prem in raw_data.get('premiums', []):
+            label = prem.get('label') or ''
+            low = label.lower()
+            if 'ncb' not in low and 'no claim bonus' not in low:
+                continue
+            # Skip the NCB Protection add-on line (no applied % on it).
+            if 'protect' in low or 'retention' in low:
+                continue
+            m = re.search(r'(\d+(?:\.\d+)?)\s*%', label)
+            if m:
+                num = float(m.group(1))
+                structured_data['ncb_percent']['value'] = str(int(num)) if num.is_integer() else str(num)
+                structured_data['ncb_percent']['is_extracted'] = "TRUE"
+                return
 
     def _post_process(self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None) -> Dict[str, Any]:
         """Post-process extracted data - round amounts, derive fields, clean whitespace"""
@@ -1175,7 +1360,11 @@ class MineruGeminiParser:
                 if resolution.canonical:
                     bucket['value'] = resolution.canonical
                 bucket['is_extracted'] = "TRUE"
-                bucket['do_verification'] = "FALSE"
+                # A resolved-but-conflicting signal (see resolve_product_id_multi)
+                # still needs a human to confirm which product is correct.
+                bucket['do_verification'] = (
+                    "TRUE" if getattr(resolution, "conflict", False) else "FALSE"
+                )
             else:
                 # No confident master match: never leave a raw/echoed value in
                 # `id` (the LLM often copies the UPPERCASE value into it).
@@ -1183,10 +1372,19 @@ class MineruGeminiParser:
                 if extracted:
                     bucket['do_verification'] = "TRUE"
 
-        # 1. product_id — try the explicit product_id field first, then VehicleClass.
+        # 1. product_id — fall-through hierarchy across four independent signals
+        # in priority order: product field -> VehicleClass -> VehicleSubClass ->
+        # carrier. The first that resolves wins; a lower signal that disagrees
+        # flags do_verification. carrier only confirms CV. See
+        # MasterDataResolver.resolve_product_id_multi.
         product_text = (structured_data.get('product_id', {}).get('value') or '').strip()
         vehicle_class_text = (structured_data.get('VehicleClass', {}).get('value') or '').strip()
-        prod_resolution = self._resolver.resolve_product_id(product_text or vehicle_class_text)
+        prod_resolution = self._resolver.resolve_product_id_multi(
+            product_text=product_text,
+            vehicle_class_text=vehicle_class_text,
+            vehicle_subclass_text=(structured_data.get('VehicleSubClass', {}).get('value') or '').strip(),
+            carrier_text=(structured_data.get('vechicle_carrier_id', {}).get('value') or '').strip(),
+        )
         _apply('product_id', prod_resolution)
         resolved_product_id = prod_resolution.id
 
@@ -1202,10 +1400,14 @@ class MineruGeminiParser:
         ):
             structured_data['insurer_id']['do_verification'] = "TRUE"
 
-        # 3. plan_type_id — key on (plan, isZeroDepCover == "YES").
+        # 3. plan_type_id — key on (plan, zero-dep actually selected).
+        # Use the authoritative Stage-1 signal ('zero_dep' in detected_addons), NOT
+        # the raw isZeroDepCover string: that flag is only corrected later by
+        # _apply_addon_flags, so reading it here would pick up a Stage-2 false
+        # positive and yield "+ ZD" for a policy with no zero-dep add-on.
         plan_text = (structured_data.get('plan_type_id', {}).get('value') or '').strip()
-        zd_value = (structured_data.get('isZeroDepCover', {}).get('value') or '').strip().upper()
-        _apply('plan_type_id', self._resolver.resolve_plan_type(plan_text, is_zero_dep=(zd_value == "YES")))
+        is_zero_dep = 'zero_dep' in self._collect_detected_addons(raw_data)
+        _apply('plan_type_id', self._resolver.resolve_plan_type(plan_text, is_zero_dep=is_zero_dep))
 
         # 4. Independent small enums.
         _apply('fuel_type', self._resolver.resolve_fuel_type(
@@ -1214,24 +1416,44 @@ class MineruGeminiParser:
         _apply('vechicle_carrier_id', self._resolver.resolve_carrier(
             (structured_data.get('vechicle_carrier_id', {}).get('value') or '').strip()
         ))
-        _apply('VehicleClass', self._resolver.resolve_vehicle_class(vehicle_class_text))
+        # 5. VehicleSubClass + VehicleClass — resolved together. The product code
+        # comes from the resolved product_id (more reliable than the raw class
+        # text), and the subclass row in the master carries the authoritative
+        # vehicle_class_id, so we derive VehicleClass from the resolved subclass
+        # when possible. The LLM frequently mislabels the class (e.g. "CV" for an
+        # E-Rickshaw whose real class is PCV); the subclass→class link fixes that.
+        product_code = self._resolver.product_code_for_id(resolved_product_id)
+        if not product_code and vehicle_class_text:
+            product_code = self._resolver.resolve_product_code(vehicle_class_text)
 
-        # 5. VehicleSubClass — uses the DB-backed resolver via the existing shim.
+        sub_resolution = None
         if 'VehicleSubClass' in structured_data and isinstance(structured_data['VehicleSubClass'], dict):
             extracted_sub = (structured_data['VehicleSubClass'].get('value') or '').strip()
-            vehicle_class = (structured_data.get('VehicleClass', {}).get('value') or '').strip()
-            if extracted_sub and vehicle_class:
-                sub_id, canonical = self._resolve_vehicle_subclass(extracted_sub, vehicle_class)
-                if sub_id is not None:
-                    structured_data['VehicleSubClass']['id'] = str(sub_id)
-                    structured_data['VehicleSubClass']['value'] = canonical
-                    structured_data['VehicleSubClass']['is_extracted'] = "TRUE"
-                    structured_data['VehicleSubClass']['do_verification'] = "FALSE"
-                    print(f"   ✓ VehicleSubClass resolved: '{extracted_sub}' → [{sub_id}] {canonical}")
+            bucket = structured_data['VehicleSubClass']
+            if extracted_sub and product_code:
+                sub_resolution = self._resolver.resolve_vehicle_subclass(extracted_sub, product_code)
+                if sub_resolution.matched and sub_resolution.id is not None:
+                    bucket['id'] = str(sub_resolution.id)
+                    bucket['value'] = sub_resolution.canonical
+                    bucket['is_extracted'] = "TRUE"
+                    bucket['do_verification'] = "FALSE"
+                    print(f"   ✓ VehicleSubClass resolved: '{extracted_sub}' → [{sub_resolution.id}] {sub_resolution.canonical}")
                 else:
-                    structured_data['VehicleSubClass']['id'] = ""
-                    structured_data['VehicleSubClass']['do_verification'] = "TRUE"
-                    print(f"   ⚠ VehicleSubClass no match: '{extracted_sub}' for class '{vehicle_class}'")
+                    bucket['id'] = ""
+                    bucket['do_verification'] = "TRUE"
+                    print(f"   ⚠ VehicleSubClass no match: '{extracted_sub}' for product '{product_code}'")
+
+        # VehicleClass: prefer the class implied by the resolved subclass (the
+        # authoritative master link); fall back to the extracted class text.
+        class_resolution = None
+        if sub_resolution is not None and sub_resolution.matched and sub_resolution.id is not None and product_code:
+            class_id = self._resolver.vehicle_class_id_for_subclass(product_code, sub_resolution.id)
+            derived = self._resolver.resolve_vehicle_class_by_id(class_id)
+            if derived.matched:
+                class_resolution = derived
+        if class_resolution is None:
+            class_resolution = self._resolver.resolve_vehicle_class(vehicle_class_text)
+        _apply('VehicleClass', class_resolution)
 
         # Strip hallucinated `id` values from non-master-data fields. The LLM
         # often echoes the field's own key into `id`; only the 7 master-data
@@ -1302,71 +1524,13 @@ class MineruGeminiParser:
                         structured_data['rto_city']['value'] = self.rto_city_map[rto_code]
                         structured_data['rto_city']['is_extracted'] = "TRUE"
 
-        # Derive addon boolean flags: YES if premium > 0 OR explicitly detected in coverages
-        ADDON_PAIRS = {
-            'isZeroDepCover': ('zeroDepPremium', 'zero_dep'),
-            'isEPCover': ('ePPremium', 'engine_protection'),
-            'isConsumablesCover': ('consumablesPremium', 'consumables'),
-            'isKeyReplacementCover': ('keyReplacement', 'key_replacement'),
-            'isNCBCover': ('nCBProtection', 'ncb_protection'),
-            'isRSACover': ('rSAPremium', 'roadside_assistance'),
-            'isRTICover': ('rtiPremium', 'return_to_invoice'),
-            'isLPBCover': ('lPBPremium', 'personal_belongings'),
-            'isTyreProtectionCover': ('tyreProtectionPremium', 'tyre_protection'),
-            'isInsurerPaidDriver': ('paidDriverPremium', 'paid_driver'),
-            'pa_cover_addon': ('pa_cover', 'personal_accident'),
-        }
+        # Add-on presence flags, paired premiums, and top-level addOn/addonList
+        # are all derived deterministically from Stage-1 signals (see method).
+        self._apply_addon_flags(structured_data, raw_data)
 
-        # Build a set of addon_names explicitly detected in Stage 1.
-        # Two sources with different rules:
-        #
-        #   coverages[] — Stage 1 is instructed to only put SELECTED add-ons here.
-        #     Count any entry with is_addon=true regardless of premium amount.
-        #     This handles bundled add-ons with no individual line-item premium.
-        #     Exception: skip if premium is explicitly "-" (Stage 1 mistake on template slot).
-        #
-        #   premiums[] — Contains every row from the premium table, including template slots.
-        #     Only count if value > 0 (template slots show "-" → parsed as 0).
-        detected_addons = set()
-        if raw_data:
-            for cov in raw_data.get('coverages', []):
-                if cov.get('is_addon') and cov.get('addon_name'):
-                    # Skip only if premium is explicitly "-" (unselected template slot)
-                    raw_prem = str(cov.get('premium') or '').strip()
-                    if raw_prem == '-':
-                        continue
-                    detected_addons.add(cov['addon_name'])
-            # Only include premiums array entries with a positive value
-            # (premium table rows include template slots with value="-" → 0)
-            for prem in raw_data.get('premiums', []):
-                if prem.get('addon_name'):
-                    try:
-                        prem_val = float(prem.get('value') or 0)
-                    except (ValueError, TypeError):
-                        prem_val = 0
-                    if prem_val > 0:
-                        detected_addons.add(prem['addon_name'])
-
-        for flag_field, (_, addon_name) in ADDON_PAIRS.items():
-            if flag_field in structured_data and isinstance(structured_data[flag_field], dict):
-                # Use ONLY Stage 1's detected_addons for the boolean decision.
-                # Do NOT use Stage 2's premium field value here — Stage 2 can incorrectly
-                # pick up values from raw_tables (e.g. TP Total bleeding into an RSA row
-                # in a two-column OD|TP table), causing false positives.
-                # detected_addons is built from premiums[](addon_name+value>0) and
-                # coverages[](is_addon=true) which are the clean Stage 1 signals.
-                is_active = addon_name in detected_addons
-
-                # Only override Stage 2's value when we have a clear signal;
-                # if Stage 1 didn't detect it, preserve Stage 2's boolean answer
-                if is_active:
-                    structured_data[flag_field]['value'] = "YES"
-                    structured_data[flag_field]['is_extracted'] = "TRUE"
-                elif structured_data[flag_field].get('value', '').upper() not in ('YES', 'NO'):
-                    # Stage 2 gave an unexpected value — normalise to NO
-                    structured_data[flag_field]['value'] = "NO"
-                    structured_data[flag_field]['is_extracted'] = "TRUE"
-                # else: Stage 2 already said YES or NO — leave it untouched
+        # Deterministic backfills for fields the lite model drops at Stage 1/2.
+        self._apply_cubic_capacity_fallback(structured_data, raw_data)
+        self._apply_ncb_percent(structured_data, raw_data)
 
         # Derive CNG/LPG fields from raw data
         # isCNGFitted = TRUE only when EXTERNAL/AFTERMARKET CNG/LPG kit is fitted (cngLPGUnitIDV > 0)
