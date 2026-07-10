@@ -1,5 +1,6 @@
 {
   "name": "web",
+  "version": "1.4.0",
   "type": "module",
   "private": true,
   "scripts": {
@@ -7,7 +8,10 @@
     "dev": "nuxt dev",
     "generate": "nuxt generate",
     "preview": "nuxt preview",
-    "postinstall": "nuxt prepare"
+    "postinstall": "nuxt prepare",
+    "lint": "eslint .",
+    "test": "vitest run --passWithNoTests",
+    "format": "prettier --write ."
   },
   "dependencies": {
     "@headlessui/vue": "^1.7.23",
@@ -39,6 +43,7 @@
   },
   "devDependencies": {
     "@types/markdown-it": "^14.1.2",
-    "autoprefixer": "^10.4.21"
+    "autoprefixer": "^10.4.21",
+    "vitest": "^3.2.0"
   }
 }
