@@ -1,0 +1,42 @@
+#!/usr/bin/env sh
+# Path-gated, self-detecting, DIFF-SCOPED pre-commit hook.
+# - Web eslint runs only on the staged web source files (not the whole repo),
+#   mirroring CI. The codebase predates linting, so a full-repo lint would
+#   block every commit on legacy debt.
+# - Backend pre-commit runs only when backend/ files are staged, on staged
+#   files, and only if a runner is available. This is a Docker-only repo —
+#   host Python is NOT guaranteed — so a missing pre-commit degrades gracefully
+#   (skip + install hint) instead of blocking commits. Never use
+#   `git commit --no-verify` to get around a missing tool (CLAUDE.md).
+
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+
+# --- web (staged files only) ---
+web_files=$(echo "$staged" | grep -E '^web/.*\.(vue|ts|js|mjs|cjs)$' | sed 's#^web/##')
+if [ -n "$web_files" ]; then
+  echo "→ web eslint (staged files)"
+  ( cd web && pnpm exec eslint $web_files ) || exit 1
+fi
+
+# --- backend ---
+if echo "$staged" | grep -q '^backend/'; then
+  if command -v pre-commit >/dev/null 2>&1; then
+    PC="pre-commit"
+  elif command -v uvx >/dev/null 2>&1; then
+    PC="uvx pre-commit"
+  elif command -v pipx >/dev/null 2>&1; then
+    PC="pipx run pre-commit"
+  else
+    PC=""
+  fi
+
+  if [ -n "$PC" ]; then
+    echo "→ backend pre-commit ($PC)"
+    ( cd backend && $PC run --config .pre-commit-config.yaml ) || exit 1
+  else
+    echo "⚠ backend files staged but 'pre-commit' is not installed — backend lint SKIPPED."
+    echo "  Install it once (no repo change needed):"
+    echo "    uv tool install pre-commit    # or: pipx install pre-commit"
+    echo "  Do NOT bypass with 'git commit --no-verify' (see CLAUDE.md)."
+  fi
+fi
