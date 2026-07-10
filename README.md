@@ -1,166 +1,95 @@
-## InsurIQ (Monorepo)
+# InsurIQ (Monorepo)
 
-Starter template for a full‑stack app: Django backend + Vue 3 (Vite + Tailwind) frontend. Designed to be copied and adapted without modifying the underlying tooling and infra.
+Full-stack app for insurance commission intake and policy data extraction.
 
-## 🚀 Quick Setup
+- **Backend**: Django 5.2 + DRF + Celery + PostgreSQL 17 + Redis 7
+- **Frontend**: Nuxt 4 (Vue 3) + Tailwind CSS 4 + Pinia + Nuxt UI 3
+- **Auth**: Better Auth (external container, webhook to backend)
+- **Storage**: MinIO (S3-compatible) in dev; S3 in prod
+- **Proxy**: Nginx (single entrypoint on `:8080` in dev)
+- **Package manager**: pnpm 10 (workspaces) — never use npm or yarn
 
-**First time using this template?** Run the setup script to customize it for your project:
+## Monorepo structure
 
-```bash
-# Make setup script executable (if needed)
-chmod +x setup.sh
+| Path | Purpose |
+| --- | --- |
+| `backend/` | Django project (`config/`, `accounts/`, `core/`, `commission_intake/`, `policy_extract/`, `cins/`, `pipelines/`, `system/`) |
+| `web/` | Nuxt 4 frontend (`app/pages`, `app/components`, `app/stores`, …) |
+| `conf/` | Nginx dev/prod configs |
+| `postgres/` | DB init SQL (`insur_iq`, `auth`) |
+| `scripts/` | Helper scripts (env gen, build/push, db reset, nuke) |
+| `infra/aws/` | One-time AWS OIDC → ECR wiring (`setup-aws.sh` + policies) |
+| `.github/` | CI workflow + dependabot |
 
-# Run the interactive setup
-./setup.sh
-```
+## Local setup (development)
 
-The setup script will:
-- Ask for your project name, database name, bucket name, etc.
-- Replace all template placeholders with your values
-- Create a backup of original files
-- Update all configuration files automatically
-
-**Manual setup alternative:** See the [Manual Setup](#manual-setup) section below.
-
-### Highlights
-- **Backend**: Django 5 + DRF, Celery-ready, Redis, Postgres, S3-compatible storage (MinIO), Spectacular (OpenAPI)
-- **Frontend**: Vue 3 + Vite + Tailwind 4
-- **Auth**: External auth service (container) with webhook to backend
-- **Infra**: Docker Compose for dev, MinIO, Redis, Postgres
-- **Tooling**: pnpm workspaces, turbo-ready, release-it, Husky hooks
-
-### Monorepo structure
-- `backend/` — Django app, dev Dockerfile, entrypoint
-- `web/` — Vue app with Vite + Tailwind
-- `postgres/` — DB bootstrap (`auth`, `insur_iq`)
-- `docker-compose.dev.yml` — full dev stack
-- `scripts/` — helper scripts (`init-db-user.sh`, `nuke.sh`)
-
----
-
-### Quick start (development)
 Prereqs: Docker, Node 24, pnpm 10.x.
 
-1) Install workspace tooling
 ```bash
-corepack enable && corepack prepare pnpm@10.15.0 --activate
-pnpm i
+# 1. Config: generate a workspace .env (random free ports + secrets overlay)
+pnpm setup:env            # or: cp .env.example .env
+
+# 2. Install workspace tooling + git hooks
+pnpm i                    # runs husky install + warms the pre-commit cache
+
+# 3. Start the full dev stack (all services via Docker Compose)
+pnpm dev
 ```
 
-2) Start the dev stack
+Everything is served through the Nginx proxy on one port (default `8080`):
+
+- Frontend: `http://localhost:8080`
+- Backend API: `http://localhost:8080/service-api`
+- Auth: `http://localhost:8080/auth`
+- MinIO console: `http://localhost:9090`
+- Postgres: port `5432`, DB `insur_iq`
+
+Seed a dev user (optional): `pnpm init`
+
+Stop: `pnpm dev:down`  ·  Reset DB only: `pnpm db:reset`  ·  Nuke volumes: `pnpm dev:prune`
+
+## Contributing
+
+### Git hooks (pre-commit)
+
+`pnpm i` installs a Husky `pre-commit` hook that is **path-gated**: it lints `web/` only when
+web files are staged, and runs the backend `pre-commit` suite only when `backend/` files are
+staged.
+
+The backend suite is a Python tool (`pre-commit`). Because this repo runs entirely in Docker,
+host Python is not guaranteed — so the hook **self-detects a runner** (`pre-commit` on PATH →
+`uvx pre-commit` → `pipx run pre-commit`) and, if none is found, prints an install hint and
+skips the backend block rather than blocking your commit.
+
+To get the backend lint locally, install `pre-commit` once (no repo change needed):
+
 ```bash
-pnpm run dev
+uv tool install pre-commit     # or: pipx install pre-commit
 ```
 
-3) Wait for healthchecks, then open:
-- Backend API: `http://localhost:8000/api/health/`
-- Web app: `http://localhost:5173`
-- Auth service: `http://localhost:10000`
-- MinIO console: `http://localhost:9901`
+**Never** use `git commit --no-verify` to get around a missing tool — install it instead
+(see `CLAUDE.md`).
 
-4) Seed a dev user (optional)
+### Lint & test manually
+
 ```bash
-bash ./scripts/init-db-user.sh
+# Frontend
+cd web && pnpm lint && pnpm test
+
+# Backend (inside the container, where Python deps live)
+docker compose exec backend python manage.py test
+docker compose exec backend pre-commit run --all-files   # or via uvx on the host
 ```
 
-5) Stop the stack
-```bash
-pnpm run infra:dev:down
-```
+## CI / Releasing
 
-Reset volumes (danger):
-```bash
-pnpm run infra:dev:prune
-```
+CI runs on every PR and on pushes to `dev`/`master`: lint → test (`python manage.py test` +
+web) → docker build. On pushes/tags it also builds and pushes `linux/amd64` images to AWS ECR
+(keyless OIDC), once AWS is wired.
 
----
+Branch model, one-time AWS setup, branch protection, and `pnpm release` are documented in
+[`RELEASING.md`](./RELEASING.md).
 
-### Services (dev compose)
-- `backend`: Django (migrations auto-run). Ports: 8000
-- `web`: Vite dev server for Vue. Ports: 5173
-- `auth`: External auth (webhook to backend). Ports: 10000
-- `postgres`: Postgres DB with init scripts. Ports: 5432
-- `redis`: Redis cache/broker. Ports: 6379
-- `minio`: S3-compatible storage. Ports: 9900 (API), 9901 (console)
+## License
 
-Environment variables are wired in `docker-compose.dev.yml`. Defaults are provided; override via a `.env` file or shell.
-
----
-
-## Manual Setup
-
-### Rename checklist (after copying the repo)
-# Linux: sed -i 's/insur_iq/your_app/g'
-
-# Kebab-case rename
-grep -rl "insur-iq" . | xargs sed -i '' -e 's/insur-iq/your-app/g' # macOS
-# Linux: sed -i 's/insur-iq/your-app/g'
-```
-
-Backend Django project/module rename: If you change the Django project module name under `backend/`, also update imports and `DJANGO_SETTINGS_MODULE` where relevant. Current project module is under `backend/config` and apps under `backend/*/apps.py`.
-
----
-
-### Running parts individually
-Backend inside compose (default):
-```bash
-pnpm run infra:dev:up
-```
-
-Frontend only (outside Docker):
-```bash
-cd web
-pnpm i
-pnpm run dev
-```
-
-Backend only (outside Docker, requires Python 3.12+ and Postgres running):
-```bash
-cd backend
-pip install -r requirements.txt
-python manage.py migrate
-python manage.py runserver 0.0.0.0:8000
-```
-
----
-
-### Environment variables (common)
-Key defaults (see `docker-compose.dev.yml` for full list):
-- Backend: `DEBUG`, `SECRET_KEY`, `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`, `DB_*`, `AWS_*`, `CELERY_*`
-- Web (build args): `VITE_AUTH_BASE_URL`, `VITE_API_BASE_URL`
-- Auth: `BETTER_AUTH_*`, `TRUSTED_ORIGINS`, `DATABASE_STRING`, `WEBHOOK_*`
-
----
-
-### Conventions
-- Package manager: `pnpm`
-- Node engine: `24`
-- Python: `>=3.12`
-- Codegen: optional OpenAPI client under `web/web/src/api`
-
----
-
-### Common tasks
-```bash
-# Bring up dev stack
-pnpm run infra:dev:up
-
-# Tear down
-pnpm run infra:dev:down
-
-# Reset with volumes
-pnpm run infra:dev:prune
-
-# Reset Postgres databases (auth + app)
-pnpm run db:reset
-
-# Nuke repo artifacts (script-defined)
-pnpm run nuke
-```
-
----
-
-### License
 MIT
-
-
