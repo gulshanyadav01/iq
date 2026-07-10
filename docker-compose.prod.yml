@@ -42,7 +42,12 @@ services:
     ports:
       - "${API_PORT}:8000"
     volumes: &backend-volumes
+    volumes: &backend-volumes
       - operator-static:/app/static
+      # Vertex AI service-account key (read-only); only consulted when
+      # GOOGLE_GENAI_USE_VERTEXAI is set. Point GCP_CREDENTIALS_DIR at the host
+      # dir holding sa-key.json.
+      - ${GCP_CREDENTIALS_DIR:-./.gcp}:/secrets/gcp:ro
       # Vertex AI service-account key (read-only); only consulted when
       # GOOGLE_GENAI_USE_VERTEXAI is set. Point GCP_CREDENTIALS_DIR at the host
       # dir holding sa-key.json.

@@ -152,6 +152,10 @@
             </tbody>
           </table>
         </div>
+        <div v-if="total > pageSize" class="flex items-center justify-between gap-4 px-4 py-3 border-t border-gray-200 dark:border-gray-700">
+          <p class="text-xs text-gray-400">{{ total }} total</p>
+          <UPagination v-model:page="page" :total="total" :items-per-page="pageSize" />
+        </div>
       </div>
     </div>
 
@@ -290,7 +294,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 
 interface ExtractionRequest {
   id: string
@@ -301,6 +305,21 @@ interface ExtractionRequest {
   error: string | null
   created_at: string
   updated_at: string
+}
+
+interface StatusCounts {
+  total: number
+  completed: number
+  failed: number
+  in_progress: number
+}
+
+interface PaginatedRequests {
+  count: number
+  next: string | null
+  previous: string | null
+  results: ExtractionRequest[]
+  counts: StatusCounts
 }
 
 definePageMeta({
@@ -316,11 +335,17 @@ const requests = ref<ExtractionRequest[]>([])
 const loading = ref(false)
 const error = ref(false)
 
+// Pagination state
+const pageSize = 20
+const page = ref(1)
+const total = ref(0)
+const counts = ref<StatusCounts>({ total: 0, completed: 0, failed: 0, in_progress: 0 })
+
 const metrics = computed(() => ({
-  total: requests.value.length,
-  completed: requests.value.filter(r => r.status === 'completed').length,
-  failed: requests.value.filter(r => r.status === 'failed').length,
-  inProgress: requests.value.filter(r => r.status === 'initiated' || r.status === 'processing').length,
+  total: counts.value.total,
+  completed: counts.value.completed,
+  failed: counts.value.failed,
+  inProgress: counts.value.in_progress,
 }))
 
 // Modal state
@@ -390,9 +415,13 @@ async function loadRequests() {
 
   try {
     const headers = await getAuthHeaders()
-    requests.value = await $fetch<ExtractionRequest[]>(`${getBaseUrl()}/api/policy-extract/requests/`, {
-      headers
+    const data = await $fetch<PaginatedRequests>(`${getBaseUrl()}/api/policy-extract/requests/`, {
+      headers,
+      query: { page: page.value }
     })
+    requests.value = data.results
+    total.value = data.count
+    counts.value = data.counts
   } catch (err) {
     console.error('Failed to load requests:', err)
     error.value = true
@@ -400,6 +429,8 @@ async function loadRequests() {
     loading.value = false
   }
 }
+
+watch(page, () => loadRequests())
 
 function handleFileSelect(e: Event) {
   const input = e.target as HTMLInputElement
@@ -424,14 +455,18 @@ async function handleUpload() {
     formData.append('file', selectedFile.value)
 
     const headers = await getAuthHeaders()
-    const newRequest = await $fetch<ExtractionRequest>(`${getBaseUrl()}/api/policy-extract/requests/`, {
+    await $fetch<ExtractionRequest>(`${getBaseUrl()}/api/policy-extract/requests/`, {
       method: 'POST',
       headers,
       body: formData
     })
 
-    requests.value.unshift(newRequest)
     closeModal()
+    if (page.value === 1) {
+      await loadRequests()
+    } else {
+      page.value = 1
+    }
   } catch (err) {
     uploadError.value = err instanceof Error ? err.message : 'Upload failed'
   } finally {
