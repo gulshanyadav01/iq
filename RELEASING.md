@@ -6,11 +6,11 @@ project-specific step (see "Deploy" at the bottom).
 
 ## Branch model
 
-| Branch    | Role                                                                          |
-| --------- | ----------------------------------------------------------------------------- |
-| `dev`     | Default / integration branch. Feature branches PR into `dev`.                 |
-| `master`  | Stable production branch. Merge `dev` → `master` via PR when stable.          |
-| tags `v*` | Cut **only from `master`** by `pnpm release`. Tags drive the released image.  |
+| Branch    | Role                                                                         |
+| --------- | ---------------------------------------------------------------------------- |
+| `dev`     | Default / integration branch. Feature branches PR into `dev`.                |
+| `master`  | Stable production branch. Merge `dev` → `master` via PR when stable.         |
+| tags `v*` | Cut **only from `master`** by `pnpm release`. Tags drive the released image. |
 
 ## CI (`.github/workflows/ci.yml`)
 
@@ -25,8 +25,6 @@ On every PR and on pushes to `dev`/`master` (and `v*` tags):
   (`manage.py check`, `makemigrations --check`), an informational `check --deploy`, the full
   backend suite via **`python manage.py test`** (the runner all backend tests are written for —
   not pytest), and `pnpm --filter web test`.
-- **build** (PRs only) — `docker build` of backend + web images from the repo root context, to
-  prove they build.
 - **push-ecr** (pushes/tags only, after lint+test) — builds `linux/amd64` images (provenance +
   SBOM) and pushes to ECR. **Prod is amd64-only.** Self-skips until AWS is wired
   (`if: vars.AWS_REGION != ''`), so a repo without AWS config shows no red X.

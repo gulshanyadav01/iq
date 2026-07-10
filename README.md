@@ -11,15 +11,15 @@ Full-stack app for insurance commission intake and policy data extraction.
 
 ## Monorepo structure
 
-| Path | Purpose |
-| --- | --- |
-| `backend/` | Django project (`config/`, `accounts/`, `core/`, `commission_intake/`, `policy_extract/`, `cins/`, `pipelines/`, `system/`) |
-| `web/` | Nuxt 4 frontend (`app/pages`, `app/components`, `app/stores`, …) |
-| `conf/` | Nginx dev/prod configs |
-| `postgres/` | DB init SQL (`insur_iq`, `auth`) |
-| `scripts/` | Helper scripts (env gen, build/push, db reset, nuke) |
-| `infra/aws/` | One-time AWS OIDC → ECR wiring (`setup-aws.sh` + policies) |
-| `.github/` | CI workflow + dependabot |
+| Path         | Purpose                                                                                                                     |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| `backend/`   | Django project (`config/`, `accounts/`, `core/`, `commission_intake/`, `policy_extract/`, `cins/`, `pipelines/`, `system/`) |
+| `web/`       | Nuxt 4 frontend (`app/pages`, `app/components`, `app/stores`, …)                                                            |
+| `conf/`      | Nginx dev/prod configs                                                                                                      |
+| `postgres/`  | DB init SQL (`insur_iq`, `auth`)                                                                                            |
+| `scripts/`   | Helper scripts (env gen, build/push, db reset, nuke)                                                                        |
+| `infra/aws/` | One-time AWS OIDC → ECR wiring (`setup-aws.sh` + policies)                                                                  |
+| `.github/`   | CI workflow + dependabot                                                                                                    |
 
 ## Local setup (development)
 
@@ -46,7 +46,7 @@ Everything is served through the Nginx proxy on one port (default `8080`):
 
 Seed a dev user (optional): `pnpm init`
 
-Stop: `pnpm dev:down`  ·  Reset DB only: `pnpm db:reset`  ·  Nuke volumes: `pnpm dev:prune`
+Stop: `pnpm dev:down` · Reset DB only: `pnpm db:reset` · Nuke volumes: `pnpm dev:prune`
 
 ## Contributing
 
