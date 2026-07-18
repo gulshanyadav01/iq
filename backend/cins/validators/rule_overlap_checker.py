@@ -21,13 +21,14 @@ Usage:
 """
 
 import json
-from typing import List, Dict, Any, Optional, Set, Tuple
+from typing import List, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
 
 
 class OverlapSeverity(Enum):
     """Severity of rule overlap"""
+
     CRITICAL = "CRITICAL"
     HIGH = "HIGH"
     MEDIUM = "MEDIUM"
@@ -38,6 +39,7 @@ class OverlapSeverity(Enum):
 @dataclass
 class RuleOverlap:
     """Represents an overlap between rules"""
+
     severity: OverlapSeverity
     overlap_type: str
     product_code: str
@@ -51,6 +53,7 @@ class RuleOverlap:
 @dataclass
 class OverlapCheckResult:
     """Result of overlap checking"""
+
     overlaps: List[RuleOverlap]
     gaps: List[Dict[str, Any]]
     total_rules_checked: int
@@ -65,11 +68,15 @@ class OverlapCheckResult:
 
     def get_summary(self) -> Dict[str, int]:
         return {
-            "critical": sum(1 for o in self.overlaps if o.severity == OverlapSeverity.CRITICAL),
+            "critical": sum(
+                1 for o in self.overlaps if o.severity == OverlapSeverity.CRITICAL
+            ),
             "high": sum(1 for o in self.overlaps if o.severity == OverlapSeverity.HIGH),
-            "medium": sum(1 for o in self.overlaps if o.severity == OverlapSeverity.MEDIUM),
+            "medium": sum(
+                1 for o in self.overlaps if o.severity == OverlapSeverity.MEDIUM
+            ),
             "low": sum(1 for o in self.overlaps if o.severity == OverlapSeverity.LOW),
-            "gaps": len(self.gaps)
+            "gaps": len(self.gaps),
         }
 
 
@@ -96,14 +103,10 @@ class RuleOverlapChecker:
 
         # Load document
         try:
-            with open(document_path, 'r') as f:
+            with open(document_path, "r") as f:
                 self.current_doc = json.load(f)
-        except Exception as e:
-            return OverlapCheckResult(
-                overlaps=[],
-                gaps=[],
-                total_rules_checked=0
-            )
+        except Exception:
+            return OverlapCheckResult(overlaps=[], gaps=[], total_rules_checked=0)
 
         total_rules = 0
 
@@ -123,9 +126,7 @@ class RuleOverlapChecker:
                         self._check_rule_pair(product_code, rules[i], rules[j])
 
         return OverlapCheckResult(
-            overlaps=self.overlaps,
-            gaps=self.gaps,
-            total_rules_checked=total_rules
+            overlaps=self.overlaps, gaps=self.gaps, total_rules_checked=total_rules
         )
 
     def _check_rule_pair(self, product_code: str, rule1: Dict, rule2: Dict):
@@ -144,24 +145,37 @@ class RuleOverlapChecker:
 
         # If both rules have no conditions, they completely overlap
         if not conditions1 and not conditions2:
-            self.overlaps.append(RuleOverlap(
-                severity=OverlapSeverity.CRITICAL if priority1 == priority2 else OverlapSeverity.INFO,
-                overlap_type="complete_overlap",
-                product_code=product_code,
-                rule1_id=rule1_id,
-                rule2_id=rule2_id,
-                description="Both rules have no conditions (default/catch-all rules)",
-                suggestion="Only one default rule per product recommended. Ensure different priorities if intentional.",
-                overlapping_dimensions=["all"]
-            ))
+            self.overlaps.append(
+                RuleOverlap(
+                    severity=OverlapSeverity.CRITICAL
+                    if priority1 == priority2
+                    else OverlapSeverity.INFO,
+                    overlap_type="complete_overlap",
+                    product_code=product_code,
+                    rule1_id=rule1_id,
+                    rule2_id=rule2_id,
+                    description="Both rules have no conditions (default/catch-all rules)",
+                    suggestion="Only one default rule per product recommended. Ensure different priorities if intentional.",
+                    overlapping_dimensions=["all"],
+                )
+            )
             return
 
         # List fields checked via set overlap
         list_fields = [
-            "vehicle_sub_class", "policy_type", "state", "rto",
-            "number_of_wheels", "school_bus_type", "booking_mode",
-            "fuel_type", "vehicle_make", "vehicle_model",
-            "vehicle_carrier", "business_type", "deal_parameter",
+            "vehicle_sub_class",
+            "policy_type",
+            "state",
+            "rto",
+            "number_of_wheels",
+            "school_bus_type",
+            "booking_mode",
+            "fuel_type",
+            "vehicle_make",
+            "vehicle_model",
+            "vehicle_carrier",
+            "business_type",
+            "deal_parameter",
         ]
         for field in list_fields:
             if field in conditions1 and field in conditions2:
@@ -169,6 +183,23 @@ class RuleOverlapChecker:
                     overlapping_dims.append(field)
                 else:
                     has_overlap = False
+
+        # Make/model exclusion disjointness. The GCCV ≤3.5T buckets (a)/(b)/(c)
+        # differ only by include vs exclude make/model lists, so the include-
+        # only check above never sees them as disjoint. When one rule's include
+        # list is a SUBSET of the other's exclude list they can never co-match
+        # — mark them disjoint so the buckets don't flag a HIGH overlap on
+        # every doc. Checked in both directions and for both make and model.
+        for inc_field, exc_field in (
+            ("vehicle_make", "vehicle_make_exclude"),
+            ("vehicle_model", "vehicle_model_exclude"),
+        ):
+            if self._include_excluded_by(
+                conditions1, conditions2, inc_field, exc_field
+            ) or self._include_excluded_by(
+                conditions2, conditions1, inc_field, exc_field
+            ):
+                has_overlap = False
 
         # Single-value fields checked via equality
         single_fields = ["zero_dep", "cpa", "ncb", "vehicle_age", "od_term", "tp_term"]
@@ -183,14 +214,29 @@ class RuleOverlapChecker:
         range_pairs = [
             ("gvw_start_range", "gvw_end_range", "gvw"),
             ("cc_start_range", "cc_end_range", "cc"),
-            ("seating_capacity_start_range", "seating_capacity_end_range", "seating_capacity"),
-            ("policies_count_start_range", "policies_count_end_range", "policies_count"),
+            (
+                "seating_capacity_start_range",
+                "seating_capacity_end_range",
+                "seating_capacity",
+            ),
+            (
+                "policies_count_start_range",
+                "policies_count_end_range",
+                "policies_count",
+            ),
         ]
         for start_key, end_key, label in range_pairs:
-            if (start_key in conditions1 or end_key in conditions1) and \
-               (start_key in conditions2 or end_key in conditions2):
-                range1 = {"min": conditions1.get(start_key), "max": conditions1.get(end_key)}
-                range2 = {"min": conditions2.get(start_key), "max": conditions2.get(end_key)}
+            if (start_key in conditions1 or end_key in conditions1) and (
+                start_key in conditions2 or end_key in conditions2
+            ):
+                range1 = {
+                    "min": conditions1.get(start_key),
+                    "max": conditions1.get(end_key),
+                }
+                range2 = {
+                    "min": conditions2.get(start_key),
+                    "max": conditions2.get(end_key),
+                }
                 if self._ranges_overlap(range1, range2):
                     overlapping_dims.append(label)
                 else:
@@ -201,29 +247,49 @@ class RuleOverlapChecker:
             # Determine severity and type
             all_dims = set(conditions1.keys()) | set(conditions2.keys())
 
-            if set(overlapping_dims) == all_dims and self._conditions_identical(conditions1, conditions2):
+            if set(overlapping_dims) == all_dims and self._conditions_identical(
+                conditions1, conditions2
+            ):
                 # Complete overlap
-                severity = OverlapSeverity.CRITICAL if priority1 == priority2 else OverlapSeverity.INFO
+                severity = (
+                    OverlapSeverity.CRITICAL
+                    if priority1 == priority2
+                    else OverlapSeverity.INFO
+                )
                 overlap_type = "complete_overlap"
                 description = "Rules have identical conditions"
-                suggestion = "Remove duplicate rule or ensure different priorities" if priority1 == priority2 else "Priority-resolved (lower number wins)"
+                suggestion = (
+                    "Remove duplicate rule or ensure different priorities"
+                    if priority1 == priority2
+                    else "Priority-resolved (lower number wins)"
+                )
             else:
                 # Partial overlap
-                severity = OverlapSeverity.HIGH if priority1 == priority2 else OverlapSeverity.INFO
+                severity = (
+                    OverlapSeverity.HIGH
+                    if priority1 == priority2
+                    else OverlapSeverity.INFO
+                )
                 overlap_type = "partial_overlap"
                 description = f"Rules overlap in: {', '.join(overlapping_dims)}"
-                suggestion = "Refine conditions to eliminate overlap or ensure different priorities" if priority1 == priority2 else "Priority-resolved (lower number wins)"
+                suggestion = (
+                    "Refine conditions to eliminate overlap or ensure different priorities"
+                    if priority1 == priority2
+                    else "Priority-resolved (lower number wins)"
+                )
 
-            self.overlaps.append(RuleOverlap(
-                severity=severity,
-                overlap_type=overlap_type,
-                product_code=product_code,
-                rule1_id=rule1_id,
-                rule2_id=rule2_id,
-                description=description,
-                suggestion=suggestion,
-                overlapping_dimensions=overlapping_dims
-            ))
+            self.overlaps.append(
+                RuleOverlap(
+                    severity=severity,
+                    overlap_type=overlap_type,
+                    product_code=product_code,
+                    rule1_id=rule1_id,
+                    rule2_id=rule2_id,
+                    description=description,
+                    suggestion=suggestion,
+                    overlapping_dimensions=overlapping_dims,
+                )
+            )
 
     def _ranges_overlap(self, range1: Dict, range2: Dict) -> bool:
         """Check if two numeric ranges overlap"""
@@ -231,20 +297,20 @@ class RuleOverlapChecker:
         if range1 is None or range2 is None:
             return False
 
-        min1 = range1.get("min", float('-inf'))
-        max1 = range1.get("max", float('inf'))
-        min2 = range2.get("min", float('-inf'))
-        max2 = range2.get("max", float('inf'))
+        min1 = range1.get("min", float("-inf"))
+        max1 = range1.get("max", float("inf"))
+        min2 = range2.get("min", float("-inf"))
+        max2 = range2.get("max", float("inf"))
 
         # Handle None values in min/max
         if min1 is None:
-            min1 = float('-inf')
+            min1 = float("-inf")
         if max1 is None:
-            max1 = float('inf')
+            max1 = float("inf")
         if min2 is None:
-            min2 = float('-inf')
+            min2 = float("-inf")
         if max2 is None:
-            max2 = float('inf')
+            max2 = float("inf")
 
         # Ranges overlap if they have any intersection
         return not (max1 < min2 or max2 < min1)
@@ -254,6 +320,20 @@ class RuleOverlapChecker:
         if not isinstance(set1, list) or not isinstance(set2, list):
             return False
         return bool(set(set1) & set(set2))
+
+    def _include_excluded_by(
+        self, cond_a: Dict, cond_b: Dict, inc_field: str, exc_field: str
+    ) -> bool:
+        """True when cond_a's include list is fully excluded by cond_b's exclude
+        list (set(a[inc]) ⊆ set(b[exc])) — the two rules can never co-match on
+        that dimension. None-safe: returns False when either list is absent."""
+        inc = cond_a.get(inc_field)
+        exc = cond_b.get(exc_field)
+        if not inc or not exc:
+            return False
+        if not isinstance(inc, list) or not isinstance(exc, list):
+            return False
+        return set(inc) <= set(exc)
 
     def _conditions_identical(self, cond1: Dict, cond2: Dict) -> bool:
         """Check if two condition objects are identical"""
@@ -299,7 +379,7 @@ class RuleOverlapChecker:
                 max2 = threshold2.get("max", "∞")
 
                 errors.append(
-                    f"Tier {i+1} ({min1}-{max1}) overlaps with Tier {i+2} ({min2}-{max2})"
+                    f"Tier {i + 1} ({min1}-{max1}) overlaps with Tier {i + 2} ({min2}-{max2})"
                 )
 
         # Check for gaps
@@ -316,7 +396,7 @@ class RuleOverlapChecker:
             if max1 is not None and min2 is not None:
                 if max1 + 1 < min2:
                     errors.append(
-                        f"Gap between Tier {i+1} (max: {max1}) and Tier {i+2} (min: {min2}): range {max1+1}-{min2-1} not covered"
+                        f"Gap between Tier {i + 1} (max: {max1}) and Tier {i + 2} (min: {min2}): range {max1 + 1}-{min2 - 1} not covered"
                     )
 
         return errors
@@ -347,7 +427,9 @@ def main():
         print("\n=== DETECTED OVERLAPS ===\n")
 
         # Group by severity
-        critical = [o for o in result.overlaps if o.severity == OverlapSeverity.CRITICAL]
+        critical = [
+            o for o in result.overlaps if o.severity == OverlapSeverity.CRITICAL
+        ]
         high = [o for o in result.overlaps if o.severity == OverlapSeverity.HIGH]
         medium = [o for o in result.overlaps if o.severity == OverlapSeverity.MEDIUM]
         info = [o for o in result.overlaps if o.severity == OverlapSeverity.INFO]
@@ -359,7 +441,9 @@ def main():
                 print(f"  Rules: {overlap.rule1_id} ↔ {overlap.rule2_id}")
                 print(f"  Type: {overlap.overlap_type}")
                 print(f"  Description: {overlap.description}")
-                print(f"  Overlapping Dimensions: {', '.join(overlap.overlapping_dimensions)}")
+                print(
+                    f"  Overlapping Dimensions: {', '.join(overlap.overlapping_dimensions)}"
+                )
                 print(f"  Suggestion: {overlap.suggestion}")
 
         if high:

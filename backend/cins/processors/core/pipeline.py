@@ -34,15 +34,17 @@ logger = logging.getLogger("pipeline")
 # Result dataclass
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PipelineResult:
     """Result returned by Pipeline processing methods."""
-    cics_doc: dict                    # parsed CICS JSON
-    output_path: Path                 # where the file was written
+
+    cics_doc: dict  # parsed CICS JSON
+    output_path: Path  # where the file was written
     warnings: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
-    validation_issues: list = field(default_factory=list)   # from SchemaValidator
-    overlap_issues: list = field(default_factory=list)      # from RuleOverlapChecker
+    validation_issues: list = field(default_factory=list)  # from SchemaValidator
+    overlap_issues: list = field(default_factory=list)  # from RuleOverlapChecker
     duration: float = 0.0
     # per-sheet results when processing multiple sheets
     sheet_results: List[Dict] = field(default_factory=list)
@@ -54,6 +56,7 @@ class PipelineResult:
 # ---------------------------------------------------------------------------
 # Module-level helpers (pure functions, no Streamlit dependency)
 # ---------------------------------------------------------------------------
+
 
 def get_safe_sheet_name(sheet_name: str) -> str:
     """Sanitize sheet name for use in filenames."""
@@ -84,7 +87,8 @@ def derive_pipeline_routing(
         (sheets_to_process, attachment_name)
     """
     commission_sheets = [
-        name for name, info in (sheet_classifications or {}).items()
+        name
+        for name, info in (sheet_classifications or {}).items()
         if (info or {}).get("sheet_type") == "commission_data"
     ]
     sheets_to_process = commission_sheets if commission_sheets else list(sheet_names)
@@ -124,7 +128,9 @@ def _strip_common_header_prefix(header_line: str) -> tuple[str, str]:
     title = prefixes[0]
     if not all(p == title for p in prefixes):
         return "", header_line
-    cleaned = "| " + " | ".join(c[len(title) + len(sep):].strip() for c in cells) + " |"
+    cleaned = (
+        "| " + " | ".join(c[len(title) + len(sep) :].strip() for c in cells) + " |"
+    )
     return title, cleaned
 
 
@@ -184,9 +190,7 @@ def _promote_table_headings(body: str) -> str:
 
         # Pattern 2: pipe-table row whose every column shares a "<title> - " prefix.
         if _PIPE_ROW_RE.match(line):
-            already_under_heading = any(
-                ln.strip().startswith("## ") for ln in out
-            )
+            already_under_heading = any(ln.strip().startswith("## ") for ln in out)
             if not already_under_heading:
                 title, cleaned = _strip_common_header_prefix(line)
                 if title:
@@ -225,7 +229,9 @@ def build_pass_contents(
     pass2_content = master_context
 
     if email_is_primary_commission:
-        pass3_content = f"## Email Commission Data\n\n{_promote_table_headings(email_body)}"
+        pass3_content = (
+            f"## Email Commission Data\n\n{_promote_table_headings(email_body)}"
+        )
     else:
         pass3_content = f"## Commission Data Sheet: {sheet_name}\n\n{sheet_content}"
 
@@ -359,7 +365,9 @@ def _merge_sheet_jsons(
             confidence = validation.get("overall_confidence")
             if confidence is not None:
                 all_confidence_scores.append(confidence)
-            requires_review_flags.append(validation.get("requires_manual_review", False))
+            requires_review_flags.append(
+                validation.get("requires_manual_review", False)
+            )
             notes = validation.get("validation_notes", [])
             if notes:
                 all_validation_notes.extend([f"[{sheet_name}] {n}" for n in notes])
@@ -381,14 +389,19 @@ def _merge_sheet_jsons(
 
     if all_confidence_scores or all_validation_notes or requires_review_flags:
         combined_data["validation"] = {
-            "overall_confidence": min(all_confidence_scores) if all_confidence_scores else None,
-            "requires_manual_review": any(requires_review_flags) if requires_review_flags else False,
+            "overall_confidence": min(all_confidence_scores)
+            if all_confidence_scores
+            else None,
+            "requires_manual_review": any(requires_review_flags)
+            if requires_review_flags
+            else False,
             "validation_notes": all_validation_notes if all_validation_notes else None,
         }
 
     # Validate against CICS Pydantic model
     try:
         from cins.schema.cics_model import CICSDocument
+
         validated = CICSDocument(**combined_data)
         combined_data = validated.model_dump(exclude_none=False)
         logger.info("Combined JSON validated against CICS schema")
@@ -399,22 +412,44 @@ def _merge_sheet_jsons(
     return combined_data
 
 
-def _run_validators(output_path: Path):
-    """Run SchemaValidator + RuleOverlapChecker. Returns (schema_result, overlap_result)."""
+def _run_validators(output_path: Path, indexed_doc=None):
+    """Run SchemaValidator + RuleOverlapChecker (+ RowCoverageValidator when the
+    source grid is available). Returns (schema_result, overlap_result).
+
+    When ``indexed_doc`` is supplied, the row-coverage validator asserts every
+    non-empty grid data row traces to >=1 emitted rule (the inverse of
+    SchemaValidator's forward trace check). Its issues are merged into
+    ``schema_result`` so existing consumers surface them unchanged.
+    """
     try:
         from cins.validators.schema_validator import SchemaValidator
         from cins.validators.rule_overlap_checker import RuleOverlapChecker
+
         schema_result = SchemaValidator().validate(str(output_path))
         overlap_result = RuleOverlapChecker().check(str(output_path))
-        return schema_result, overlap_result
     except ImportError:
         logger.warning("Validators not available; skipping validation")
         return None, None
+    if indexed_doc is not None and schema_result is not None:
+        try:
+            from cins.validators.row_coverage_validator import RowCoverageValidator
+
+            sheet_contents = indexed_doc.get_all_sheet_contents()
+            rc_result = RowCoverageValidator().validate(
+                str(output_path), sheet_contents
+            )
+            schema_result.errors.extend(rc_result.errors)
+            schema_result.warnings.extend(rc_result.warnings)
+            schema_result.info.extend(rc_result.info)
+        except Exception as e:  # never let coverage checking break the pipeline
+            logger.warning(f"Row-coverage validator failed: {e}")
+    return schema_result, overlap_result
 
 
 # ---------------------------------------------------------------------------
 # Pipeline class
 # ---------------------------------------------------------------------------
+
 
 class Pipeline:
     """
@@ -440,7 +475,9 @@ class Pipeline:
 
         # Resolve directories relative to project root if not given
         cins_root = Path(__file__).parent.parent.parent
-        self.indexed_dir = Path(indexed_dir) if indexed_dir else cins_root / "input-indexed"
+        self.indexed_dir = (
+            Path(indexed_dir) if indexed_dir else cins_root / "input-indexed"
+        )
         self.output_dir = Path(output_dir) if output_dir else cins_root / "outputs"
 
     # ------------------------------------------------------------------
@@ -472,7 +509,11 @@ class Pipeline:
 
         indexed_doc = indexer.get_indexed_document(document_id, provider)
 
-        if indexed_doc and not force_reindex and indexer.is_cache_valid(indexed_doc, file_path):
+        if (
+            indexed_doc
+            and not force_reindex
+            and indexer.is_cache_valid(indexed_doc, file_path)
+        ):
             logger.info(f"Cache hit: {document_id}")
         else:
             logger.info(f"Indexing: {document_id}")
@@ -483,7 +524,9 @@ class Pipeline:
                 force_reindex=force_reindex,
             )
 
-        resolved_output_path = output_path or self._default_output_path(file_path, provider)
+        resolved_output_path = output_path or self._default_output_path(
+            file_path, provider
+        )
         return self.process_from_indexed(indexed_doc, resolved_output_path)
 
     def index_only(
@@ -555,7 +598,10 @@ class Pipeline:
         start_time = datetime.now()
         output_folder = Path(output_folder)
 
-        from cins.schema.extraction_passes import MetadataExtraction, MasterDataExtraction
+        from cins.schema.extraction_passes import (
+            MetadataExtraction,
+            MasterDataExtraction,
+        )
         from cins.schema.raw_extraction import RawExtraction
         from cins.processors.core.llm_extract import _extract_pass3_via_codegen
         from cins.processors.llm_services.factory import get_llm_service
@@ -580,7 +626,8 @@ class Pipeline:
         # Clear stale outputs
         existing_cics = list(output_folder.glob("*.json"))
         existing_cics = [
-            f for f in existing_cics
+            f
+            for f in existing_cics
             if not f.name.startswith("pass") and f.name != "merged_raw_extraction.json"
         ]
         for f in existing_cics:
@@ -610,15 +657,20 @@ class Pipeline:
         )
 
         logger.info("Merging passes into RawExtraction")
-        raw_extraction = RawExtraction.from_passes(metadata, master_data_extraction, rules_extraction)
+        raw_extraction = RawExtraction.from_passes(
+            metadata, master_data_extraction, rules_extraction
+        )
         merged_out = output_folder / "merged_raw_extraction.json"
         merged_out.write_text(
-            json.dumps(raw_extraction.model_dump(exclude_none=True), indent=2), encoding="utf-8"
+            json.dumps(raw_extraction.model_dump(exclude_none=True), indent=2),
+            encoding="utf-8",
         )
 
         logger.info("Transforming to CICS")
         transformer = RawToCICSTransformer()
-        cics_doc, transform_warnings, transform_errors = transformer.transform(raw_extraction)
+        cics_doc, transform_warnings, transform_errors = transformer.transform(
+            raw_extraction
+        )
         cics_json = cics_doc.model_dump(exclude_none=False)
         # Materialize CPA-deduction rules into With/Without-CPA variants so the
         # canonical document, the validators, and every consumer see the split.
@@ -710,8 +762,11 @@ class Pipeline:
 
         def _on_pass_start(pass_num):
             from cins.processors.llm_services.langfuse_client import (
-                set_trace_context, get_trace_context, make_pass_trace_id,
+                set_trace_context,
+                get_trace_context,
+                make_pass_trace_id,
             )
+
             ctx = get_trace_context()
             if ctx["session_id"]:
                 set_trace_context(
@@ -736,7 +791,11 @@ class Pipeline:
             parsed_result = pass_result["cics"]
             json_result = json.dumps(parsed_result, indent=2)
         else:
-            json_result = json.dumps(pass_result) if not isinstance(pass_result, str) else pass_result
+            json_result = (
+                json.dumps(pass_result)
+                if not isinstance(pass_result, str)
+                else pass_result
+            )
             try:
                 parsed_result = json.loads(json_result)
             except Exception:
@@ -746,7 +805,7 @@ class Pipeline:
         json_result = json.dumps(parsed_result, indent=2)
         output_path.write_text(json_result, encoding="utf-8")
 
-        schema_result, overlap_result = _run_validators(output_path)
+        schema_result, overlap_result = _run_validators(output_path, indexed_doc)
 
         duration = (datetime.now() - start_time).total_seconds()
         return PipelineResult(
@@ -789,7 +848,9 @@ class Pipeline:
         master_sheets = indexed_doc.get_master_sheets()
 
         if commission_sheets:
-            logger.info(f"{len(commission_sheets)} commission, {len(master_sheets)} master sheets")
+            logger.info(
+                f"{len(commission_sheets)} commission, {len(master_sheets)} master sheets"
+            )
         else:
             logger.warning("No commission sheets classified; processing all sheets")
 
@@ -798,7 +859,9 @@ class Pipeline:
         for sheet_name in master_sheets:
             content = sheet_contents.get(sheet_name, "")
             if content:
-                master_context += f"\n\n## Master Data Reference: {sheet_name}\n\n{content}"
+                master_context += (
+                    f"\n\n## Master Data Reference: {sheet_name}\n\n{content}"
+                )
 
         source_meta = indexed_doc.metadata.get("source_metadata", {})
         sheets_to_process, _ = derive_pipeline_routing(
@@ -815,7 +878,6 @@ class Pipeline:
             if _email_body:
                 email_body_for_pass3 = _email_body
 
-
         results = []
         errors = []
         sheet_pass_results = []
@@ -827,6 +889,7 @@ class Pipeline:
         results_lock = threading.Lock()
 
         from cins.processors.llm_services.factory import get_llm_service
+
         try:
             model_used = get_llm_service(provider=self.llm_provider).model
         except Exception:
@@ -836,9 +899,12 @@ class Pipeline:
         # can re-establish it (set_trace_context uses contextvars which don't
         # propagate across thread boundaries).
         from cins.processors.llm_services.langfuse_client import (
-            get_trace_context, set_trace_context, clear_trace_context,
+            get_trace_context,
+            set_trace_context,
+            clear_trace_context,
             make_pass_trace_id,
         )
+
         parent_trace_ctx = get_trace_context()
 
         def _process_one_sheet(sheet_idx: int, sheet_name: str):
@@ -847,7 +913,9 @@ class Pipeline:
             if parent_trace_ctx.get("session_id"):
                 set_trace_context(**parent_trace_ctx)
             try:
-                logger.info(f"Processing sheet {sheet_idx}/{total_sheets}: {sheet_name}")
+                logger.info(
+                    f"Processing sheet {sheet_idx}/{total_sheets}: {sheet_name}"
+                )
                 content = sheet_contents.get(sheet_name, "")
                 if not content:
                     logger.warning(f"Skipping '{sheet_name}' — no content")
@@ -857,17 +925,22 @@ class Pipeline:
                 sheet_output_path = output_dir / f"{base_name}_{safe_name}.json"
 
                 # Build per-pass content via shared helper (also used by rerun_single_pass)
-                pass1_content, pass2_content, pass3_content, email_is_primary_commission = (
-                    build_pass_contents(
-                        sheet_name=sheet_name,
-                        sheet_content=content,
-                        master_context=master_context,
-                        email_body=email_body_for_pass3,
-                        commission_sheets=commission_sheets,
-                    )
+                (
+                    pass1_content,
+                    pass2_content,
+                    pass3_content,
+                    email_is_primary_commission,
+                ) = build_pass_contents(
+                    sheet_name=sheet_name,
+                    sheet_content=content,
+                    master_context=master_context,
+                    email_body=email_body_for_pass3,
+                    commission_sheets=commission_sheets,
                 )
                 if email_is_primary_commission:
-                    logger.info(f"  '{sheet_name}': email body used as Pass 3 commission content")
+                    logger.info(
+                        f"  '{sheet_name}': email body used as Pass 3 commission content"
+                    )
 
                 for pass_name, pass_content in [
                     (f"pass1_content_{safe_name}.txt", pass1_content),
@@ -876,9 +949,15 @@ class Pipeline:
                 ]:
                     (output_dir / pass_name).write_text(pass_content, encoding="utf-8")
 
-                _, pass1_prompt = prepare_extraction_request(str(output_dir / f"pass1_content_{safe_name}.txt"))
-                _, pass2_prompt = prepare_extraction_request(str(output_dir / f"pass2_content_{safe_name}.txt"))
-                _, pass3_prompt = prepare_extraction_request(str(output_dir / f"pass3_content_{safe_name}.txt"))
+                _, pass1_prompt = prepare_extraction_request(
+                    str(output_dir / f"pass1_content_{safe_name}.txt")
+                )
+                _, pass2_prompt = prepare_extraction_request(
+                    str(output_dir / f"pass2_content_{safe_name}.txt")
+                )
+                _, pass3_prompt = prepare_extraction_request(
+                    str(output_dir / f"pass3_content_{safe_name}.txt")
+                )
 
                 pass_prompts = {
                     1: pass1_prompt,
@@ -893,12 +972,15 @@ class Pipeline:
                         "attachment_name": attachment_name,
                         "pass_number": pass_num,
                         "result": result_dict,
-                        "prompt_text": _extra.get("user_prompt") or pass_prompts.get(pass_num, ""),
+                        "prompt_text": _extra.get("user_prompt")
+                        or pass_prompts.get(pass_num, ""),
                         "system_instruction": system_instructions.get(pass_num, ""),
                         "model": model_used,
                         "duration": duration,
                         "status": "completed",
-                        "error": _extra.get("skip_reason", "") if _extra.get("skipped") else "",
+                        "error": _extra.get("skip_reason", "")
+                        if _extra.get("skipped")
+                        else "",
                         "extraction_method": _extra.get("extraction_method", "llm"),
                         "codegen_code": _extra.get("codegen_code", ""),
                     }
@@ -912,9 +994,16 @@ class Pipeline:
                     if ctx["session_id"]:
                         set_trace_context(
                             session_id=ctx["session_id"],
-                            trace_id=make_pass_trace_id(ctx["session_id"], pass_num, sheet_name, attachment_name),
+                            trace_id=make_pass_trace_id(
+                                ctx["session_id"], pass_num, sheet_name, attachment_name
+                            ),
                             trace_name=f"pass-{pass_num}-{safe_name}",
-                            metadata={"document_id": ctx["session_id"], "pass": pass_num, "sheet": sheet_name, "attachment": attachment_name},
+                            metadata={
+                                "document_id": ctx["session_id"],
+                                "pass": pass_num,
+                                "sheet": sheet_name,
+                                "attachment": attachment_name,
+                            },
                         )
 
                 try:
@@ -930,7 +1019,9 @@ class Pipeline:
                         # When email body IS the commission content it's already embedded in
                         # pass3_prompt; skip the separate email_body_content prepend to avoid
                         # mixing it with master sheet data.
-                        email_body_content=None if email_is_primary_commission else (email_body_for_pass3 or None),
+                        email_body_content=None
+                        if email_is_primary_commission
+                        else (email_body_for_pass3 or None),
                         on_pass_complete=_on_pass_done,
                         on_pass_start=_on_pass_start,
                         provider=self.llm_provider,
@@ -954,7 +1045,13 @@ class Pipeline:
                         exc_entries.append(entry)
                     with results_lock:
                         errors.append({"sheet": sheet_name, "error": error_msg})
-                        results.append({"sheet": sheet_name, "status": "failed", "error": error_msg})
+                        results.append(
+                            {
+                                "sheet": sheet_name,
+                                "status": "failed",
+                                "error": error_msg,
+                            }
+                        )
                         sheet_pass_results.extend(exc_entries)
                         if on_sheet_complete:
                             on_sheet_complete(exc_entries)
@@ -970,7 +1067,11 @@ class Pipeline:
                     # {"error": "Multi-pass extraction failed: ...", "status": "failed"}.
                     # Surface that string so the DB row points at the real cause
                     # (rate limit, quota, connectivity) instead of this generic label.
-                    json_result = json.dumps(pass_result) if not isinstance(pass_result, str) else pass_result
+                    json_result = (
+                        json.dumps(pass_result)
+                        if not isinstance(pass_result, str)
+                        else pass_result
+                    )
                     try:
                         parsed_result = json.loads(json_result)
                     except Exception:
@@ -988,7 +1089,11 @@ class Pipeline:
                                 upstream_error = errs.strip()
                     error_msg = upstream_error or "Unexpected multi-pass result shape"
                     with results_lock:
-                        persisted_pass_nums = {e["pass_number"] for e in sheet_pass_results if e.get("sheet_name") == sheet_name}
+                        persisted_pass_nums = {
+                            e["pass_number"]
+                            for e in sheet_pass_results
+                            if e.get("sheet_name") == sheet_name
+                        }
                         failed_entries = []
                         for pass_num in (1, 2, 3):
                             if pass_num not in persisted_pass_nums:
@@ -1014,9 +1119,16 @@ class Pipeline:
                     encoding="utf-8",
                 )
 
-                sheet_output_path.write_text(json.dumps(parsed_result, indent=2) if isinstance(parsed_result, dict) else json.dumps({}), encoding="utf-8")
+                sheet_output_path.write_text(
+                    json.dumps(parsed_result, indent=2)
+                    if isinstance(parsed_result, dict)
+                    else json.dumps({}),
+                    encoding="utf-8",
+                )
 
-                schema_result, overlap_result = _run_validators(sheet_output_path)
+                schema_result, overlap_result = _run_validators(
+                    sheet_output_path, indexed_doc
+                )
                 validation_status = (
                     _build_validation_status(schema_result, overlap_result)
                     if schema_result
@@ -1024,14 +1136,16 @@ class Pipeline:
                 )
 
                 with results_lock:
-                    results.append({
-                        "sheet": sheet_name,
-                        "status": "success",
-                        "output_path": str(sheet_output_path),
-                        "output_filename": sheet_output_path.name,
-                        "validation_status": validation_status,
-                        "json_data": parsed_result,
-                    })
+                    results.append(
+                        {
+                            "sheet": sheet_name,
+                            "status": "success",
+                            "output_path": str(sheet_output_path),
+                            "output_filename": sheet_output_path.name,
+                            "validation_status": validation_status,
+                            "json_data": parsed_result,
+                        }
+                    )
                 logger.info(f"  ✓ '{sheet_name}' processed")
             finally:
                 # Don't leak per-sheet trace context back into the parent thread.
@@ -1050,8 +1164,12 @@ class Pipeline:
             for sheet_idx, sheet_name in enumerate(sheets_to_process, 1):
                 _process_one_sheet(sheet_idx, sheet_name)
         else:
-            logger.info(f"Processing {len(sheets_to_process)} sheets with {max_workers} threads")
-            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="cins-sheet") as executor:
+            logger.info(
+                f"Processing {len(sheets_to_process)} sheets with {max_workers} threads"
+            )
+            with ThreadPoolExecutor(
+                max_workers=max_workers, thread_name_prefix="cins-sheet"
+            ) as executor:
                 futures = [
                     executor.submit(_process_one_sheet, idx, name)
                     for idx, name in enumerate(sheets_to_process, 1)
@@ -1068,18 +1186,28 @@ class Pipeline:
         combined_overlap_result = None
 
         if successful_results:
-            combined_data = _merge_sheet_jsons(successful_results, base_name, output_dir)
+            combined_data = _merge_sheet_jsons(
+                successful_results, base_name, output_dir
+            )
             combined_data = materialize_cpa_split(combined_data)
-            combined_path.write_text(json.dumps(combined_data, indent=2), encoding="utf-8")
-            combined_schema_result, combined_overlap_result = _run_validators(combined_path)
+            combined_path.write_text(
+                json.dumps(combined_data, indent=2), encoding="utf-8"
+            )
+            combined_schema_result, combined_overlap_result = _run_validators(
+                combined_path, indexed_doc
+            )
             logger.info(f"Combined JSON saved: {combined_path.name}")
 
         duration = (datetime.now() - start_time).total_seconds()
         return PipelineResult(
             cics_doc=combined_data if successful_results else {},
             output_path=combined_path if successful_results else base_output_path,
-            validation_issues=combined_schema_result.errors if combined_schema_result else [],
-            overlap_issues=combined_overlap_result.overlaps if combined_overlap_result else [],
+            validation_issues=combined_schema_result.errors
+            if combined_schema_result
+            else [],
+            overlap_issues=combined_overlap_result.overlaps
+            if combined_overlap_result
+            else [],
             duration=duration,
             sheet_results=results,
             errors=[e["error"] for e in errors],
@@ -1091,23 +1219,41 @@ class Pipeline:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+
 def main():
     import argparse
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"
+    )
 
     parser = argparse.ArgumentParser(
         description="CINS Pipeline — extract commission data from emails, PDFs, and Excel files"
     )
     parser.add_argument("file", help="Path to input file (.eml, .pdf, .xlsx)")
-    parser.add_argument("--provider", default="gemini", choices=["gemini", "openai"],
-                        help="LLM provider (default: gemini)")
-    parser.add_argument("--model", default=None, help="Model name (auto-selected if omitted)")
-    parser.add_argument("--output-dir", default="outputs", help="Output directory (default: outputs/)")
+    parser.add_argument(
+        "--provider",
+        default="gemini",
+        choices=["gemini", "openai"],
+        help="LLM provider (default: gemini)",
+    )
+    parser.add_argument(
+        "--model", default=None, help="Model name (auto-selected if omitted)"
+    )
+    parser.add_argument(
+        "--output-dir", default="outputs", help="Output directory (default: outputs/)"
+    )
     parser.add_argument("--indexed-dir", default=None, help="Index cache directory")
-    parser.add_argument("--force-reindex", action="store_true",
-                        help="Re-extract even if index cache exists")
-    parser.add_argument("--excel-mode", default="sheet_by_sheet",
-                        choices=["sheet_by_sheet", "all_at_once"])
+    parser.add_argument(
+        "--force-reindex",
+        action="store_true",
+        help="Re-extract even if index cache exists",
+    )
+    parser.add_argument(
+        "--excel-mode",
+        default="sheet_by_sheet",
+        choices=["sheet_by_sheet", "all_at_once"],
+    )
     args = parser.parse_args()
 
     pipeline = Pipeline(

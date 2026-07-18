@@ -44,7 +44,11 @@ Each grid cell = one rule capturing ALL header dimensions simultaneously.
 ```json
 {
   "state_text": "Chhattisgarh",
-  "conditions": {"preferred": "Non Preferred", "fuel_type": "Non Petrol", "ncb": "NCB#"},
+  "conditions": {
+    "preferred": "Non Preferred",
+    "fuel_type": "Non Petrol",
+    "ncb": "NCB#"
+  },
   "commission_value": "0.23",
   "rule_text": "Chhattisgarh, Non Preferred, Non Petrol, NCB#"
 }
@@ -64,6 +68,7 @@ Never invent fields. Wrong: `ncb_condition_text`. Right: `conditions: {"ncb": "N
 ### `product_name`
 
 Motor products only — use exactly one of:
+
 - `"Private Car"` — car, PVT CAR, 4W, four-wheeler, taxi, pvt
 - `"Two Wheeler"` — TW, 2W, bike, scooter, motorcycle, moped
 - `"Commercial Vehicle"` — GCV, GCCV, PCV, PCCV, MSV, bus, tractor, misc D, CV, agri tractor
@@ -71,6 +76,8 @@ Motor products only — use exactly one of:
 Non-motor: use name as written.
 
 Vehicle makes (Hero, TVS, Honda, Bajaj, etc.) are NOT separate products — merge into one product and capture make as `conditions["vehicle_make"]`.
+
+When a single product publishes several rows that differ ONLY by make/model (e.g. one row for a named make+model list, another for "All Other Make/Models"), emit **one rule per row** and keep each row's make/model verbatim. Never merge or drop such rows — their rates differ, and downstream expects a distinct deal for each. Do NOT copy a named make/model list onto an "All Other Make/Models" row.
 
 ### `coverage_type_text`
 
@@ -81,6 +88,7 @@ Extract from table headers, section names, column labels. Standard values: `"com
 - `"SAOD Grid"` → `"saod"`
 
 Some insurers use short codes for policy type as column headers — map them:
+
 - `"ACT"` → `"third party"` (act-only / TP)
 - `"PACK"` → `"comprehensive"` (package / comprehensive)
 - `"SOD"` → `"saod"` (standalone OD)
@@ -153,6 +161,24 @@ Populate when section or product name explicitly identifies a body/usage sub-cla
 
 Only populate if explicitly stated or unambiguously implied. Never use for engine CC ranges.
 
+### `conditions["seating_capacity"]`
+
+Use for passenger seating-capacity bands on passenger-carrying commercial grids (PCV / bus). The band is often encoded in the section/PROD token rather than a per-row column — extract it from there. Copy a label the transformer can parse (`"UPTO N"`, `"ABOVE N"`, `"N-M"`).
+
+- `"UPTO 5 seater"` → `conditions["seating_capacity"] = "UPTO 5"`
+- `"6 to 12 seater"` → `conditions["seating_capacity"] = "6-12"`
+
+Always write an open upper band as **`"ABOVE N"`** (qualifier BEFORE the number) — never `"N AND ABOVE"`, which does not parse and falls back to a no-filter sentinel.
+
+### `conditions["vehicle_make_exclude"]` / `conditions["vehicle_model_exclude"]`
+
+Use when a row is defined by EXCLUSION — an explicit "except" / "excluding" / "other than" make or model list.
+
+- `"All makes except TATA, Maruti, Mahindra"` → `conditions["vehicle_make_exclude"] = "TATA, Maruti, Mahindra"`
+- `"TATA/Maruti/Mahindra, excluding Ace, Super Ace"` → `conditions["vehicle_make"] = "TATA, Maruti, Mahindra"`, `conditions["vehicle_model_exclude"] = "Ace, Super Ace"`
+
+The generic **"All Other Make/Models"** sentinel is NOT an explicit exclusion — keep it verbatim in `vehicle_make` / `vehicle_model` (the transformer fans it out into the correct include/exclude buckets downstream). Only use the `_exclude` keys when the source literally spells out an except/excluding list.
+
 ### `conditions["fuel_type"]` — Chola Private Car suffix
 
 When the provider is `Chola` AND `product_name` is `"Private Car"`, the
@@ -193,51 +219,77 @@ Schema per clause: `{clause_type, text, when?, effect?}`.
 Recognized `clause_type` values and their expected payload shape:
 
 **`applied_on_override`** — "For X policy pay-out is on Y Premium"
+
 ```json
 {
   "clause_type": "applied_on_override",
   "text": "Private Car Package pay-out is on OD Cover Premium",
-  "when": {"product_name": "Private Car", "coverage_type_text": "comprehensive"},
-  "effect": {"applied_on": "OD Cover Premium"}
+  "when": {
+    "product_name": "Private Car",
+    "coverage_type_text": "comprehensive"
+  },
+  "effect": { "applied_on": "OD Cover Premium" }
 }
 ```
 
 **`conditional_deduction`** — "if X then Y% of Z will be deducted"
+
 ```json
 {
   "clause_type": "conditional_deduction",
   "text": "if CPA not collected for individual name, 1.5% of OD Pay-out deducted",
-  "when": {"product_name": "Private Car", "coverage_type_text": ["comprehensive", "saod", "third party"], "school_bus_type": "on-individual-name", "cpa": "without-cpa"},
-  "effect": {"deduction": {"value": 1.5, "value_type": "percentage", "applied_on": "OD Pay-out"}}
+  "when": {
+    "product_name": "Private Car",
+    "coverage_type_text": ["comprehensive", "saod", "third party"],
+    "school_bus_type": "on-individual-name",
+    "cpa": "without-cpa"
+  },
+  "effect": {
+    "deduction": {
+      "value": 1.5,
+      "value_type": "percentage",
+      "applied_on": "OD Pay-out"
+    }
+  }
 }
 ```
 
 **`grid_alias`** — "X grid is same as Y grid"
+
 ```json
 {
   "clause_type": "grid_alias",
   "text": "Electric / LPG / CNG pay-out grid same as Petrol grid",
-  "when": {"product_name": "Private Car", "fuel_type": ["electric", "lpg", "cng"]},
-  "effect": {"inherit_from": {"fuel_type": "petrol"}}
+  "when": {
+    "product_name": "Private Car",
+    "fuel_type": ["electric", "lpg", "cng"]
+  },
+  "effect": { "inherit_from": { "fuel_type": "petrol" } }
 }
 ```
 
 **`mandatory_requirement`** — "X is mandatory / X must be collected"
+
 ```json
 {
   "clause_type": "mandatory_requirement",
   "text": "CPA must be collected for individual Name Mandatorily",
-  "when": {"product_name": "Private Car", "coverage_type_text": ["comprehensive", "saod", "third party"], "school_bus_type": "on-individual-name"},
-  "effect": {"required": ["cpa"]}
+  "when": {
+    "product_name": "Private Car",
+    "coverage_type_text": ["comprehensive", "saod", "third party"],
+    "school_bus_type": "on-individual-name"
+  },
+  "effect": { "required": ["cpa"] }
 }
 ```
 
 **`minimum_payout`** — "minimum payout of Rs. X"
+
 ```json
 {
   "clause_type": "minimum_payout",
   "text": "minimum payout Rs. 100",
-  "effect": {"minimum_payout": {"value": 100, "currency": "INR"}}
+  "effect": { "minimum_payout": { "value": 100, "currency": "INR" } }
 }
 ```
 

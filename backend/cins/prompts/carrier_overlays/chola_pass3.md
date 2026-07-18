@@ -163,10 +163,26 @@ as PROPER positional data rows (not merged into the header). Parse them with the
 (`parse_gvw_range("1_3W_AUTO")` is empty, so keep the residual as `vehicle_sub_class`).
 
 All heavier GCCV sub-classes (`2_UPTO_3.5T`, `3_3.5T_TO_7.5T`, `4_7.5T_TO_12T`, … through
-`10_ABOVE_47T`, and `2_4W_LT_1500CC` / `3_4W_GT_1500CC`) are **4-Wheeler-and-Above** weight
-bands — parse exactly as today (`parse_gvw_range` on the sub-class label → `conditions["gvw"]`,
+`10_ABOVE_47T`) are **4-Wheeler-and-Above** weight bands — parse exactly as today
+(`parse_gvw_range` on the sub-class label → `conditions["gvw"]`,
 `number_of_wheels = "4W & Above"`). `2_UPTO_3.5T` is a genuine 4-wheel light LCV band, NOT a
 3-wheeler.
+
+### Chola — PCCV < 6 (passenger taxis under 6 seats)
+
+The `PCCV < 6` table splits taxis by seating and engine CC. Every row here is a **taxi** with
+seating band **UPTO 5** (`conditions["seating_capacity"] = "UPTO 5"`,
+`conditions["vehicle_sub_class"] = "taxi"`, `product_type = "PCV"`).
+
+- `1_3W_AUTO` / `1_3W_AUTO[Electric]` — passenger 3-wheeler auto. Set
+  `conditions["number_of_wheels"] = "3W"`, seating `"UPTO 5"`. Do NOT set `conditions["gvw"]`.
+  Handle `[Electric]` exactly like the GVW `[Electric]` siblings (strip → `fuel_type = "Electric"`).
+- `2_4W_LT_1500CC` / `3_4W_GT_1500CC` — 4-wheel taxis split by engine CC at 1500. These are
+  **CC bands, NOT GVW bands**: set `conditions["cc"] = parse_cc_range(label)`
+  (`2_4W_LT_1500CC` → `"0-1500"`, `3_4W_GT_1500CC` → `">1500"`) and
+  `conditions["number_of_wheels"] = "4W & Above"`, seating `"UPTO 5"`. Do **NOT** call
+  `parse_gvw_range` and do **NOT** set `conditions["gvw"]` on these rows. Positional
+  `[Electric]` siblings (`2_4W_LT_1500CC[Electric]`) strip-then-parse like the GVW bands.
 
 ### Chola — Commercial Vehicle positional `[Electric]` fuel rows
 
@@ -216,16 +232,46 @@ Each is its own data row, so the normal per-row loop already emits two rules —
 `vehicle_make`/`vehicle_model` are attached (else the two collapse to indistinguishable
 duplicates with conflicting rates).
 
+**Never copy the `TATA/Maruti/Mahindra` make/model list onto the `All Other Make/Models` row.**
+Keep the sentinel row's make/model verbatim as `All Other Make/Models` — the transformer fans
+it out into the correct include/exclude buckets (TMM-excluding-models, and all-other-makes)
+downstream. Copying the named list onto the sentinel makes the two rows collapse into one and
+loses a deal (the historical export bug).
+
 ### Chola — Commercial Vehicle segment → `product_type` (SubProduct)
 
 Each commercial table names the vehicle **segment** in its PROD column / table title. Set
-`product_type` per row so the transformer splits Commercial Vehicle into its four
-sub-products; keep `product_name = "Commercial Vehicle"` for all of them:
+`product_type` per row so the transformer splits Commercial Vehicle into its sub-products;
+keep `product_name = "Commercial Vehicle"` for all of them:
 
-- `GCCV` table  → `product_type = "GCV"`
-- `PCCV < 6` table → `product_type = "PCV"`
-- `PCCV > 6` table → `product_type = "Buses"`
-- `MSV` table → `product_type = "MISC-D"`
+- `GCCV` table → `product_type = "GCV"`
+- `PCCV < 6` table → `product_type = "PCV"` (see the PCCV < 6 subsection above)
+- `MSV` table → `product_type = "MISC-D"` (see the MSV subsection below)
 
-Do NOT fold `PCCV > 6` (school-bus / staff-bus / big-taxi rows) into PCV — buses are their
-own sub-product.
+The `PCCV > 6` table is **body-dependent** — it is NOT wholesale Buses. Route each row by its
+body, all with seating band **ABOVE 6** (`conditions["seating_capacity"] = "ABOVE 6"` — write
+it exactly like that, qualifier before the number):
+
+- `1_SCHOOL_BUS` → `product_type = "Buses"`, `conditions["vehicle_sub_class"] = "school bus"`
+- `2_STAFF_BUS` → `product_type = "Buses"`, `conditions["vehicle_sub_class"] = "staff bus"`
+- `3_BIG_TAXIS` → `product_type = "PCV"`, `conditions["vehicle_sub_class"] = "taxi"`
+- `4_MAXI_CAB` → `product_type = "PCV"`, `conditions["vehicle_sub_class"] = "maxi cab"`
+
+**DO fold big-taxi / maxi-cab rows into PCV** (they are taxis, not buses). Only the school-bus
+and staff-bus rows are Buses. This corrects the earlier blanket "PCCV > 6 → Buses" mapping.
+
+### Chola — MSV (misc-D) rows
+
+The `MSV` table publishes one distinct product row per body — emit **one rule per row**, all
+`product_type = "MISC-D"`, `product_name = "Commercial Vehicle"`. Their identity lives in
+`conditions["vehicle_sub_class"]` (+ `business_type`), so they survive as separate deals:
+
+- `1_TRAC[RENEWAL]` → `conditions["vehicle_sub_class"] = "tractor"`, `customer_type_text = "renewal"`.
+  Strip `[RENEWAL]` from the label like `[Electric]` before sub-class extraction.
+- `2_EXCAVATOR` → the MODEL cell enumerates several bodies (Loader, Excavators/Earth Movers,
+  Crane, Bulldozers/Bullgraders, Road Rollers, Fork Lift Trucks). Put that enumeration into
+  `conditions["vehicle_sub_class"]` (a list) — NOT `vehicle_model`.
+- `3_HARVESTOR` → `conditions["vehicle_sub_class"] = "harvester"`.
+- `4_OTHERS` → emit a distinct rule with `conditions["vehicle_sub_class"] = "others"` and the
+  row's (empty / blank) rates. Do **NOT** skip this row — it is an explicit zero-payout matching
+  row so the segment is never silently dropped. Do NOT set `deal_type`.

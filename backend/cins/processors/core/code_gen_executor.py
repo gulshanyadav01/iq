@@ -161,6 +161,29 @@ def parse_cc_range(header):
                 return ""
         i += 1
     h = h.replace("CC", " ").strip()
+    # Chola PCCV<6 CC-band sub-class slugs carry a leading ordinal and a wheel
+    # token before the CC number ("2_4W_LT_1500CC", "3_4W_GT_1500CC"). Strip
+    # both ONLY on the underscore-slug form so ordinary CC ranges ("150-350")
+    # are left untouched, then honour the LT / GT qualifier as an explicit
+    # lower-/upper-open band. Without this the indiscriminate digit extraction
+    # below folds the ordinal/wheel digits into the range (e.g. "2-4" garbage).
+    if "_" in h:
+        slug_toks = [t for t in h.split("_") if t.strip()]
+        if slug_toks and slug_toks[0].strip().isdigit():
+            slug_toks = slug_toks[1:]
+        slug_toks = [t for t in slug_toks if t.strip().upper() not in ("3W", "4W")]
+        upper_toks = [t.strip().upper() for t in slug_toks]
+        if "LT" in upper_toks:
+            for t in slug_toks:
+                d = "".join(c for c in t if c.isdigit() or c == ".")
+                if d:
+                    return "0-" + d
+        if "GT" in upper_toks:
+            for t in slug_toks:
+                d = "".join(c for c in t if c.isdigit() or c == ".")
+                if d:
+                    return ">" + d
+        h = " ".join(slug_toks)
     for prefix in (">", ">=", "ABOVE", "GREATER THAN", "MORE THAN"):
         if h.startswith(prefix):
             rest = h[len(prefix):].strip().split()[0] if h[len(prefix):].strip() else ""
@@ -436,7 +459,7 @@ def extract_rto_entries(table_name, header, data_rows, applies_to_hint):
 # Add a new regex + clause builder here; keep the schema stable.
 # ---------------------------------------------------------------------------
 
-import re as _re_clause
+import re as _re_clause  # noqa: E402
 
 _RE_APPLIED_ON_PACKAGE = _re_clause.compile(
     r"private\s*car\s*package.*?pay-?out.*?on\s+OD\s*Cover\s*Premium",
@@ -485,20 +508,30 @@ def detect_qualifying_clauses(notes_text, provider=""):
     clauses = []
 
     if _RE_APPLIED_ON_PACKAGE.search(text):
-        clauses.append({
-            "clause_type": "applied_on_override",
-            "text": "Private Car Package pay-out is on OD Cover Premium",
-            "when": {"product_name": "Private Car", "coverage_type_text": "comprehensive"},
-            "effect": {"applied_on": "OD Cover Premium"},
-        })
+        clauses.append(
+            {
+                "clause_type": "applied_on_override",
+                "text": "Private Car Package pay-out is on OD Cover Premium",
+                "when": {
+                    "product_name": "Private Car",
+                    "coverage_type_text": "comprehensive",
+                },
+                "effect": {"applied_on": "OD Cover Premium"},
+            }
+        )
 
     if _RE_APPLIED_ON_LIABILITY.search(text):
-        clauses.append({
-            "clause_type": "applied_on_override",
-            "text": "Private Car Liability pay-out is on TP/PA Premium",
-            "when": {"product_name": "Private Car", "coverage_type_text": "third party"},
-            "effect": {"applied_on": "TP/PA Premium"},
-        })
+        clauses.append(
+            {
+                "clause_type": "applied_on_override",
+                "text": "Private Car Liability pay-out is on TP/PA Premium",
+                "when": {
+                    "product_name": "Private Car",
+                    "coverage_type_text": "third party",
+                },
+                "effect": {"applied_on": "TP/PA Premium"},
+            }
+        )
 
     m = _RE_CPA_DEDUCTION.search(text)
     if m:
@@ -513,69 +546,110 @@ def detect_qualifying_clauses(notes_text, provider=""):
             # regardless, but carrying the right basis keeps the clause honest
             # and lets it attach to CV (Net) rules, not just Private Car (OD).
             basis = "Net Payout" if m.group(2).upper() == "NET" else "OD Pay-out"
-            clauses.append({
-                "clause_type": "conditional_deduction",
-                "text": (
-                    "if CPA is not collected for individual name then "
-                    + pct_str
-                    + "% of " + basis + " will be deducted"
-                ),
-                "when": {
-                    "coverage_type_text": ["comprehensive", "saod", "third party"],
-                    "school_bus_type": "on-individual-name",
-                    "cpa": "without-cpa",
-                },
-                "effect": {
-                    "deduction": {
-                        "value": pct,
-                        "value_type": "percentage",
-                        "applied_on": basis,
-                    }
-                },
-            })
+            clauses.append(
+                {
+                    "clause_type": "conditional_deduction",
+                    "text": (
+                        "if CPA is not collected for individual name then "
+                        + pct_str
+                        + "% of "
+                        + basis
+                        + " will be deducted"
+                    ),
+                    "when": {
+                        "coverage_type_text": ["comprehensive", "saod", "third party"],
+                        "school_bus_type": "on-individual-name",
+                        "cpa": "without-cpa",
+                    },
+                    "effect": {
+                        "deduction": {
+                            "value": pct,
+                            "value_type": "percentage",
+                            "applied_on": basis,
+                        }
+                    },
+                }
+            )
 
     if _RE_CPA_MANDATORY.search(text):
-        clauses.append({
-            "clause_type": "mandatory_requirement",
-            "text": "CPA should be collected for individual Name Mandatorily",
-            "when": {
-                "product_name": "Private Car",
-                "coverage_type_text": ["comprehensive", "saod", "third party"],
-                "school_bus_type": "on-individual-name",
-            },
-            "effect": {"required": ["cpa"]},
-        })
+        clauses.append(
+            {
+                "clause_type": "mandatory_requirement",
+                "text": "CPA should be collected for individual Name Mandatorily",
+                "when": {
+                    "product_name": "Private Car",
+                    "coverage_type_text": ["comprehensive", "saod", "third party"],
+                    "school_bus_type": "on-individual-name",
+                },
+                "effect": {"required": ["cpa"]},
+            }
+        )
 
     if _RE_GRID_ALIAS_EV.search(text):
-        clauses.append({
-            "clause_type": "grid_alias",
-            "text": "Private Car Electric Vehicle or LPG/CNG pay-out grid is same as Private Car Petrol grid",
-            "when": {"product_name": "Private Car", "fuel_type": ["electric", "lpg", "cng"]},
-            "effect": {"inherit_from": {"fuel_type": "petrol"}},
-        })
+        clauses.append(
+            {
+                "clause_type": "grid_alias",
+                "text": "Private Car Electric Vehicle or LPG/CNG pay-out grid is same as Private Car Petrol grid",
+                "when": {
+                    "product_name": "Private Car",
+                    "fuel_type": ["electric", "lpg", "cng"],
+                },
+                "effect": {"inherit_from": {"fuel_type": "petrol"}},
+            }
+        )
 
     return clauses
 
 
 class CodeGenExecutionError(Exception):
     """Raised when the generated code fails to execute."""
+
     pass
 
 
 class CodeGenValidationError(Exception):
     """Raised when the generated code contains dangerous constructs."""
+
     pass
 
 
 # Builtins the generated code is allowed to use
 SAFE_BUILTIN_NAMES = {
-    "range", "len", "list", "dict", "str", "int", "float", "bool",
-    "tuple", "set", "enumerate", "zip", "map", "filter", "sorted",
-    "min", "max", "sum", "abs", "round", "any", "all", "isinstance", "print",
-    "True", "False", "None",
+    "range",
+    "len",
+    "list",
+    "dict",
+    "str",
+    "int",
+    "float",
+    "bool",
+    "tuple",
+    "set",
+    "enumerate",
+    "zip",
+    "map",
+    "filter",
+    "sorted",
+    "min",
+    "max",
+    "sum",
+    "abs",
+    "round",
+    "any",
+    "all",
+    "isinstance",
+    "print",
+    "True",
+    "False",
+    "None",
     # Exception classes needed for try/except in generated helpers (e.g. to_pct)
-    "ValueError", "TypeError", "IndexError", "KeyError", "AttributeError",
-    "StopIteration", "Exception",
+    "ValueError",
+    "TypeError",
+    "IndexError",
+    "KeyError",
+    "AttributeError",
+    "StopIteration",
+    "Exception",
 }
 
 # AST node types that are always forbidden
@@ -583,10 +657,26 @@ _FORBIDDEN_NODE_TYPES = (ast.Import, ast.ImportFrom)
 
 # Function/attribute names that are forbidden
 _FORBIDDEN_NAMES = {
-    "exec", "eval", "compile", "open", "__import__",
-    "getattr", "setattr", "delattr", "globals", "locals", "vars",
-    "breakpoint", "input", "memoryview", "bytearray", "bytes",
-    "classmethod", "staticmethod", "property", "super",
+    "exec",
+    "eval",
+    "compile",
+    "open",
+    "__import__",
+    "getattr",
+    "setattr",
+    "delattr",
+    "globals",
+    "locals",
+    "vars",
+    "breakpoint",
+    "input",
+    "memoryview",
+    "bytearray",
+    "bytes",
+    "classmethod",
+    "staticmethod",
+    "property",
+    "super",
 }
 
 
@@ -683,6 +773,7 @@ def execute_entry_code(
     """
     # Build restricted builtins
     import builtins as _builtins_module
+
     safe_builtins = {}
     for name in SAFE_BUILTIN_NAMES:
         if hasattr(_builtins_module, name):
@@ -734,9 +825,7 @@ def execute_entry_code(
 
     result = safe_globals.get("result")
     if result is None:
-        raise CodeGenExecutionError(
-            "Generated code did not set a 'result' variable"
-        )
+        raise CodeGenExecutionError("Generated code did not set a 'result' variable")
 
     if not isinstance(result, list):
         raise CodeGenExecutionError(
