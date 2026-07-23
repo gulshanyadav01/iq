@@ -214,6 +214,108 @@ class NonCholaPassthroughTests(TestCase):
         self.assertFalse(any(r.conditions.vehicle_model_exclude for r in rules))
 
 
+class ZeroAllOtherSynthesisTests(TestCase):
+    """When the grid grades only the named makes (explicit make/model row) and
+    leaves the 'All Other Make/Models' cell BLANK (no sentinel row), the
+    transformer synthesizes the missing all-other buckets at 0% so every graded
+    cell carries the full make/model distinction (client rule: blank = 0%)."""
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+        self.t._carrier_code = "Chola"
+
+    def _buckets(self, entries):
+        product = self.t._transform_product(
+            "Commercial Vehicle", entries, None, _raw(entries), segment="GCV"
+        )
+        return product.commission_rules
+
+    def test_explicit_row_without_sentinel_synthesizes_zero_buckets(self):
+        # Only the TMM make/model row — no 'All Other' sibling in the source.
+        entries = [_gccv_entry("TATA, Maruti, Mahindra", "Ace, Super Ace", "42.5%")]
+        rules = self._buckets(entries)
+
+        a = [
+            r
+            for r in rules
+            if r.conditions.vehicle_make
+            and r.conditions.vehicle_model
+            and not r.conditions.vehicle_model_exclude
+        ]
+        b = [
+            r
+            for r in rules
+            if r.conditions.vehicle_make and r.conditions.vehicle_model_exclude
+        ]
+        c = [r for r in rules if r.conditions.vehicle_make_exclude]
+        self.assertEqual(len(a), 1, rules)
+        self.assertEqual(len(b), 1, rules)
+        self.assertEqual(len(c), 1, rules)
+
+        # (a) keeps its real rate; the synthesized all-other buckets are 0%.
+        self.assertEqual(a[0].outcome.percentage_value, 42.5)
+        self.assertEqual(b[0].outcome.percentage_value, 0.0)
+        self.assertEqual(c[0].outcome.percentage_value, 0.0)
+
+        # Exclusion lists mirror the named makes/models.
+        self.assertEqual(
+            set(b[0].conditions.vehicle_make), {"TATA", "Maruti", "Mahindra"}
+        )
+        self.assertEqual(
+            set(b[0].conditions.vehicle_model_exclude), {"Ace", "Super Ace"}
+        )
+        self.assertEqual(
+            set(c[0].conditions.vehicle_make_exclude), {"TATA", "Maruti", "Mahindra"}
+        )
+        self.assertTrue(
+            any("0% synthesis" in w for w in self.t.warnings), self.t.warnings
+        )
+
+    def test_sentinel_present_no_zero_synthesis(self):
+        # A real sentinel supplies the all-other rate — buckets come from it at
+        # the sentinel rate, NOT synthesized at 0%.
+        entries = [
+            _gccv_entry("TATA, Maruti, Mahindra", "Ace", "42.5%"),
+            _gccv_entry("All Other Make/Models", "All Other Make/Models", "20%"),
+        ]
+        rules = self._buckets(entries)
+        c = [r for r in rules if r.conditions.vehicle_make_exclude]
+        self.assertEqual(len(c), 1, rules)
+        self.assertEqual(c[0].outcome.percentage_value, 20.0)
+        self.assertFalse(
+            any("0% synthesis" in w for w in self.t.warnings), self.t.warnings
+        )
+
+    def test_no_makemodel_row_no_synthesis(self):
+        # A plain rule with no make/model is not graded — nothing synthesized.
+        plain = RawCommissionEntry(
+            rule_text="Commercial Vehicle 3_3.5T_TO_7.5T",
+            commission_value="10%",
+            product_name="Commercial Vehicle",
+            product_type="GCV",
+            coverage_type_text="comprehensive",
+            conditions={"gvw": "3.5T TO 7.5T"},
+        )
+        rules = self._buckets([plain])
+        self.assertFalse(any(r.conditions.vehicle_make_exclude for r in rules))
+        self.assertFalse(any(r.conditions.vehicle_model_exclude for r in rules))
+
+    def test_non_chola_no_zero_synthesis(self):
+        t = RawToCICSTransformer()
+        t._carrier_code = "Digit"
+        entries = [_gccv_entry("TATA, Maruti, Mahindra", "Ace", "42.5%")]
+        product = t._transform_product(
+            "Commercial Vehicle",
+            entries,
+            None,
+            _raw(entries, provider="Digit"),
+            segment="GCV",
+        )
+        rules = product.commission_rules
+        self.assertFalse(any(r.conditions.vehicle_make_exclude for r in rules))
+        self.assertFalse(any(r.conditions.vehicle_model_exclude for r in rules))
+
+
 class SentinelRegexNegativeTests(TestCase):
     """Word-boundary anchored regex must NOT match legit makes ending in
     '…brothers' (would wrongly fan out real TW rows)."""

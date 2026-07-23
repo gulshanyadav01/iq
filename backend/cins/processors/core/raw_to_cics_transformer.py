@@ -15,7 +15,7 @@ import json
 import re
 import hashlib
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Set, Tuple, Any
 
 from cins.schema.carriers import CARRIER_FULL_NAMES, normalize_carrier
 from cins.schema.raw_extraction import (
@@ -1606,6 +1606,30 @@ class RawToCICSTransformer:
         # Vehicle make/model (free-text arrays)
         vehicle_make = self._parse_text_list(entry_conditions.get("vehicle_make"))
         vehicle_model = self._parse_text_list(entry_conditions.get("vehicle_model"))
+        # Chola CV body-row guard: the GCCV / MSV grid repeats the SUBCLASS body
+        # enumeration verbatim in BOTH the MAKE and MODEL columns — e.g. MSV
+        # "2_EXCAVATOR" publishes make == model == "Loader, Excavators/Earth
+        # Movers, Crane, Bulldozers/Bullgraders, Road Rollers, Fork Lift Trucks",
+        # and the heavier weight bands repeat the slug in both cells. Those
+        # tokens are vehicle sub-classes, not a real make/model split (the
+        # enumeration is already captured in vehicle_sub_class), and codegen
+        # faithfully copies them into make+model via the generic CV column rule
+        # (row[4]->make, row[5]->model). A rule whose make list is identical to
+        # its model list is never a genuine make x model grading — real makes
+        # and models are disjoint vocab — so drop both. Chola-gated to match the
+        # carrier-specific bifurcation guards below (_bifurcate_make_buckets).
+        # Exempt the "All Other Make/Models" sentinel (make == model by design):
+        # _bifurcate_make_buckets needs its make/model list intact to fan it out.
+        if (
+            self._carrier_code == "Chola"
+            and vehicle_make
+            and vehicle_make == vehicle_model
+            and not any(
+                self._SENTINEL_MAKE_MODEL_RE.search(str(m)) for m in vehicle_make
+            )
+        ):
+            vehicle_make = None
+            vehicle_model = None
         # Make/model EXCLUSION lists (rule matches when policy make/model is NOT
         # in the list). Populated by the overlay for explicit "except/excluding"
         # rows and synthesized by _bifurcate_make_buckets for the sentinel
@@ -2194,10 +2218,13 @@ class RawToCICSTransformer:
         make: Optional[List[str]],
         make_exclude: Optional[List[str]],
         model_exclude: Optional[List[str]],
+        outcome: Optional[CommissionOutcome] = None,
     ) -> CommissionRule:
-        """Clone a sentinel rule into one make/model exclusion bucket, sharing
-        its outcome/dates/priority. Make/model include+exclude fields are set
-        explicitly; the sentinel's own make/model text is cleared."""
+        """Clone a rule into one make/model exclusion bucket, sharing its
+        dates/priority. Make/model include+exclude fields are set explicitly;
+        the source rule's own make/model text is cleared. ``outcome`` defaults
+        to the source rule's outcome (sentinel fan-out); pass an explicit
+        outcome to override it (e.g. the synthesized 0% all-other buckets)."""
         if rule.conditions is not None:
             cond = rule.conditions.model_copy(deep=True)
         else:
@@ -2210,10 +2237,27 @@ class RawToCICSTransformer:
             rule_id=f"{rule.rule_id}{suffix}",
             priority=rule.priority,
             conditions=cond,
-            outcome=rule.outcome,
+            outcome=outcome if outcome is not None else rule.outcome,
             valid_from=rule.valid_from,
             valid_to=rule.valid_to,
             rule_description=rule.rule_description,
+        )
+
+    @staticmethod
+    def _zero_outcome(source: Optional[CommissionOutcome]) -> CommissionOutcome:
+        """Build a 0% percentage outcome for a synthesized all-other bucket,
+        keeping only the source's payout basis (``applied_on``). All
+        deduction-bearing fields are stripped — a zero-payout deal has nothing
+        to deduct from, and the CPA-not-collected footnote (carried in
+        ``qualifying_clauses`` / ``other_conditions``) would otherwise drive
+        ``materialize_cpa_split`` to compute a negative without-CPA payout
+        (0% − 1.5% = −1.5%, which fails schema validation). Leaving
+        ``qualifying_clauses``/``other_conditions``/``deductions`` unset keeps
+        the rule a single 0% deal (CPA-unconstrained = applies to both)."""
+        return CommissionOutcome(
+            commission_type="percentage",
+            percentage_value=0.0,
+            applied_on=source.applied_on if source is not None else None,
         )
 
     def _make_bucket_match_key(self, rule: CommissionRule) -> str:
@@ -2263,11 +2307,17 @@ class RawToCICSTransformer:
         # Index explicit make/model-bearing rules by collapse key (make/model
         # ignored) so each sentinel finds its sibling in O(1).
         explicit_by_key: Dict[str, List[CommissionRule]] = {}
+        # Match-keys that already carry an all-other exclusion bucket on input
+        # (e.g. a prior fan-out on a double transform) — so the 0% synthesis
+        # below stays idempotent and never re-fabricates existing buckets.
+        covered_keys: Set[str] = set()
         for r in rules:
-            if self._is_make_model_sentinel(r):
-                continue
             cond = r.conditions
             if cond is None:
+                continue
+            if cond.vehicle_make_exclude or cond.vehicle_model_exclude:
+                covered_keys.add(self._make_bucket_match_key(r))
+            if self._is_make_model_sentinel(r):
                 continue
             if not (cond.vehicle_make or cond.vehicle_model):
                 continue
@@ -2275,6 +2325,9 @@ class RawToCICSTransformer:
 
         result: List[CommissionRule] = []
         n_split = 0
+        # Match-keys whose all-other buckets came from a real source sentinel —
+        # so the 0% synthesis pass below does NOT also fabricate them.
+        fanned_keys: Set[str] = set()
         for r in rules:
             if not self._is_make_model_sentinel(r):
                 result.append(r)
@@ -2320,11 +2373,67 @@ class RawToCICSTransformer:
                     model_exclude=None,
                 )
             )
+            fanned_keys.add(self._make_bucket_match_key(r))
             n_split += 1
         if n_split:
             self.warnings.append(
                 f"Make-bucket fan-out: split {n_split} sentinel row(s) into "
                 f"make/model exclusion buckets"
+            )
+
+        # 0% synthesis (inverse of the sentinel path). An explicit make/model
+        # row with NO source sentinel means the grid graded only the named
+        # makes (e.g. TATA/Maruti/Mahindra) and left the "All Other
+        # Make/Models" cell BLANK. Per the client, a blank all-other rate is a
+        # 0% deal, so materialize the missing all-other buckets at 0% — every
+        # graded cell then carries the full make/model distinction. Structural
+        # gate (an explicit make/model row without an all-other sibling), so it
+        # only fires where grading exists and never fabricates rows for
+        # un-graded bands. Group per match-key so each cell synthesizes once.
+        n_synth = 0
+        for match_key, siblings in explicit_by_key.items():
+            if match_key in fanned_keys or match_key in covered_keys:
+                continue
+            makes = sorted(
+                {m for s in siblings for m in (s.conditions.vehicle_make or [])}
+            )
+            models = sorted(
+                {m for s in siblings for m in (s.conditions.vehicle_model or [])}
+            )
+            if not makes:
+                # Only a model list, no make to exclude — cannot derive the
+                # "all other makes" bucket; leave the cell as-is.
+                continue
+            src = siblings[0]
+            zero = self._zero_outcome(src.outcome)
+            # bucket (b): named makes, excluding the enumerated models, at 0%.
+            result.append(
+                self._clone_make_bucket(
+                    src,
+                    "_XMODEL0",
+                    make=makes,
+                    make_exclude=None,
+                    model_exclude=models or None,
+                    outcome=zero,
+                )
+            )
+            # bucket (c): all OTHER makes, at 0%.
+            result.append(
+                self._clone_make_bucket(
+                    src,
+                    "_XMAKE0",
+                    make=None,
+                    make_exclude=makes,
+                    model_exclude=None,
+                    outcome=zero,
+                )
+            )
+            n_synth += 1
+        if n_synth:
+            self.warnings.append(
+                f"Make-bucket 0% synthesis: added {n_synth} all-other 0% "
+                f"bucket pair(s) for make/model-graded cells with no source "
+                f"all-other rate"
             )
         return result
 

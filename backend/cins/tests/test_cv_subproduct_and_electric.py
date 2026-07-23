@@ -468,6 +468,50 @@ class MsvDistinctRulesTests(TestCase):
         self.assertIn("loader", cond.vehicle_sub_class)
         self.assertIn("crane", cond.vehicle_sub_class)
 
+    def test_excavator_body_enumeration_not_leaked_into_make_model(self):
+        # Source MSV "2_EXCAVATOR" repeats the body enumeration verbatim in the
+        # MAKE and MODEL columns; codegen copies it into make+model via the
+        # generic CV column rule. Bodies are sub-classes, not make/model — a
+        # make list identical to the model list must be dropped (Chola-gated).
+        bodies = (
+            "Loader, Excavators/Earth Movers, Crane, "
+            "Bulldozers/Bullgraders, Road Rollers, Fork Lift Trucks"
+        )
+        e = RawCommissionEntry(
+            rule_text="MSV 2_EXCAVATOR",
+            commission_value="12%",
+            product_name="Commercial Vehicle",
+            conditions={
+                "vehicle_sub_class": bodies,
+                "vehicle_make": bodies,
+                "vehicle_model": bodies,
+            },
+        )
+        self.t._carrier_code = "Chola"
+        cond = self.t._transform_conditions(e, None, _raw([e]))
+        self.assertIsNone(cond.vehicle_make)
+        self.assertIsNone(cond.vehicle_model)
+        # Bodies still survive as the sub-class dimension.
+        self.assertIn("excavators", cond.vehicle_sub_class)
+        self.assertIn("crane", cond.vehicle_sub_class)
+
+    def test_real_make_model_split_preserved(self):
+        # A genuine make x model grading (make != model, e.g. GCCV 2_UPTO_3.5T
+        # "TATA/Maruti/Mahindra" + model list) must NOT be dropped.
+        e = RawCommissionEntry(
+            rule_text="GCV 2_UPTO_3.5T AP/TS ACT",
+            commission_value="42%",
+            product_name="Commercial Vehicle",
+            conditions={
+                "vehicle_make": "TATA/ Maruti/ Mahindra",
+                "vehicle_model": "Ace, Super Ace, Yodha",
+            },
+        )
+        self.t._carrier_code = "Chola"
+        cond = self.t._transform_conditions(e, None, _raw([e]))
+        self.assertEqual(cond.vehicle_make, ["TATA/ Maruti/ Mahindra"])
+        self.assertEqual(cond.vehicle_model, ["Ace", "Super Ace", "Yodha"])
+
 
 class StaleGccvLeakGuardTests(TestCase):
     """Chola merged-3W-header leak: GCCV goods rows copied into PCCV/MSV headers

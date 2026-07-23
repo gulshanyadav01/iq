@@ -14,8 +14,13 @@ import os
 import shutil
 import tempfile
 
+from typing import TYPE_CHECKING
+
 from celery import chain, shared_task
 from celery.exceptions import Ignore
+
+if TYPE_CHECKING:
+    from commission_intake.models import IndexedContent
 
 from cins.processors.llm_services.langfuse_client import (
     set_trace_context,
@@ -86,6 +91,7 @@ def index_document(document_id: str):
         index_dir = tempfile.mkdtemp()
 
         try:
+
             def _on_progress(step: str, detail: str = "") -> None:
                 """Persist each indexing step to the document for real-time polling."""
                 try:
@@ -95,7 +101,9 @@ def index_document(document_id: str):
                 except Exception:
                     pass
 
-            indexer = ContentIndexer(indexed_dir=index_dir, llm_provider=doc.llm_provider)
+            indexer = ContentIndexer(
+                indexed_dir=index_dir, llm_provider=doc.llm_provider
+            )
             indexed_doc = indexer.index_document(
                 file_path=tmp_path,
                 provider=doc.provider or "unknown",
@@ -132,9 +140,7 @@ def index_document(document_id: str):
                 if attachments_dir.exists():
                     for att_file in attachments_dir.iterdir():
                         if att_file.is_file():
-                            storage_key = (
-                                f"commission_intake/attachments/{document_id}/{att_file.name}"
-                            )
+                            storage_key = f"commission_intake/attachments/{document_id}/{att_file.name}"
                             with open(att_file, "rb") as f:
                                 default_storage.save(storage_key, f)
                             attachment_keys.append(storage_key)
@@ -148,7 +154,9 @@ def index_document(document_id: str):
                     sheet_metadata = {
                         "classifications": indexed_doc.get_sheet_classifications(),
                         "table_splits": indexed_doc.get_table_splits(),
-                        "source_metadata": indexed_doc.metadata.get("source_metadata", {}),
+                        "source_metadata": indexed_doc.metadata.get(
+                            "source_metadata", {}
+                        ),
                     }
 
             if source_type == "excel":
@@ -291,7 +299,9 @@ def run_extraction(document_id: str):
 
             pipeline._on_sheet_complete_callback = _on_sheet_done
 
-            result = pipeline.process_from_indexed(indexed_doc, output_path=fake_dir / "cics.json")
+            result = pipeline.process_from_indexed(
+                indexed_doc, output_path=fake_dir / "cics.json"
+            )
 
             # Final upsert for any entries not yet persisted by the callback.
             _save_extraction_passes(doc, result)
@@ -314,7 +324,9 @@ def run_extraction(document_id: str):
             # with spaces -> underscores per CICS schema regex) and reverse the
             # underscore conversion so the DB matches the user-facing list.
             # Skip UNKNOWN_PROVIDER so the column isn't polluted with sentinel.
-            provider_id = (result.cics_doc or {}).get("provider", {}).get("provider_id", "")
+            provider_id = (
+                (result.cics_doc or {}).get("provider", {}).get("provider_id", "")
+            )
             if provider_id and provider_id != "UNKNOWN_PROVIDER":
                 doc.provider = provider_id.replace("_", " ")
                 doc.save(update_fields=["provider", "updated_at"])
@@ -440,7 +452,11 @@ def run_validation(document_id: str):
     import json
     import tempfile
 
-    from commission_intake.models import CommissionDocument, CICSResult, ValidationResult
+    from commission_intake.models import (
+        CommissionDocument,
+        CICSResult,
+        ValidationResult,
+    )
 
     try:
         doc = CommissionDocument.objects.get(id=document_id)
@@ -464,7 +480,9 @@ def run_validation(document_id: str):
 
         def _issue_to_dict(issue):
             return {
-                "severity": issue.severity.value if hasattr(issue.severity, "value") else str(issue.severity),
+                "severity": issue.severity.value
+                if hasattr(issue.severity, "value")
+                else str(issue.severity),
                 "category": getattr(issue, "category", ""),
                 "field_path": getattr(issue, "field_path", ""),
                 "message": getattr(issue, "message", str(issue)),
@@ -473,16 +491,22 @@ def run_validation(document_id: str):
 
         def _overlap_to_dict(overlap):
             return {
-                "severity": overlap.severity.value if hasattr(overlap.severity, "value") else str(overlap.severity),
+                "severity": overlap.severity.value
+                if hasattr(overlap.severity, "value")
+                else str(overlap.severity),
                 "overlap_type": getattr(overlap, "overlap_type", ""),
                 "product_code": getattr(overlap, "product_code", ""),
                 "rule1_id": getattr(overlap, "rule1_id", ""),
                 "rule2_id": getattr(overlap, "rule2_id", ""),
                 "description": getattr(overlap, "description", ""),
-                "overlapping_dimensions": getattr(overlap, "overlapping_dimensions", []),
+                "overlapping_dimensions": getattr(
+                    overlap, "overlapping_dimensions", []
+                ),
             }
 
-        schema_issues = [_issue_to_dict(i) for i in (schema_result.errors + schema_result.warnings)]
+        schema_issues = [
+            _issue_to_dict(i) for i in (schema_result.errors + schema_result.warnings)
+        ]
         overlap_issues = [_overlap_to_dict(o) for o in overlap_result.overlaps]
 
         ValidationResult.objects.update_or_create(
@@ -491,7 +515,8 @@ def run_validation(document_id: str):
                 "schema_issues": schema_issues,
                 "overlap_issues": overlap_issues,
                 "is_valid": not (schema_result.has_critical or schema_result.has_high),
-                "has_critical": schema_result.has_critical or overlap_result.has_critical,
+                "has_critical": schema_result.has_critical
+                or overlap_result.has_critical,
                 "has_high": schema_result.has_high or overlap_result.has_high,
             },
         )
@@ -593,19 +618,22 @@ def enqueue_processing_chain(document_id: str, mode: str = "full") -> None:
 
 
 @shared_task(queue=COMMISSION_INTAKE_QUEUE)
-def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attachment_name: str):
+def rerun_single_pass(
+    document_id: str, pass_number: int, sheet_name: str, attachment_name: str
+):
     """
     Re-run a single extraction pass (1, 2, or 3) for a specific sheet.
     Reads indexed content from DB, rebuilds the same per-pass content strings
     that the pipeline builds in _process_sheets, and updates the ExtractionPass row.
     Does NOT rerun transform or validation.
     """
-    import shutil
-    import tempfile
     import time as _time
-    from pathlib import Path
 
-    from commission_intake.models import CommissionDocument, IndexedContent, ExtractionPass
+    from commission_intake.models import (
+        CommissionDocument,
+        IndexedContent,
+        ExtractionPass,
+    )
     from cins.processors.llm_services.factory import get_llm_service
     from cins.processors.core.llm_extract import (
         _extract_pass1_metadata,
@@ -618,9 +646,16 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
     try:
         set_trace_context(
             session_id=document_id,
-            trace_id=make_pass_trace_id(document_id, pass_number, sheet_name, attachment_name),
+            trace_id=make_pass_trace_id(
+                document_id, pass_number, sheet_name, attachment_name
+            ),
             trace_name=f"rerun-pass-{pass_number}",
-            metadata={"document_id": document_id, "pass": pass_number, "sheet": sheet_name, "attachment": attachment_name},
+            metadata={
+                "document_id": document_id,
+                "pass": pass_number,
+                "sheet": sheet_name,
+                "attachment": attachment_name,
+            },
         )
         doc = CommissionDocument.objects.get(id=document_id)
         indexed = IndexedContent.objects.get(document=doc)
@@ -640,12 +675,15 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
         classifications = sheet_metadata.get("classifications", {})
 
         master_sheets = [
-            s for s, meta in classifications.items()
+            s
+            for s, meta in classifications.items()
             if (meta.get("classification") or meta.get("sheet_type")) == "master_data"
         ]
         commission_sheets = [
-            s for s, meta in classifications.items()
-            if (meta.get("classification") or meta.get("sheet_type")) == "commission_data"
+            s
+            for s, meta in classifications.items()
+            if (meta.get("classification") or meta.get("sheet_type"))
+            == "commission_data"
         ]
 
         master_context = ""
@@ -657,15 +695,20 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
         sheet_content = sheet_contents.get(sheet_name, "")
         email_body = indexed.primary_content if indexed.source_type == "email" else ""
 
-        pass1_prompt, pass2_prompt, pass3_prompt, email_is_primary_commission = build_pass_contents(
-            sheet_name=sheet_name,
-            sheet_content=sheet_content,
-            master_context=master_context,
-            email_body=email_body,
-            commission_sheets=commission_sheets,
+        pass1_prompt, pass2_prompt, pass3_prompt, email_is_primary_commission = (
+            build_pass_contents(
+                sheet_name=sheet_name,
+                sheet_content=sheet_content,
+                master_context=master_context,
+                email_body=email_body,
+                commission_sheets=commission_sheets,
+            )
         )
 
-        service = get_llm_service(provider=doc.llm_provider, **({"model": doc.llm_model} if doc.llm_model else {}))
+        service = get_llm_service(
+            provider=doc.llm_provider,
+            **({"model": doc.llm_model} if doc.llm_model else {}),
+        )
 
         start = _time.monotonic()
         p2_codegen_code = ""
@@ -678,10 +721,16 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
             result_dict = result_obj.model_dump()
         elif pass_number == 2:
             pass1_row = ExtractionPass.objects.filter(
-                document=doc, pass_number=1,
-                sheet_name=sheet_name, attachment_name=attachment_name,
+                document=doc,
+                pass_number=1,
+                sheet_name=sheet_name,
+                attachment_name=attachment_name,
             ).first()
-            metadata_obj = MetadataExtraction.model_validate(pass1_row.result) if pass1_row and pass1_row.result else MetadataExtraction()
+            metadata_obj = (
+                MetadataExtraction.model_validate(pass1_row.result)
+                if pass1_row and pass1_row.result
+                else MetadataExtraction()
+            )
             # Pass 2 always runs via codegen (matches main pipeline; the JSON
             # path was removed for perf reasons — see plan A1).
             result_obj, p2_codegen_code, _user_prompt = _extract_pass2_via_codegen(
@@ -691,22 +740,37 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
             result_dict = result_obj.model_dump()
         else:  # pass 3
             pass1_row = ExtractionPass.objects.filter(
-                document=doc, pass_number=1,
-                sheet_name=sheet_name, attachment_name=attachment_name,
+                document=doc,
+                pass_number=1,
+                sheet_name=sheet_name,
+                attachment_name=attachment_name,
             ).first()
             pass2_row = ExtractionPass.objects.filter(
-                document=doc, pass_number=2,
-                sheet_name=sheet_name, attachment_name=attachment_name,
+                document=doc,
+                pass_number=2,
+                sheet_name=sheet_name,
+                attachment_name=attachment_name,
             ).first()
-            metadata_obj = MetadataExtraction.model_validate(pass1_row.result) if pass1_row and pass1_row.result else MetadataExtraction()
-            master_data_obj = MasterDataExtraction.model_validate(pass2_row.result) if pass2_row and pass2_row.result else MasterDataExtraction()
+            metadata_obj = (
+                MetadataExtraction.model_validate(pass1_row.result)
+                if pass1_row and pass1_row.result
+                else MetadataExtraction()
+            )
+            master_data_obj = (
+                MasterDataExtraction.model_validate(pass2_row.result)
+                if pass2_row and pass2_row.result
+                else MasterDataExtraction()
+            )
 
             # email_is_primary_commission: email body already IS pass3_content — no prepend needed.
             # Otherwise fall back to the has_commission_data flag (email body mixed with sheet content).
-            if not email_is_primary_commission and metadata_obj.has_commission_data and email_body:
+            if (
+                not email_is_primary_commission
+                and metadata_obj.has_commission_data
+                and email_body
+            ):
                 pass3_prompt = (
-                    f"## Email Commission Data\n\n{email_body}"
-                    f"\n\n---\n\n{pass3_prompt}"
+                    f"## Email Commission Data\n\n{email_body}\n\n---\n\n{pass3_prompt}"
                 )
 
             # Pass 3 always runs via codegen (matches the main pipeline).
@@ -727,8 +791,16 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
                 "status": ExtractionPass.Status.COMPLETED,
                 "result": result_dict,
                 "llm_model_used": service.model,
-                "extraction_method": p3_extraction_method if pass_number == 3 else p2_extraction_method if pass_number == 2 else "llm",
-                "codegen_code": p3_codegen_code if pass_number == 3 else p2_codegen_code if pass_number == 2 else "",
+                "extraction_method": p3_extraction_method
+                if pass_number == 3
+                else p2_extraction_method
+                if pass_number == 2
+                else "llm",
+                "codegen_code": p3_codegen_code
+                if pass_number == 3
+                else p2_codegen_code
+                if pass_number == 2
+                else "",
                 "duration_seconds": round(duration, 2),
                 "error": "",
             },
@@ -737,7 +809,9 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
         return document_id
 
     except Exception as exc:
-        logger.exception(f"Rerun pass {pass_number} failed for document {document_id}: {exc}")
+        logger.exception(
+            f"Rerun pass {pass_number} failed for document {document_id}: {exc}"
+        )
         if doc:
             ExtractionPass.objects.filter(
                 document=doc,
@@ -763,28 +837,40 @@ def rerun_transform(document_id: str):
     the RawToCICSTransformer.  Does NOT re-run any LLM passes.
     Followed by validation automatically.
     """
-    import shutil
-    import tempfile
 
-    from commission_intake.models import CommissionDocument, ExtractionPass, CICSResult, ValidationResult
-    from cins.schema.extraction_passes import MetadataExtraction, MasterDataExtraction, RulesExtraction
+    from commission_intake.models import (
+        CommissionDocument,
+        ExtractionPass,
+        CICSResult,
+        ValidationResult,
+    )
+    from cins.schema.extraction_passes import (
+        MetadataExtraction,
+        MasterDataExtraction,
+        RulesExtraction,
+    )
     from cins.schema.raw_extraction import RawExtraction
     from cins.processors.core.raw_to_cics_transformer import RawToCICSTransformer
+    from cins.processors.core.cpa_split import materialize_cpa_split
 
     try:
         doc = CommissionDocument.objects.get(id=document_id)
 
         # Gather all completed pass results grouped by sheet
         passes = list(
-            ExtractionPass.objects.filter(document=doc, status=ExtractionPass.Status.COMPLETED)
-            .order_by("sheet_name", "attachment_name", "pass_number")
+            ExtractionPass.objects.filter(
+                document=doc, status=ExtractionPass.Status.COMPLETED
+            ).order_by("sheet_name", "attachment_name", "pass_number")
         )
 
         if not passes:
-            raise ValueError("No completed extraction passes found — run extraction first.")
+            raise ValueError(
+                "No completed extraction passes found — run extraction first."
+            )
 
         # Group by (sheet_name, attachment_name)
         from collections import defaultdict
+
         sheet_passes: dict = defaultdict(dict)
         for p in passes:
             key = (p.sheet_name, p.attachment_name)
@@ -800,15 +886,26 @@ def rerun_transform(document_id: str):
             if merged_raw is None:
                 merged_raw = raw
             else:
-                merged_raw.commission_entries = (merged_raw.commission_entries or []) + (raw.commission_entries or [])
-                merged_raw.master_data = (merged_raw.master_data or []) + (raw.master_data or [])
+                merged_raw.commission_entries = (
+                    merged_raw.commission_entries or []
+                ) + (raw.commission_entries or [])
+                merged_raw.master_data = (merged_raw.master_data or []) + (
+                    raw.master_data or []
+                )
 
         if merged_raw is None:
             raise ValueError("Failed to build RawExtraction from passes.")
 
         transformer = RawToCICSTransformer()
-        cics_doc, transform_warnings, transform_errors = transformer.transform(merged_raw)
+        cics_doc, transform_warnings, transform_errors = transformer.transform(
+            merged_raw
+        )
         cics_json = cics_doc.model_dump(exclude_none=False)
+        # Materialize CPA-deduction rules into With/Without-CPA variants — the
+        # full pipeline (pipeline.py) applies this immediately after transform,
+        # so re-transform must too or the rebuilt document silently loses the
+        # CPA dimension (every rule collapses to cpa=None, halving CV counts).
+        cics_json = materialize_cpa_split(cics_json)
 
         CICSResult.objects.update_or_create(
             document=doc,
