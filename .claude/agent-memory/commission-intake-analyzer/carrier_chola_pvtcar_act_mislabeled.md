@@ -57,6 +57,36 @@ guard is the real fix; Check B is post-split defense (CLI/manual).
 base varies run-to-run (codegen non-determinism: saw 52 then 62 non-blank PACK cells) — do not
 assert an exact comp count. saod 222.
 
+## Third bug: ACT/PACK prompt bled into Two Wheeler → fabricated TP (fixed 2026-07-23)
+
+After the PC ACT/PACK prompt section landed, re-run (CICSResult.75e39e6a) total jumped
+3778→5309. Root cause: the generated **Two Wheeler** pass-3 parser emitted every flattened
+make×band×state cell TWICE — once `comprehensive`, once `third party` — with the IDENTICAL
+Package value (522/522 raw entries mirrored a comprehensive entry, dims+value). TW grid is a
+single-value flattened grid (`<Make> > <band> > <value>`), no ACT/PACK column pair, so the PC
+per-column ACT/PACK guidance bled and fabricated TP dupes (a 45% TW Liability where the real
+ACT-row rate is ~0.3%). Prev export had 0 TW TP.
+
+Fix (deterministic, `cpa_split.drop_mirrored_third_party`, called at top of
+`materialize_cpa_split`): per product, if EVERY third-party rule exactly mirrors a comprehensive
+rule (all dims + payout value), drop them all — the product has no genuine TP column. Discriminator
+matters: a real TP column (PC/CV ACT) has SOME non-mirroring rows (ACT≠PACK value), so those are
+kept. An exact per-rule value guard was too aggressive (dropped 10 legit PC + CV TP where ACT
+coincidentally equals PACK) — must gate on ALL-mirror, not per-rule. Also tightened chola_pass3.md:
+ACT/PACK per-column rule is PC-Package-paired-columns ONLY; never emit two coverages from one
+single-value cell. Verified on stored doc: TW TP 472→0, PC 24 / CV TP all preserved, total 5309→4837.
+
+**Then captured the REAL TW ACT rates** (the TW grid genuinely has per-state `ACT` rows —
+`| <state> | ACT | ...` — Liability rates aligned to the same make×band columns, e.g. AP OEM
+SCOOTER 30%, non-OEM 27.5%, KA 7.5%, MH 25%, mostly SCOOTER band, 156 non-zero source cells).
+Added a prescriptive "Two Wheeler ACT rows" section to chola_pass3.md: parse the ACT row on the
+same make×band column map, emit `coverage_type_text="ACT"` (→third-party) with the ACT row's OWN
+value, no NOP tier, no CPA clause. The mirror-guard is compatible: real ACT values differ from
+Package (30% vs 42.5%), so not all-mirror → kept; fabricated Package-dupes still dropped.
+Verified live (extract_only re-run, CICSResult.e3c6cd25): TW third-party = 63 real ACT rules,
+values 5-40% matching source, PC 24 / CV TP intact. Minor codegen edge: a few TW TP rows get
+`make=SCOOTER` (band leaked into make) — cosmetic, not fabrication.
+
 ## Backstop (row_coverage_validator can't catch this)
 
 `row_coverage_validator` only checks `\d+_TOKEN` body-slug rows → skips CC-band PC rows;

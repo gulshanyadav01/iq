@@ -90,6 +90,15 @@ emitted — do NOT collapse the whole grid to comprehensive from the `PC [PACK]`
   applies to the Package table ONLY** — a naive "read PACK per column" rule here would wrongly
   re-tag SOD rows comprehensive.
 
+**This per-column ACT/PACK rule is Private Car Package ONLY.** It applies solely to a grid
+that has PAIRED `<state> > ACT | <state> > PACK` header columns (two distinct rate cells per
+state). Do NOT apply it to any other grid. In particular, the **Two Wheeler** grid is a
+FLATTENED single-value make×band grid (`<Make> > <band> > <value>`) — each cell holds ONE rate.
+Never emit both a `comprehensive` AND a `third-party` rule from a single-value cell: that
+fabricates a duplicate third-party deal carrying the Package rate. A grid cell with one value
+produces exactly one rule; emit third-party ONLY from a cell that lives in its own ACT column
+(or an ACT-labelled row with its own distinct value).
+
 **Private Car Package layout is NOT the CV layout.** Package rows are CC-band row labels
 (`UPTO 1000 CC`, `1000 TO 1500 CC`, `ABOVE 1500 CC`) with NO MAKE / MODEL columns — do NOT apply
 the CV `row[4] = MAKE / row[5] = MODEL` recipe here, and leave `vehicle_make` / `vehicle_model`
@@ -160,6 +169,33 @@ policies_count + customer_type — this preserves the make × CC fan-out.
 as a CC band (`parse_cc_range(part[0])` non-empty) or a body type — carry the LAST seen make
 forward, use `part[0]` as the band, and take the VALUE from `part[-1]`. Never put a CC band
 (`150_350cc`) into `vehicle_make`, and never put a rate (`0.205`) into `cc`.
+
+#### Chola — Two Wheeler ACT (Third-Party / Liability) rows
+
+Besides the `NEW(... NOP)` / renewal **Package** tier rows (which are comprehensive), each state
+also has ONE **ACT row** whose `Type` cell reads `ACT` instead of a NOP tier
+(e.g. `| | AP | ACT | 0 | 0.3 | 0 | 0 | ... |`). This row carries the **Third-Party / Liability**
+rate (`TW Liability policy is on TP/PA Premium`), positionally aligned to the SAME make×band
+columns as the Package rows. It is **load-bearing** — do NOT drop it, and do NOT confuse it with a
+Package tier.
+
+Build the make×band column-index map ONCE from the header row's `<Make> > <band>` columns (the
+same map the Package NOP-tier rows use). Then for an ACT row, for EACH make×band column with a
+**non-zero** value, emit ONE rule:
+
+- `coverage_type_text = "ACT"` — the transformer maps ACT → `policy_type = "third-party"`.
+- `state_text` = the row's state; `vehicle_make` = the column's make; the column's band → `cc`
+  (via `parse_cc_range`) or `vehicle_sub_class` for a body word (`SCOOTER`/`BIKE`) — exactly as
+  the Package parsing routes it. `All Electric Make` → `fuel_type = "Electric"`.
+- `commission_value = to_pct(cell)` — the **ACT row's own cell value** (e.g. `0.3` → the Liability
+  rate). NEVER copy the Package/NOP-tier value onto the ACT rule; read the ACT row's own cells.
+- Do **NOT** set `policies_count` / `customer_type_text` — Liability is not NOP-tiered.
+- Do **NOT** attach the CPA `conditional_deduction` clause — TP/PA rules are never CPA-deducted.
+- Skip `0` / blank cells (most ACT cells are 0; the real rates cluster in the SCOOTER band).
+
+The ACT row is the ONLY source of Two Wheeler third-party rules. A TW `third-party` rule whose
+value equals the Package rate for the same make×band is a duplication bug (see the single-value
+cell rule above), not a real Liability rate.
 
 ### Chola — Commercial Vehicle GCCV 3-Wheeler row merged into the header
 
