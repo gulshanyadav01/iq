@@ -59,8 +59,69 @@ section MUST be tagged as standalone-OD, NOT comprehensive:
 - keep `conditions["deal_parameter"] = "OD"` (or the section's OD basis).
 
 Do NOT emit Standalone-OD rows as `coverage_type_text = "Comprehensive"` — comprehensive-OD
-and standalone-OD are distinct policy types in the deal grid. Only the Package grid is
-comprehensive.
+and standalone-OD are distinct policy types in the deal grid.
+
+The **Package grid is NOT wholesale comprehensive**: it carries BOTH a `PACK` (comprehensive)
+and an `ACT` (third-party) sub-column per state, and each must be tagged from its own column
+header — see "Chola — Private Car Package COLUMN LAYOUT (ACT / PACK are load-bearing)" below.
+Only the SOD grid is standalone-OD.
+
+### Chola — Private Car Package COLUMN LAYOUT (ACT / PACK are load-bearing)
+
+The Private Car **Package** table pairs TWO coverage sub-columns per state — the header row
+reads `<state> > ACT | <state> > PACK` for every state group (e.g.
+`AP/TS > ACT | AP/TS > PACK | ... | TN > ACT | TN > PACK | ...`). `ACT` is the **Third-Party /
+Liability** payout (T&C: "Private Car Liability policy Pay-out is on TP/PA Premium"); `PACK` is
+the **Package / Comprehensive (OD)** payout. **Both columns carry real rates** and BOTH must be
+emitted — do NOT collapse the whole grid to comprehensive from the `PC [PACK]` PROD token.
+
+**Which table this applies to — scope by the PROD token, NOT the title:**
+
+- **Package table** — PROD token `PC [PACK]`: coverage is **column-derived**. Build the `col_map`
+  with one entry per `(state, ACT|PACK, col_index)` and set `coverage_type_text` to the sub-column
+  header token **verbatim** — `"ACT"` or `"PACK"` (the transformer maps `ACT` → third-party,
+  `PACK` → comprehensive). Emit one rule per non-blank `(state, coverage)` cell; **skip blank /
+  `0` / `0%` cells** (states with a blank ACT rate simply produce no third-party rule —
+  source-faithful).
+- **SOD tables** — PROD token `PC [SOD]`: coverage is **table-derived**, unchanged from the SAOD
+  section above — every emitted cell gets `coverage_type_text = "SAOD"` regardless of which
+  sub-column the value sits in. The SOD grids reuse the same `ACT | PACK` header shape but their
+  ACT sub-columns are blank; the graded value is the SOD rate. **Per-column ACT/PACK coverage
+  applies to the Package table ONLY** — a naive "read PACK per column" rule here would wrongly
+  re-tag SOD rows comprehensive.
+
+**Private Car Package layout is NOT the CV layout.** Package rows are CC-band row labels
+(`UPTO 1000 CC`, `1000 TO 1500 CC`, `ABOVE 1500 CC`) with NO MAKE / MODEL columns — do NOT apply
+the CV `row[4] = MAKE / row[5] = MODEL` recipe here, and leave `vehicle_make` / `vehicle_model`
+unset. Strip any `[P]`/`[D]` fuel suffix per the fuel-type section above (SOD grids only; the
+plain Package bands have no suffix, so `fuel_type` stays unset).
+
+**ACT / third-party rows are never CPA-deducted.** Do NOT attach the CPA `conditional_deduction`
+qualifying clause to ACT rules (see "Chola — CPA deduction footnote": "TP/PA-only rules are never
+deducted"). Only the `PACK` (comprehensive-OD) rows carry the CPA clause and feed the `cpa_split`.
+
+Generated-code shape (Package table):
+
+```python
+# col_map built from the header row: [(state, coverage, col_idx), ...]
+# e.g. [("AP/TS", "ACT", i), ("AP/TS", "PACK", i+1), ("TN", "ACT", j), ...]
+for state, coverage, col_idx in col_map:            # coverage is "ACT" or "PACK", verbatim
+    raw_val = row[col_idx].strip() if col_idx < len(row) else ""
+    pct = to_pct(raw_val)
+    if not pct or pct == "0%":
+        continue
+    rule = {
+        "product_name": "Private Car",
+        "coverage_type_text": coverage,             # "ACT" -> third-party, "PACK" -> comprehensive
+        "state_text": state,
+        "conditions": dict(base_conditions),        # CC band only; NO make/model
+        "commission_value": pct,
+        # PACK rules carry the CPA clause; ACT rules do NOT:
+        "qualifying_clauses": list(qualifying_clauses) if coverage.upper() == "PACK" else [],
+        # ... other fields as per base template ...
+    }
+    result.append(rule)
+```
 
 ### Chola — Two Wheeler flattened make × CC grid
 
@@ -268,9 +329,14 @@ The `MSV` table publishes one distinct product row per body — emit **one rule 
 
 - `1_TRAC[RENEWAL]` → `conditions["vehicle_sub_class"] = "tractor"`, `customer_type_text = "renewal"`.
   Strip `[RENEWAL]` from the label like `[Electric]` before sub-class extraction.
-- `2_EXCAVATOR` → the MODEL cell enumerates several bodies (Loader, Excavators/Earth Movers,
-  Crane, Bulldozers/Bullgraders, Road Rollers, Fork Lift Trucks). Put that enumeration into
-  `conditions["vehicle_sub_class"]` (a list) — NOT `vehicle_model`.
+- `2_EXCAVATOR` → BOTH the MAKE and MODEL cells repeat the same body enumeration (Loader,
+  Excavators/Earth Movers, Crane, Bulldozers/Bullgraders, Road Rollers, Fork Lift Trucks). Put
+  that enumeration into `conditions["vehicle_sub_class"]` (a list) ONLY — leave BOTH
+  `conditions["vehicle_make"]` AND `conditions["vehicle_model"]` UNSET. These bodies are vehicle
+  sub-classes, not a make/model split, so the generic CV `row[4]→make` / `row[5]→model` rule does
+  NOT apply here — do not copy the enumeration into make or model. (A deterministic transformer
+  guard also drops any CV rule whose make list is identical to its model list, but do not rely on
+  it — emit make/model unset.)
 - `3_HARVESTOR` → `conditions["vehicle_sub_class"] = "harvester"`.
 - `4_OTHERS` → emit a distinct rule with `conditions["vehicle_sub_class"] = "others"` and the
   row's (empty / blank) rates. Do **NOT** skip this row — it is an explicit zero-payout matching

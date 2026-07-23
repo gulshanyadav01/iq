@@ -390,6 +390,16 @@ Exit Codes:
         schema_result.errors.extend(rc_result.errors)
         schema_result.warnings.extend(rc_result.warnings)
         schema_result.info.extend(rc_result.info)
+        try:
+            from coverage_integrity_validator import CoverageIntegrityValidator
+        except ImportError:
+            from cins.validators.coverage_integrity_validator import (
+                CoverageIntegrityValidator,
+            )
+        ci_result = CoverageIntegrityValidator().validate(args.document, sheet_contents)
+        schema_result.errors.extend(ci_result.errors)
+        schema_result.warnings.extend(ci_result.warnings)
+        schema_result.info.extend(ci_result.info)
 
     # Print results
     exit_code = print_summary(schema_result, overlap_result)

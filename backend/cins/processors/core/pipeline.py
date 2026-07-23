@@ -443,6 +443,19 @@ def _run_validators(output_path: Path, indexed_doc=None):
             schema_result.info.extend(rc_result.info)
         except Exception as e:  # never let coverage checking break the pipeline
             logger.warning(f"Row-coverage validator failed: {e}")
+        try:
+            from cins.validators.coverage_integrity_validator import (
+                CoverageIntegrityValidator,
+            )
+
+            ci_result = CoverageIntegrityValidator().validate(
+                str(output_path), indexed_doc.get_all_sheet_contents()
+            )
+            schema_result.errors.extend(ci_result.errors)
+            schema_result.warnings.extend(ci_result.warnings)
+            schema_result.info.extend(ci_result.info)
+        except Exception as e:  # never let coverage checking break the pipeline
+            logger.warning(f"Coverage-integrity validator failed: {e}")
     return schema_result, overlap_result
 
 

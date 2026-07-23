@@ -136,6 +136,19 @@ def _split_rule(rule):
 
     conditions = rule.get("conditions") or {}
     outcome = rule.get("outcome") or {}
+
+    # Third-party / TP-PA rules are a statutory pass-through and are NEVER
+    # CPA-deducted (Chola CPA footnote: "TP/PA-only rules are never deducted").
+    # The deduction path below already refuses to reduce their value (rule_col
+    # is neither "od" nor "net"), but a rule that still carries the CPA clause
+    # would be split into two identical with-cpa/without-cpa variants — pure
+    # duplication that doubles the third-party rule count. Skip the split
+    # entirely for third-party rules so they stay single, cpa-unconstrained.
+    pt = conditions.get("policy_type")
+    pts = pt if isinstance(pt, (list, tuple)) else [pt]
+    if any("third" in str(p).lower() for p in pts if p):
+        return [rule]
+
     dc = cpa_deduction_clause(outcome.get("qualifying_clauses"))
     if dc is None:
         # Fallback: synthesize the clause from the rule's free-text notes.
