@@ -208,6 +208,12 @@ VEHICLE_SUB_CLASS_MAPPINGS = {
     "others": "others",
 }
 
+# Two-wheeler BODY words that can mis-split into vehicle_make from a make-less
+# flattened TW column header ("SCOOTER > 0.37"). Deliberately narrow: a subset
+# of VEHICLE_SUB_CLASS_MAPPINGS keys that are unambiguously body types and never
+# a real make. Excludes make-bucket sentinels like "others".
+_MISSPLIT_BODY_TOKENS = frozenset({"scooter", "bike", "moped", "motorcycle"})
+
 FUEL_TYPE_MAPPINGS = {
     "petrol": "petrol",
     "diesel": "diesel",
@@ -1717,6 +1723,7 @@ class RawToCICSTransformer:
         if vehicle_make:
             real_makes: List[str] = []
             band_from_make: Optional[str] = None
+            body_from_make: List[str] = []
             for m in vehicle_make:
                 ml = str(m).strip().lower()
                 # A CC band is fully numeric with an optional range + "cc"
@@ -1725,14 +1732,38 @@ class RawToCICSTransformer:
                 # (e.g. "CCM" motorcycles) are never dropped.
                 if re.fullmatch(r"\d+(?:[_\-]\d+)?(?:cc)?", ml):
                     band_from_make = band_from_make or ml
+                # A two-wheeler BODY token (scooter/bike/moped) landed in
+                # vehicle_make from a MAKE-LESS flattened column header
+                # ("SCOOTER > 0.37" with no preceding make, so the codegen's
+                # carry-forward had no make to inherit). It is a sub-class, not a
+                # make — route it to vehicle_sub_class. Scoped to genuine body
+                # words: NOT the whole VEHICLE_SUB_CLASS_MAPPINGS, which also
+                # holds make-bucket sentinels ("others") and non-two-wheeler
+                # bodies that must stay in vehicle_make.
+                elif ml in _MISSPLIT_BODY_TOKENS:
+                    body_from_make.append(VEHICLE_SUB_CLASS_MAPPINGS.get(ml, ml))
                 else:
                     real_makes.append(m)
-            if band_from_make is not None:
+            if band_from_make is not None or body_from_make:
                 vehicle_make = real_makes or None
+            if band_from_make is not None:
                 band_norm = band_from_make.replace("cc", "").replace("_", "-")
                 bs, be = self._parse_range_field(band_norm)
                 cc_start = bs if bs is not None else 0
                 cc_end = be if be is not None else 99999
+            if body_from_make:
+                merged = list(vehicle_sub_class or [])
+                for b in body_from_make:
+                    if b not in merged:
+                        merged.append(b)
+                vehicle_sub_class = merged or None
+                # The same mis-split parked the header value in cc (e.g. "0.37"
+                # or "-0.05", which parse_cc_range collapsed to 0-0). When no
+                # real CC band came from this row, treat cc as unconstrained
+                # (0-99999, all-CC) — matching the make-qualified scooter rows —
+                # instead of a bogus 0-0 band.
+                if band_from_make is None:
+                    cc_start, cc_end = 0, 99999
 
         seat_start, seat_end = self._parse_range_field(
             entry_conditions.get("seating_capacity")

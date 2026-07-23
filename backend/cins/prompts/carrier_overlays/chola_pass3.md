@@ -170,6 +170,13 @@ as a CC band (`parse_cc_range(part[0])` non-empty) or a body type — carry the 
 forward, use `part[0]` as the band, and take the VALUE from `part[-1]`. Never put a CC band
 (`150_350cc`) into `vehicle_make`, and never put a rate (`0.205`) into `cc`.
 
+**Make-less body-only columns:** a few trailing columns are just `<body> > <value>` with the
+make omitted AND no adjacent make to carry forward (e.g. `SCOOTER > 0.37`, `SCOOTER > -0.055`).
+The body word (`SCOOTER`/`BIKE`) is a `vehicle_sub_class`, NEVER a `vehicle_make`, and the numeric
+`part[-1]` is the commission VALUE — never route it into `cc`. Emit the rule with
+`conditions["vehicle_sub_class"] = "scooter"` (leave `vehicle_make` unset, `cc` unset). Do NOT put
+`SCOOTER` in `vehicle_make` or `0.37`/`-0.05` in `cc`.
+
 #### Chola — Two Wheeler ACT (Third-Party / Liability) rows
 
 Besides the `NEW(... NOP)` / renewal **Package** tier rows (which are comprehensive), each state

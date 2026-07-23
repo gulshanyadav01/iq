@@ -245,6 +245,36 @@ class TwMakeCcBandGuardTests(TestCase):
         self.assertEqual(cond.vehicle_make, ["CCM"])
         self.assertEqual((cond.cc_start_range, cond.cc_end_range), (150, 350))
 
+    def test_body_token_in_make_moved_to_subclass(self):
+        # A make-less trailing column "SCOOTER > 0.37" mis-splits the body word
+        # into vehicle_make and the rate into cc. SCOOTER is a sub-class, never a
+        # make; the rate is not a CC. Route SCOOTER -> vehicle_sub_class, clear
+        # the bogus make, and leave cc unconstrained (all-CC), matching the
+        # make-qualified scooter rows. Rule is still emitted (kept, not dropped).
+        entry = RawCommissionEntry(
+            rule_text="Two Wheeler SCOOTER 0.37 AP ACT",
+            commission_value="30%",
+            product_name="Two Wheeler",
+            conditions={"vehicle_make": "SCOOTER", "cc": "0.37"},
+        )
+        cond = self.t._transform_conditions(entry, None, _raw([entry]))
+        self.assertIsNone(cond.vehicle_make)
+        self.assertEqual(cond.vehicle_sub_class, ["scooter"])
+        self.assertEqual((cond.cc_start_range, cond.cc_end_range), (0, 99999))
+
+    def test_body_token_negative_value_cc_cleaned(self):
+        # Same shape with the negative header value "-0.05" landing in cc.
+        entry = RawCommissionEntry(
+            rule_text="Two Wheeler SCOOTER -0.05 AP ACT",
+            commission_value="5%",
+            product_name="Two Wheeler",
+            conditions={"vehicle_make": "SCOOTER", "cc": "-0.05"},
+        )
+        cond = self.t._transform_conditions(entry, None, _raw([entry]))
+        self.assertIsNone(cond.vehicle_make)
+        self.assertEqual(cond.vehicle_sub_class, ["scooter"])
+        self.assertEqual((cond.cc_start_range, cond.cc_end_range), (0, 99999))
+
 
 class PccvTaxiRoutingTests(TestCase):
     """R1: BIG_TAXIS / MAXI_CAB rows sit under the ``PCCV > 6`` section (token
