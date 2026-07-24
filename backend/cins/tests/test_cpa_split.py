@@ -19,6 +19,7 @@ from cins.processors.core.cpa_split import (
     cpa_deduction_clause,
     deduct_pct,
     derive_applied_on,
+    drop_mirrored_third_party,
     materialize_cpa_split,
 )
 
@@ -173,15 +174,21 @@ class MaterializeTests(TestCase):
         materialize_cpa_split(doc)
         self.assertEqual(len(doc["products"][0]["commission_rules"]), 1)
 
-    def test_third_party_splits_without_deduction(self):
-        # Basis is TP; the OD-Pay-out deduction is a no-op.
+    def test_third_party_not_split(self):
+        # TP/PA payout is a statutory pass-through — never CPA-deducted. A TP
+        # rule that still carries the CPA clause must NOT be split: splitting it
+        # would emit two identical with-cpa/without-cpa variants (the deduction
+        # is a no-op on the TP column), doubling the third-party rule count.
+        # Regression: Chola doc dbe5b4ea emitted third-party 24 -> 48 this way.
         doc = _doc(
             [_rule(None, 25, [OVERRIDE_OD, OVERRIDE_TP, CPA_CLAUSE], ["third-party"])]
         )
         materialize_cpa_split(doc)
         rules = _rules(doc)
-        self.assertEqual(len(rules), 2)
-        self.assertEqual({r["outcome"]["percentage_value"] for r in rules}, {25})
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["outcome"]["percentage_value"], 25)
+        # Left cpa-unconstrained (single rule, no with/without split).
+        self.assertIsNone(rules[0]["conditions"].get("cpa"))
 
     def test_cv_net_splits_and_deducts_on_net(self):
         # Fix ii: a Commercial-Vehicle Net rule carrying the CPA clause must
@@ -228,3 +235,79 @@ class MaterializeTests(TestCase):
         )
         materialize_cpa_split(doc)
         self.assertEqual(len(_rules(doc)), 3)
+
+
+def _cov_rule(rule_id, policy_type, value, make="Hero", cc=(0, 150)):
+    return {
+        "rule_id": rule_id,
+        "conditions": {
+            "policy_type": [policy_type],
+            "state": ["andhra-pradesh"],
+            "vehicle_make": [make],
+            "cc_start_range": cc[0],
+            "cc_end_range": cc[1],
+        },
+        "outcome": {"commission_type": "percentage", "percentage_value": value},
+    }
+
+
+def _cov_doc(rules, product_name="Two Wheeler"):
+    return {"products": [{"product_name": product_name, "commission_rules": rules}]}
+
+
+class MirrorDedupTests(TestCase):
+    def test_all_third_party_mirror_are_dropped(self):
+        # Fabricated: every third-party rule mirrors a comprehensive (dims+value).
+        doc = _cov_doc(
+            [
+                _cov_rule("c1", "comprehensive", 42.5, make="Hero"),
+                _cov_rule("c2", "comprehensive", 35.0, make="TVS"),
+                _cov_rule("t1", "third-party", 42.5, make="Hero"),
+                _cov_rule("t2", "third-party", 35.0, make="TVS"),
+            ]
+        )
+        drop_mirrored_third_party(doc)
+        rules = doc["products"][0]["commission_rules"]
+        pts = [r["conditions"]["policy_type"] for r in rules]
+        self.assertEqual(len(rules), 2)
+        self.assertNotIn(["third-party"], pts)
+
+    def test_partial_mirror_keeps_all_third_party(self):
+        # Real coverage: one TP mirrors by coincidence, one has its own rate.
+        doc = _cov_doc(
+            [
+                _cov_rule("c1", "comprehensive", 0.4, make="Hero"),
+                _cov_rule("c2", "comprehensive", 0.5, make="TVS"),
+                _cov_rule("t1", "third-party", 0.4, make="Hero"),  # coincidental mirror
+                _cov_rule("t2", "third-party", 0.3, make="TVS"),  # genuine ACT rate
+            ],
+            product_name="Private Car",
+        )
+        drop_mirrored_third_party(doc)
+        tp = [
+            r
+            for r in doc["products"][0]["commission_rules"]
+            if r["conditions"]["policy_type"] == ["third-party"]
+        ]
+        self.assertEqual(len(tp), 2)  # both kept — product has a real TP column
+
+    def test_no_comprehensive_keeps_third_party(self):
+        doc = _cov_doc([_cov_rule("t1", "third-party", 0.3)])
+        drop_mirrored_third_party(doc)
+        self.assertEqual(len(doc["products"][0]["commission_rules"]), 1)
+
+    def test_materialize_runs_dedup_first(self):
+        # Fabricated TP must be gone AND never CPA-split.
+        doc = _cov_doc(
+            [
+                _cov_rule("c1", "comprehensive", 42.5),
+                _cov_rule("t1", "third-party", 42.5),
+            ]
+        )
+        materialize_cpa_split(doc)
+        tp = [
+            r
+            for r in doc["products"][0]["commission_rules"]
+            if r["conditions"]["policy_type"] == ["third-party"]
+        ]
+        self.assertEqual(len(tp), 0)

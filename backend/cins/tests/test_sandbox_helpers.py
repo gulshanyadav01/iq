@@ -116,3 +116,42 @@ class ParseCcRangeGvwGuardTests(TestCase):
         self.assertEqual(self.parse_cc_range(None), "")
         self.assertEqual(self.parse_cc_range(""), "")
         self.assertEqual(self.parse_cc_range("   "), "")
+
+
+class ParseCcRangeLtGtSlugTests(TestCase):
+    """PCCV<6 4W-taxi CC-band slugs carry a leading ordinal + wheel token
+    ('2_4W_LT_1500CC', '3_4W_GT_1500CC'). parse_cc_range must strip both and
+    honour LT/GT as an explicit lower-/upper-open band — without folding the
+    ordinal/wheel digits into the range. GVW/kW rejection stays intact."""
+
+    @classmethod
+    def setUpClass(cls):
+        ns: dict = {}
+        exec(compile(_SANDBOX_HELPERS, "<helpers>", "exec"), ns)
+        cls.parse_cc_range = staticmethod(ns["parse_cc_range"])
+        cls.parse_gvw_range = staticmethod(ns["parse_gvw_range"])
+
+    def test_lt_band(self):
+        self.assertEqual(self.parse_cc_range("2_4W_LT_1500CC"), "0-1500")
+
+    def test_gt_band(self):
+        self.assertEqual(self.parse_cc_range("3_4W_GT_1500CC"), ">1500")
+
+    def test_electric_sibling_lt_band(self):
+        self.assertEqual(self.parse_cc_range("2_4W_LT_1500CC[Electric]"), "0-1500")
+
+    def test_plain_cc_range_untouched(self):
+        # No underscore-slug shape → ordinal/wheel strip must not fire.
+        self.assertEqual(self.parse_cc_range("150-350cc"), "150-350")
+        self.assertEqual(self.parse_cc_range("ABOVE 1500 CC"), ">1500")
+        self.assertEqual(self.parse_cc_range("UPTO 1000 CC"), "1000")
+
+    def test_gvw_guard_reciprocal(self):
+        # The CC slug must be rejected by parse_gvw_range (belongs to CC).
+        self.assertEqual(self.parse_gvw_range("2_4W_LT_1500CC"), "")
+
+    def test_underscore_slug_without_lt_gt_or_number(self):
+        # An underscore slug with neither LT/GT nor a CC number falls through
+        # to the join path and yields no CC range (stable, not garbage).
+        self.assertEqual(self.parse_cc_range("1_SCHOOL_BUS"), "")
+        self.assertEqual(self.parse_cc_range("1_3W_AUTO"), "")

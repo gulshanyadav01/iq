@@ -15,7 +15,6 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from cins.processors.core.cpa_split import applied_on_to_column, derive_applied_on
-from cins.processors.core.cpa_split import applied_on_to_column, derive_applied_on
 from commission_intake.models import CommissionDocument
 
 
@@ -108,14 +107,14 @@ def partition_global_modifiers(cics_doc, min_shared=2):
     return global_other, global_clauses
 
 
-from commission_intake.serializers import (
+from commission_intake.serializers import (  # noqa: E402
     CommissionDocumentCreateSerializer,
     CommissionDocumentListSerializer,
     CommissionDocumentSerializer,
     ProcessingModeRequestSerializer,
     RerunPassRequestSerializer,
 )
-from commission_intake.tasks import (
+from commission_intake.tasks import (  # noqa: E402
     enqueue_processing_chain,
     rerun_single_pass,
     rerun_transform,
@@ -580,6 +579,22 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                 return default
             return cv(v)
 
+        def render_make_model_cell(include, exclude):
+            """Render a VehicleMake / VehicleModel cell with inline exclusion.
+
+            An exclusion list renders as ``exclude(A, B, C)`` inside the
+            existing column — no new columns, so index-based importers are
+            unaffected. An include list renders exactly as ``cv`` does
+            (unchanged). Both should never be set from the bucket fan-out; if
+            they are, prefer the include list defensively.
+            """
+            if include:
+                return cv(include)
+            if exclude:
+                vals = exclude if isinstance(exclude, list) else [exclude]
+                return "exclude(" + ", ".join(str(i) for i in vals) + ")"
+            return ""
+
         def outcome_percentages(outcome, deal_param, conditions=None):
             """
             Map a single CommissionOutcome to the 6 commission columns.
@@ -753,8 +768,14 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                         conditions.get("vehicle_age"),
                         "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15",
                     ),
-                    cv(conditions.get("vehicle_make")),
-                    cv(conditions.get("vehicle_model")),
+                    render_make_model_cell(
+                        conditions.get("vehicle_make"),
+                        conditions.get("vehicle_make_exclude"),
+                    ),
+                    render_make_model_cell(
+                        conditions.get("vehicle_model"),
+                        conditions.get("vehicle_model_exclude"),
+                    ),
                     cv(conditions.get("vehicle_carrier")),
                     cv(conditions.get("business_type")),
                     cv(conditions.get("od_term")),

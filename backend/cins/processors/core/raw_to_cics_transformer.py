@@ -15,7 +15,7 @@ import json
 import re
 import hashlib
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Set, Tuple, Any
 
 from cins.schema.carriers import CARRIER_FULL_NAMES, normalize_carrier
 from cins.schema.raw_extraction import (
@@ -195,7 +195,24 @@ VEHICLE_SUB_CLASS_MAPPINGS = {
     "jetting-machine": "jetting-machine",
     "fire vehicles": "fire-vehicles",
     "fire-vehicles": "fire-vehicles",
+    # Chola MSV / PCCV>6 sub-segment bodies (grid-verbatim aliases).
+    "earth movers": "excavators",
+    "earth mover": "excavators",
+    "bullgraders": "bulldozer",
+    "bullgrader": "bulldozer",
+    "maxi cab": "maxicab",
+    "maxi-cab": "maxicab",
+    "maxicab": "maxicab",
+    "big taxis": "taxi",
+    "big taxi": "taxi",
+    "others": "others",
 }
+
+# Two-wheeler BODY words that can mis-split into vehicle_make from a make-less
+# flattened TW column header ("SCOOTER > 0.37"). Deliberately narrow: a subset
+# of VEHICLE_SUB_CLASS_MAPPINGS keys that are unambiguously body types and never
+# a real make. Excludes make-bucket sentinels like "others".
+_MISSPLIT_BODY_TOKENS = frozenset({"scooter", "bike", "moped", "motorcycle"})
 
 FUEL_TYPE_MAPPINGS = {
     "petrol": "petrol",
@@ -640,15 +657,53 @@ class RawToCICSTransformer:
         # into one product with one SubProduct.
         product_groups: Dict[str, List[RawCommissionEntry]] = {}
         group_meta: Dict[str, tuple] = {}
+        stale_gccv_dropped: List[str] = []
 
         for entry in entries:
             product_key = self._get_product_key(entry)
             segment = self._cv_segment_label(entry) or self._car_segment_label(entry)
+            # Stale merged-header guard (Chola). Chola's CV tables reuse one
+            # copy-pasted header template, so the GCCV table's trailing
+            # "1_GCCV_3W" merged-header values also sit in the PCCV<6 / PCCV>6 /
+            # MSV headers as STALE duplicates. When Pass-3 codegen fails to honour
+            # the "recover the merged 3W header only for the GCCV table" rule
+            # (chola_pass3.md) it emits those values as real rows that segment
+            # into PCV / Buses / MISC-D (via a stale source_section) while still
+            # carrying a "GCCV ..." rule_text — a phantom copy of a real GCV row.
+            # A goods (GCCV) label in a passenger / misc segment is unambiguously
+            # a leak; drop the entry before grouping so it never inflates the
+            # non-GCV product (and never forms an all-leak empty product). The
+            # legitimate GCV copy is untouched. Deterministic backstop for a
+            # non-deterministic codegen bug.
+            if (
+                self._carrier_code == "Chola"
+                and segment in ("PCV", "Buses", "MISC-D")
+                and (entry.rule_text or "").strip().lower().startswith("gccv")
+            ):
+                # Record each dropped row so a false positive is auditable in
+                # the validation report — not just an aggregate count.
+                stale_gccv_dropped.append(
+                    f"{segment} <- {(entry.rule_text or '').strip()[:80]}"
+                )
+                continue
             group_key = f"{product_key}::{segment}" if segment else product_key
             if group_key not in product_groups:
                 product_groups[group_key] = []
                 group_meta[group_key] = (product_key, segment)
             product_groups[group_key].append(entry)
+
+        if stale_gccv_dropped:
+            preview = "; ".join(stale_gccv_dropped[:10])
+            more = (
+                f" (+{len(stale_gccv_dropped) - 10} more)"
+                if len(stale_gccv_dropped) > 10
+                else ""
+            )
+            self.warnings.append(
+                f"Dropped {len(stale_gccv_dropped)} stale GCCV merged-header "
+                f"row(s) leaked into non-GCV commercial segments (codegen "
+                f"merged-header duplicate): {preview}{more}"
+            )
 
         # Transform each product group
         products = []
@@ -807,15 +862,23 @@ class RawToCICSTransformer:
         # source-table row); leaving them confuses the boundary-bump walk,
         # which can leave the second duplicate at the un-bumped boundary
         # (invert-guard hits).
+        # Make/model bucket fan-out (R3). The Chola GCCV ≤3.5T grid publishes a
+        # sentinel "All Other Make/Models" row next to an explicit make/model
+        # row. _collapse_duplicate_rules ignores make/model, so without this it
+        # would drop the sentinel — split it into two exclusion buckets FIRST.
+        # Chola-gated + commercial-only: a cross-carrier sentinel regex would
+        # re-expand the TW junk "Others" rows the collapse exists to kill (same
+        # gating pattern as _expand_fuel_group).
+        if (
+            self._carrier_code == "Chola"
+            and product_subproduct
+            and product_subproduct.startswith("commercial")
+        ):
+            rules = self._bifurcate_make_buckets(rules)
+
         rules = self._collapse_duplicate_rules(rules)
 
         self._dedupe_range_overlaps(rules)
-
-        # Evidence-gated cross-group boundary normalization (D1=B). Closes the
-        # gap when a CC/GVW ladder is fragmented across states/RTOs so the
-        # per-group bump above can't see the lower rung. Runs before GCV
-        # bifurcation so wheel clones inherit corrected boundaries.
-        self._normalize_boundary_overlaps(rules)
 
         # Evidence-gated cross-group boundary normalization (D1=B). Closes the
         # gap when a CC/GVW ladder is fragmented across states/RTOs so the
@@ -1137,10 +1200,21 @@ class RawToCICSTransformer:
         "staff-bus",
         "passenger bus",
         "mini bus",
-        "big_tax",
-        "big tax",
         "greater than six",
         ">6 seat",
+    )
+    # Taxi-bodied passenger CV rows that sit under the ``PCCV > 6`` section
+    # (BIG_TAXIS, MAXI_CAB). They are PCV (taxi), NOT Buses — but the section
+    # token ``pccv>6`` maps to Buses, so this body check MUST run before
+    # ``_prod_token_segment`` in ``_cv_segment_label`` or the taxi identity is
+    # lost. (School/staff bus rows under the same section still route to Buses.)
+    _SEGMENT_BODY_PCV_TAXI = (
+        "big_tax",
+        "big tax",
+        "big taxi",
+        "maxi_cab",
+        "maxi cab",
+        "maxicab",
     )
     _SEGMENT_BODY_MISCD = (
         "tractor",
@@ -1217,6 +1291,14 @@ class RawToCICSTransformer:
 
         if not self._looks_commercial(entry, blob):
             return None
+
+        # 0) Taxi-bodied rows (BIG_TAXIS / MAXI_CAB) live under the "PCCV > 6"
+        # section whose PROD token maps to Buses. Detect the taxi body FIRST so
+        # the section token cannot steal their PCV (taxi) identity. School/staff
+        # bus rows in the same section have no taxi body and fall through to the
+        # PROD-token step below (→ Buses).
+        if any(b in blob for b in self._SEGMENT_BODY_PCV_TAXI):
+            return "PCV"
 
         # 1) Authoritative table / PROD token (source_section names the segment).
         for text in (section, blob):
@@ -1449,6 +1531,17 @@ class RawToCICSTransformer:
             if "[electric]" in elec_probe:
                 fuel_type = ["electric"]
 
+        # Renewal-variant suffix recovery (Chola MSV "1_TRAC[RENEWAL]" row).
+        # Like the [Electric] probe, the codegen path preserves the "[RENEWAL]"
+        # marker only in the sub-class slug / rule text / section, never mapped
+        # to a business type. Tag business_type when the marker is present and
+        # none was parsed from customer_type_text. Unlike the electric probe,
+        # this also accepts a bare "renewal" word (the marker survives without
+        # brackets in some section labels).
+        if not business_type:
+            if "renewal" in self._segment_probe(entry_conditions, entry):
+                business_type = ["renewal"]
+
         # Number of wheels
         number_of_wheels = self._normalize_list_field(
             entry_conditions.get("number_of_wheels"),
@@ -1519,6 +1612,40 @@ class RawToCICSTransformer:
         # Vehicle make/model (free-text arrays)
         vehicle_make = self._parse_text_list(entry_conditions.get("vehicle_make"))
         vehicle_model = self._parse_text_list(entry_conditions.get("vehicle_model"))
+        # Chola CV body-row guard: the GCCV / MSV grid repeats the SUBCLASS body
+        # enumeration verbatim in BOTH the MAKE and MODEL columns — e.g. MSV
+        # "2_EXCAVATOR" publishes make == model == "Loader, Excavators/Earth
+        # Movers, Crane, Bulldozers/Bullgraders, Road Rollers, Fork Lift Trucks",
+        # and the heavier weight bands repeat the slug in both cells. Those
+        # tokens are vehicle sub-classes, not a real make/model split (the
+        # enumeration is already captured in vehicle_sub_class), and codegen
+        # faithfully copies them into make+model via the generic CV column rule
+        # (row[4]->make, row[5]->model). A rule whose make list is identical to
+        # its model list is never a genuine make x model grading — real makes
+        # and models are disjoint vocab — so drop both. Chola-gated to match the
+        # carrier-specific bifurcation guards below (_bifurcate_make_buckets).
+        # Exempt the "All Other Make/Models" sentinel (make == model by design):
+        # _bifurcate_make_buckets needs its make/model list intact to fan it out.
+        if (
+            self._carrier_code == "Chola"
+            and vehicle_make
+            and vehicle_make == vehicle_model
+            and not any(
+                self._SENTINEL_MAKE_MODEL_RE.search(str(m)) for m in vehicle_make
+            )
+        ):
+            vehicle_make = None
+            vehicle_model = None
+        # Make/model EXCLUSION lists (rule matches when policy make/model is NOT
+        # in the list). Populated by the overlay for explicit "except/excluding"
+        # rows and synthesized by _bifurcate_make_buckets for the sentinel
+        # "All Other Make/Models" bucket.
+        vehicle_make_exclude = self._parse_text_list(
+            entry_conditions.get("vehicle_make_exclude")
+        )
+        vehicle_model_exclude = self._parse_text_list(
+            entry_conditions.get("vehicle_model_exclude")
+        )
 
         # RTO from conditions dict — expand categories via master data.
         # The LLM may use "rto", "rto_category", "rto_zone", or similar — accept any.
@@ -1565,6 +1692,15 @@ class RawToCICSTransformer:
         elif cc_end is None:
             cc_end = 99999
 
+        # CC recovery: Chola PCCV<6 4W taxi rows bake the CC band into the
+        # sub-class slug ("2_4W_LT_1500CC", "3_4W_GT_1500CC"). On the codegen
+        # path the band survives only in the slug, so conditions["cc"] is empty
+        # and the parse above lands on the (0, 99999) sentinel. Recover it.
+        if (cc_start, cc_end) == (0, 99999):
+            recovered_cc = self._recover_cc_range(entry_conditions, entry)
+            if recovered_cc is not None:
+                cc_start, cc_end = recovered_cc
+
         # Electric two-wheelers are kW-rated, not CC-rated, so they never carry
         # a CC filter. Deterministic backstop: if a kW power band ("7 KW",
         # "> 16 KW") leaked into conditions["cc"] on the codegen path it would
@@ -1587,6 +1723,7 @@ class RawToCICSTransformer:
         if vehicle_make:
             real_makes: List[str] = []
             band_from_make: Optional[str] = None
+            body_from_make: List[str] = []
             for m in vehicle_make:
                 ml = str(m).strip().lower()
                 # A CC band is fully numeric with an optional range + "cc"
@@ -1595,14 +1732,38 @@ class RawToCICSTransformer:
                 # (e.g. "CCM" motorcycles) are never dropped.
                 if re.fullmatch(r"\d+(?:[_\-]\d+)?(?:cc)?", ml):
                     band_from_make = band_from_make or ml
+                # A two-wheeler BODY token (scooter/bike/moped) landed in
+                # vehicle_make from a MAKE-LESS flattened column header
+                # ("SCOOTER > 0.37" with no preceding make, so the codegen's
+                # carry-forward had no make to inherit). It is a sub-class, not a
+                # make — route it to vehicle_sub_class. Scoped to genuine body
+                # words: NOT the whole VEHICLE_SUB_CLASS_MAPPINGS, which also
+                # holds make-bucket sentinels ("others") and non-two-wheeler
+                # bodies that must stay in vehicle_make.
+                elif ml in _MISSPLIT_BODY_TOKENS:
+                    body_from_make.append(VEHICLE_SUB_CLASS_MAPPINGS.get(ml, ml))
                 else:
                     real_makes.append(m)
-            if band_from_make is not None:
+            if band_from_make is not None or body_from_make:
                 vehicle_make = real_makes or None
+            if band_from_make is not None:
                 band_norm = band_from_make.replace("cc", "").replace("_", "-")
                 bs, be = self._parse_range_field(band_norm)
                 cc_start = bs if bs is not None else 0
                 cc_end = be if be is not None else 99999
+            if body_from_make:
+                merged = list(vehicle_sub_class or [])
+                for b in body_from_make:
+                    if b not in merged:
+                        merged.append(b)
+                vehicle_sub_class = merged or None
+                # The same mis-split parked the header value in cc (e.g. "0.37"
+                # or "-0.05", which parse_cc_range collapsed to 0-0). When no
+                # real CC band came from this row, treat cc as unconstrained
+                # (0-99999, all-CC) — matching the make-qualified scooter rows —
+                # instead of a bogus 0-0 band.
+                if band_from_make is None:
+                    cc_start, cc_end = 0, 99999
 
         seat_start, seat_end = self._parse_range_field(
             entry_conditions.get("seating_capacity")
@@ -1614,6 +1775,16 @@ class RawToCICSTransformer:
             seat_start = 0
         elif seat_end is None:
             seat_end = 99
+
+        # Seating recovery: Chola PCCV rows encode the seating band only in the
+        # section/PROD token ("PCCV < 6" / "PCCV > 6"), never as a per-row
+        # seating column, so the parse above lands on the (0, 99) "no seating
+        # filter" sentinel. Recover the grid-verbatim band deterministically
+        # (G3a: <6 → (0,5), >6 → (6,99); 6-seater belongs to the upper band).
+        if (seat_start, seat_end) == (0, 99):
+            recovered_seat = self._recover_seating_range(entry_conditions, entry)
+            if recovered_seat is not None:
+                seat_start, seat_end = recovered_seat
 
         # Policies count (NOP) — number of policies sold tier. Common Chola TW
         # qualifier on row labels: "NEW(UPTO 30 NOP)", "NEW(30-100 NOP)",
@@ -1659,6 +1830,8 @@ class RawToCICSTransformer:
             vehicle_age=vehicle_age,
             vehicle_make=vehicle_make,
             vehicle_model=vehicle_model,
+            vehicle_make_exclude=vehicle_make_exclude,
+            vehicle_model_exclude=vehicle_model_exclude,
             vehicle_carrier=vehicle_carrier,
             business_type=business_type,
             od_term=od_term,
@@ -1863,6 +2036,10 @@ class RawToCICSTransformer:
         "vehicle_carrier",
         "business_type",
         "deal_parameter",
+        # Exclusion lists are part of a rule's identity — they distinguish the
+        # make/model buckets (a)/(b)/(c) and must NOT be collapse-ignored.
+        "vehicle_make_exclude",
+        "vehicle_model_exclude",
     )
     _DEDUPE_SCALAR_FIELDS = (
         "zero_dep",
@@ -2047,6 +2224,249 @@ class RawToCICSTransformer:
                     )
                 )
         return expanded
+
+    # Sentinel "All Other Make/Models" markers. Word-boundary anchored so a
+    # legit make/model that merely ends in "…brothers" is NOT matched.
+    _SENTINEL_MAKE_MODEL_RE = re.compile(r"\ball other\b|\bothers?$", re.IGNORECASE)
+
+    @classmethod
+    def _is_make_model_sentinel(cls, rule: CommissionRule) -> bool:
+        """True when a rule's make or model list is the generic
+        'All Other Make/Models' sentinel bucket."""
+        cond = getattr(rule, "conditions", None)
+        if cond is None:
+            return False
+        for field in ("vehicle_make", "vehicle_model"):
+            for v in getattr(cond, field, None) or []:
+                if cls._SENTINEL_MAKE_MODEL_RE.search(str(v)):
+                    return True
+        return False
+
+    def _clone_make_bucket(
+        self,
+        rule: CommissionRule,
+        suffix: str,
+        make: Optional[List[str]],
+        make_exclude: Optional[List[str]],
+        model_exclude: Optional[List[str]],
+        outcome: Optional[CommissionOutcome] = None,
+    ) -> CommissionRule:
+        """Clone a rule into one make/model exclusion bucket, sharing its
+        dates/priority. Make/model include+exclude fields are set explicitly;
+        the source rule's own make/model text is cleared. ``outcome`` defaults
+        to the source rule's outcome (sentinel fan-out); pass an explicit
+        outcome to override it (e.g. the synthesized 0% all-other buckets)."""
+        if rule.conditions is not None:
+            cond = rule.conditions.model_copy(deep=True)
+        else:
+            cond = RuleConditions()
+        cond.vehicle_make = make
+        cond.vehicle_model = None
+        cond.vehicle_make_exclude = make_exclude
+        cond.vehicle_model_exclude = model_exclude
+        return CommissionRule(
+            rule_id=f"{rule.rule_id}{suffix}",
+            priority=rule.priority,
+            conditions=cond,
+            outcome=outcome if outcome is not None else rule.outcome,
+            valid_from=rule.valid_from,
+            valid_to=rule.valid_to,
+            rule_description=rule.rule_description,
+        )
+
+    @staticmethod
+    def _zero_outcome(source: Optional[CommissionOutcome]) -> CommissionOutcome:
+        """Build a 0% percentage outcome for a synthesized all-other bucket,
+        keeping only the source's payout basis (``applied_on``). All
+        deduction-bearing fields are stripped — a zero-payout deal has nothing
+        to deduct from, and the CPA-not-collected footnote (carried in
+        ``qualifying_clauses`` / ``other_conditions``) would otherwise drive
+        ``materialize_cpa_split`` to compute a negative without-CPA payout
+        (0% − 1.5% = −1.5%, which fails schema validation). Leaving
+        ``qualifying_clauses``/``other_conditions``/``deductions`` unset keeps
+        the rule a single 0% deal (CPA-unconstrained = applies to both)."""
+        return CommissionOutcome(
+            commission_type="percentage",
+            percentage_value=0.0,
+            applied_on=source.applied_on if source is not None else None,
+        )
+
+    def _make_bucket_match_key(self, rule: CommissionRule) -> str:
+        """Conditions-only key (make/model AND their exclude siblings removed,
+        outcome IGNORED) used to pair a sentinel row with its explicit sibling.
+        Unlike _duplicate_collapse_key this excludes the outcome — the sentinel
+        and its sibling deliberately carry DIFFERENT rates."""
+        cond_dump: Dict[str, Any] = {}
+        if rule.conditions is not None:
+            cond_dump = rule.conditions.model_dump(exclude_none=False)
+            for field in (
+                "vehicle_make",
+                "vehicle_model",
+                "vehicle_make_exclude",
+                "vehicle_model_exclude",
+            ):
+                cond_dump.pop(field, None)
+            for k, v in list(cond_dump.items()):
+                if isinstance(v, list):
+                    cond_dump[k] = sorted(v, key=str)
+        return json.dumps(cond_dump, sort_keys=True, default=str)
+
+    def _bifurcate_make_buckets(
+        self, rules: List[CommissionRule]
+    ) -> List[CommissionRule]:
+        """Expand each sentinel 'All Other Make/Models' row into two explicit
+        make/model exclusion buckets (R3).
+
+        The Chola GCCV ≤3.5T grid publishes THREE logical buckets sharing one
+        rate ladder shape but with distinct rates:
+          (a) TATA/Maruti/Mahindra + <model list>            (explicit sibling)
+          (b) TATA/Maruti/Mahindra, NOT those models         (sentinel → _XMODEL)
+          (c) makes OTHER than TATA/Maruti/Mahindra          (sentinel → _XMAKE)
+
+        (a) is already emitted as an explicit make/model rule. The sentinel row
+        carries (b)+(c)'s shared rate. We locate the explicit sibling by the
+        collapse key (identical modulo make/model — O(1), no pairwise scan),
+        union its makes M and models L, then replace the sentinel with clones
+        (b) [make=M, model_exclude=L] and (c) [make_exclude=M].
+
+        No silent constant fallback: when a sentinel has no explicit sibling
+        (or the sibling carries no make list) the sentinel is kept verbatim and
+        a loud validator WARNING is emitted — buckets are never fabricated."""
+        if not rules:
+            return rules
+
+        # Index explicit make/model-bearing rules by collapse key (make/model
+        # ignored) so each sentinel finds its sibling in O(1).
+        explicit_by_key: Dict[str, List[CommissionRule]] = {}
+        # Match-keys that already carry an all-other exclusion bucket on input
+        # (e.g. a prior fan-out on a double transform) — so the 0% synthesis
+        # below stays idempotent and never re-fabricates existing buckets.
+        covered_keys: Set[str] = set()
+        for r in rules:
+            cond = r.conditions
+            if cond is None:
+                continue
+            if cond.vehicle_make_exclude or cond.vehicle_model_exclude:
+                covered_keys.add(self._make_bucket_match_key(r))
+            if self._is_make_model_sentinel(r):
+                continue
+            if not (cond.vehicle_make or cond.vehicle_model):
+                continue
+            explicit_by_key.setdefault(self._make_bucket_match_key(r), []).append(r)
+
+        result: List[CommissionRule] = []
+        n_split = 0
+        # Match-keys whose all-other buckets came from a real source sentinel —
+        # so the 0% synthesis pass below does NOT also fabricate them.
+        fanned_keys: Set[str] = set()
+        for r in rules:
+            if not self._is_make_model_sentinel(r):
+                result.append(r)
+                continue
+            siblings = explicit_by_key.get(self._make_bucket_match_key(r))
+            if not siblings:
+                self.warnings.append(
+                    f"Make-bucket sentinel '{r.rule_id}' has no explicit "
+                    f"sibling — buckets not derivable; kept verbatim"
+                )
+                result.append(r)
+                continue
+            makes = sorted(
+                {m for s in siblings for m in (s.conditions.vehicle_make or [])}
+            )
+            models = sorted(
+                {m for s in siblings for m in (s.conditions.vehicle_model or [])}
+            )
+            if not makes:
+                self.warnings.append(
+                    f"Make-bucket sentinel '{r.rule_id}' sibling carries no "
+                    f"make list — kept verbatim"
+                )
+                result.append(r)
+                continue
+            # bucket (b): the explicit makes, excluding the enumerated models.
+            result.append(
+                self._clone_make_bucket(
+                    r,
+                    "_XMODEL",
+                    make=makes,
+                    make_exclude=None,
+                    model_exclude=models or None,
+                )
+            )
+            # bucket (c): all OTHER makes.
+            result.append(
+                self._clone_make_bucket(
+                    r,
+                    "_XMAKE",
+                    make=None,
+                    make_exclude=makes,
+                    model_exclude=None,
+                )
+            )
+            fanned_keys.add(self._make_bucket_match_key(r))
+            n_split += 1
+        if n_split:
+            self.warnings.append(
+                f"Make-bucket fan-out: split {n_split} sentinel row(s) into "
+                f"make/model exclusion buckets"
+            )
+
+        # 0% synthesis (inverse of the sentinel path). An explicit make/model
+        # row with NO source sentinel means the grid graded only the named
+        # makes (e.g. TATA/Maruti/Mahindra) and left the "All Other
+        # Make/Models" cell BLANK. Per the client, a blank all-other rate is a
+        # 0% deal, so materialize the missing all-other buckets at 0% — every
+        # graded cell then carries the full make/model distinction. Structural
+        # gate (an explicit make/model row without an all-other sibling), so it
+        # only fires where grading exists and never fabricates rows for
+        # un-graded bands. Group per match-key so each cell synthesizes once.
+        n_synth = 0
+        for match_key, siblings in explicit_by_key.items():
+            if match_key in fanned_keys or match_key in covered_keys:
+                continue
+            makes = sorted(
+                {m for s in siblings for m in (s.conditions.vehicle_make or [])}
+            )
+            models = sorted(
+                {m for s in siblings for m in (s.conditions.vehicle_model or [])}
+            )
+            if not makes:
+                # Only a model list, no make to exclude — cannot derive the
+                # "all other makes" bucket; leave the cell as-is.
+                continue
+            src = siblings[0]
+            zero = self._zero_outcome(src.outcome)
+            # bucket (b): named makes, excluding the enumerated models, at 0%.
+            result.append(
+                self._clone_make_bucket(
+                    src,
+                    "_XMODEL0",
+                    make=makes,
+                    make_exclude=None,
+                    model_exclude=models or None,
+                    outcome=zero,
+                )
+            )
+            # bucket (c): all OTHER makes, at 0%.
+            result.append(
+                self._clone_make_bucket(
+                    src,
+                    "_XMAKE0",
+                    make=None,
+                    make_exclude=makes,
+                    model_exclude=None,
+                    outcome=zero,
+                )
+            )
+            n_synth += 1
+        if n_synth:
+            self.warnings.append(
+                f"Make-bucket 0% synthesis: added {n_synth} all-other 0% "
+                f"bucket pair(s) for make/model-graded cells with no source "
+                f"all-other rate"
+            )
+        return result
 
     # Condition fields excluded from duplicate-collapse identity. Same
     # rationale as _DEDUPE_LIST_FIELDS: vehicle_make / vehicle_model commonly
@@ -2383,6 +2803,65 @@ class RawToCICSTransformer:
                 f"GVW recovered from sub-class slug '{cand}' -> ({start}, {end})"
             )
             return start, end
+        return None
+
+    @staticmethod
+    def _segment_probe(entry_conditions: Dict[str, Any], entry) -> str:
+        """Lower-cased blob of the fields that carry a Chola CV section token."""
+        return " ".join(
+            str(v)
+            for v in (
+                entry_conditions.get("vehicle_sub_class"),
+                getattr(entry, "source_section", "") or "",
+                getattr(entry, "product_type", "") or "",
+                getattr(entry, "rule_text", "") or "",
+            )
+            if v
+        ).lower()
+
+    def _recover_seating_range(
+        self, entry_conditions: Dict[str, Any], entry
+    ) -> Optional[Tuple[int, int]]:
+        """Recover the seating band from a Chola ``PCCV < 6`` / ``PCCV > 6``
+        section token when no per-row seating survived (sentinel ``(0, 99)``).
+
+        Grid-verbatim bands (G3a): ``<6`` → ``(0, 5)``, ``>6`` → ``(6, 99)``
+        (the 6-seater belongs to the upper band). Fires only on explicit token
+        presence, so non-PCCV rows are never touched. Returns None on miss."""
+        probe = self._segment_probe(entry_conditions, entry).replace(" ", "")
+        if "pccv>6" in probe or "pccv>=6" in probe:
+            self.warnings.append("Seating recovered from PCCV>6 token -> (6, 99)")
+            return 6, 99
+        if "pccv<6" in probe:
+            self.warnings.append("Seating recovered from PCCV<6 token -> (0, 5)")
+            return 0, 5
+        return None
+
+    def _recover_cc_range(
+        self, entry_conditions: Dict[str, Any], entry
+    ) -> Optional[Tuple[int, int]]:
+        """Recover the CC band from a Chola PCCV<6 4W taxi sub-class slug
+        (``2_4W_LT_1500CC`` / ``3_4W_GT_1500CC``) when conditions["cc"] was
+        absent (sentinel ``(0, 99999)``). ``LT`` → ``(0, N)``; ``GT`` →
+        ``(N, 99999)`` (the boundary de-overlap bumps the GT start to N+1).
+        Chola-gated and slug-anchored: the ``lt``/``gt`` token must sit at a
+        word boundary (start or after ``_``/whitespace) so a legit make/model
+        that merely contains those letters before a CC number (e.g. a
+        ``"Bolt 1500cc"`` variant) can never spuriously narrow an all-CC rule.
+        Returns None on miss."""
+        if self._carrier_code != "Chola":
+            return None
+        probe = self._segment_probe(entry_conditions, entry)
+        lt = re.search(r"(?:^|[_\s])lt[_\s]*(\d+)\s*cc", probe)
+        if lt:
+            n = int(lt.group(1))
+            self.warnings.append(f"CC recovered from LT slug -> (0, {n})")
+            return 0, n
+        gt = re.search(r"(?:^|[_\s])gt[_\s]*(\d+)\s*cc", probe)
+        if gt:
+            n = int(gt.group(1))
+            self.warnings.append(f"CC recovered from GT slug -> ({n}, 99999)")
+            return n, 99999
         return None
 
     def _expand_state_names(

@@ -245,6 +245,391 @@ class TwMakeCcBandGuardTests(TestCase):
         self.assertEqual(cond.vehicle_make, ["CCM"])
         self.assertEqual((cond.cc_start_range, cond.cc_end_range), (150, 350))
 
+    def test_body_token_in_make_moved_to_subclass(self):
+        # A make-less trailing column "SCOOTER > 0.37" mis-splits the body word
+        # into vehicle_make and the rate into cc. SCOOTER is a sub-class, never a
+        # make; the rate is not a CC. Route SCOOTER -> vehicle_sub_class, clear
+        # the bogus make, and leave cc unconstrained (all-CC), matching the
+        # make-qualified scooter rows. Rule is still emitted (kept, not dropped).
+        entry = RawCommissionEntry(
+            rule_text="Two Wheeler SCOOTER 0.37 AP ACT",
+            commission_value="30%",
+            product_name="Two Wheeler",
+            conditions={"vehicle_make": "SCOOTER", "cc": "0.37"},
+        )
+        cond = self.t._transform_conditions(entry, None, _raw([entry]))
+        self.assertIsNone(cond.vehicle_make)
+        self.assertEqual(cond.vehicle_sub_class, ["scooter"])
+        self.assertEqual((cond.cc_start_range, cond.cc_end_range), (0, 99999))
+
+    def test_body_token_negative_value_cc_cleaned(self):
+        # Same shape with the negative header value "-0.05" landing in cc.
+        entry = RawCommissionEntry(
+            rule_text="Two Wheeler SCOOTER -0.05 AP ACT",
+            commission_value="5%",
+            product_name="Two Wheeler",
+            conditions={"vehicle_make": "SCOOTER", "cc": "-0.05"},
+        )
+        cond = self.t._transform_conditions(entry, None, _raw([entry]))
+        self.assertIsNone(cond.vehicle_make)
+        self.assertEqual(cond.vehicle_sub_class, ["scooter"])
+        self.assertEqual((cond.cc_start_range, cond.cc_end_range), (0, 99999))
+
+
+class PccvTaxiRoutingTests(TestCase):
+    """R1: BIG_TAXIS / MAXI_CAB rows sit under the ``PCCV > 6`` section (token
+    → Buses) but are taxis (PCV). The taxi-body check must beat the section
+    token; school/staff bus rows in the same section stay Buses."""
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+
+    def _e(self, **kw):
+        base = dict(
+            rule_text="rule",
+            commission_value="10%",
+            product_name="Commercial Vehicle",
+            source_section="PCCV > 6",
+        )
+        base.update(kw)
+        return RawCommissionEntry(**base)
+
+    def test_big_taxi_is_pcv_not_buses(self):
+        e = self._e(conditions={"vehicle_sub_class": "big taxi"})
+        self.assertEqual(self.t._cv_segment_label(e), "PCV")
+
+    def test_maxi_cab_is_pcv_not_buses(self):
+        e = self._e(conditions={"vehicle_sub_class": "maxi cab"})
+        self.assertEqual(self.t._cv_segment_label(e), "PCV")
+
+    def test_school_bus_stays_buses(self):
+        e = self._e(conditions={"vehicle_sub_class": "school bus"})
+        self.assertEqual(self.t._cv_segment_label(e), "Buses")
+
+    def test_staff_bus_stays_buses(self):
+        e = self._e(conditions={"vehicle_sub_class": "staff bus"})
+        self.assertEqual(self.t._cv_segment_label(e), "Buses")
+
+    def test_bare_pccv_gt6_token_still_buses(self):
+        e = RawCommissionEntry(
+            rule_text="rule",
+            commission_value="10%",
+            product_name="Commercial Vehicle",
+            product_type="PCCV>6",
+        )
+        self.assertEqual(self.t._cv_segment_label(e), "Buses")
+
+
+class SeatingRecoveryTests(TestCase):
+    """G3a: PCCV<6 → (0,5), PCCV>6 → (6,99); the 6-seater is in the upper band."""
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+
+    def _cond(self, **kw):
+        base = dict(
+            rule_text="Commercial Vehicle",
+            commission_value="10%",
+            product_name="Commercial Vehicle",
+        )
+        base.update(kw)
+        e = RawCommissionEntry(**base)
+        return self.t._transform_conditions(e, None, _raw([e]))
+
+    def test_pccv_lt6_recovers_0_5(self):
+        cond = self._cond(
+            source_section="PCCV < 6", conditions={"vehicle_sub_class": "taxi"}
+        )
+        self.assertEqual(
+            (cond.seating_capacity_start_range, cond.seating_capacity_end_range), (0, 5)
+        )
+
+    def test_pccv_gt6_recovers_6_99(self):
+        cond = self._cond(
+            source_section="PCCV > 6", conditions={"vehicle_sub_class": "taxi"}
+        )
+        self.assertEqual(
+            (cond.seating_capacity_start_range, cond.seating_capacity_end_range),
+            (6, 99),
+        )
+
+    def test_above_6_token_boundary_six_in_upper_band(self):
+        cond = self._cond(conditions={"seating_capacity": "ABOVE 6"})
+        self.assertEqual(
+            (cond.seating_capacity_start_range, cond.seating_capacity_end_range),
+            (6, 99),
+        )
+
+    def test_no_token_stays_open_sentinel(self):
+        cond = self._cond(
+            source_section="GCCV", conditions={"vehicle_sub_class": "truck"}
+        )
+        self.assertEqual(
+            (cond.seating_capacity_start_range, cond.seating_capacity_end_range),
+            (0, 99),
+        )
+
+
+class CcRecoveryTests(TestCase):
+    """PCCV<6 4W taxi CC bands baked into the sub-class slug (Chola-gated)."""
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+        self.t._carrier_code = "Chola"
+
+    def _cond(self, **kw):
+        e = RawCommissionEntry(
+            rule_text=kw.pop("rule_text", "Commercial Vehicle"),
+            commission_value="10%",
+            product_name="Commercial Vehicle",
+            **kw,
+        )
+        return self.t._transform_conditions(e, None, _raw([e]))
+
+    def test_cc_from_conditions_lt_band(self):
+        cond = self._cond(conditions={"cc": "0-1500"})
+        self.assertEqual((cond.cc_start_range, cond.cc_end_range), (0, 1500))
+
+    def test_cc_recovered_from_lt_slug(self):
+        cond = self._cond(
+            source_section="PCCV < 6",
+            conditions={"vehicle_sub_class": "2_4W_LT_1500CC"},
+        )
+        self.assertEqual((cond.cc_start_range, cond.cc_end_range), (0, 1500))
+
+    def test_cc_recovered_from_gt_slug(self):
+        cond = self._cond(
+            source_section="PCCV < 6",
+            conditions={"vehicle_sub_class": "3_4W_GT_1500CC"},
+        )
+        self.assertEqual((cond.cc_start_range, cond.cc_end_range), (1500, 99999))
+
+    def test_cc_recovery_gated_to_chola(self):
+        # Non-Chola carrier: the LT/GT slug must NOT trigger CC recovery.
+        self.t._carrier_code = "Digit"
+        cond = self._cond(
+            source_section="PCCV < 6",
+            conditions={"vehicle_sub_class": "2_4W_LT_1500CC"},
+        )
+        self.assertEqual((cond.cc_start_range, cond.cc_end_range), (0, 99999))
+
+    def test_cc_recovery_not_triggered_by_embedded_letters(self):
+        # A make/model that merely contains "lt"/"gt" before a CC number
+        # ("Bolt 1500cc") must not spuriously narrow an all-CC rule — the
+        # lt/gt token is anchored to a slug boundary.
+        cond = self._cond(
+            rule_text="Bolt 1500cc variant",
+            conditions={"vehicle_sub_class": "taxi"},
+        )
+        self.assertEqual((cond.cc_start_range, cond.cc_end_range), (0, 99999))
+
+
+class MsvDistinctRulesTests(TestCase):
+    """R2: MSV rows become one distinct rule per body — no MISC-D lumping."""
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+
+    def test_msv_rows_stay_distinct(self):
+        specs = [
+            ("tractor", "10%"),
+            ("excavators", "12%"),
+            ("harvester", "14%"),
+            ("others", "0%"),
+        ]
+        entries = [
+            RawCommissionEntry(
+                rule_text=f"MSV {sc}",
+                commission_value=cv,
+                product_name="Commercial Vehicle",
+                product_type="MISC-D",
+                coverage_type_text="comprehensive",
+                conditions={"vehicle_sub_class": sc},
+            )
+            for sc, cv in specs
+        ]
+        product = self.t._transform_product(
+            "Commercial Vehicle", entries, None, _raw(entries), segment="MISC-D"
+        )
+        subclasses = {
+            tuple(r.conditions.vehicle_sub_class or [])
+            for r in product.commission_rules
+        }
+        for expected in (("tractor",), ("excavators",), ("harvester",), ("others",)):
+            self.assertIn(expected, subclasses)
+        self.assertEqual(product.sub_category, "MISC-D")
+
+    def test_trac_renewal_sets_business_type(self):
+        e = RawCommissionEntry(
+            rule_text="MSV 1_TRAC[RENEWAL]",
+            commission_value="10%",
+            product_name="Commercial Vehicle",
+            conditions={"vehicle_sub_class": "1_TRAC[RENEWAL]"},
+        )
+        cond = self.t._transform_conditions(e, None, _raw([e]))
+        self.assertEqual(cond.business_type, ["renewal"])
+
+    def test_msv_subclass_aliases_normalized(self):
+        # Grid-verbatim MSV/PCCV>6 body aliases map to canonical sub-classes.
+        e = RawCommissionEntry(
+            rule_text="MSV",
+            commission_value="10%",
+            product_name="Commercial Vehicle",
+            conditions={
+                "vehicle_sub_class": "Earth Movers, Bullgraders, Big Taxis, Maxi Cab"
+            },
+        )
+        cond = self.t._transform_conditions(e, None, _raw([e]))
+        subs = set(cond.vehicle_sub_class or [])
+        self.assertIn("excavators", subs)  # earth movers -> excavators
+        self.assertIn("bulldozer", subs)  # bullgraders -> bulldozer
+        self.assertIn("taxi", subs)  # big taxis -> taxi
+        self.assertIn("maxicab", subs)  # maxi cab -> maxicab
+
+    def test_excavator_model_enumeration_to_subclass(self):
+        e = RawCommissionEntry(
+            rule_text="MSV 2_EXCAVATOR",
+            commission_value="12%",
+            product_name="Commercial Vehicle",
+            conditions={"vehicle_sub_class": "Loader, Excavators, Crane"},
+        )
+        cond = self.t._transform_conditions(e, None, _raw([e]))
+        self.assertIn("excavators", cond.vehicle_sub_class)
+        self.assertIn("loader", cond.vehicle_sub_class)
+        self.assertIn("crane", cond.vehicle_sub_class)
+
+    def test_excavator_body_enumeration_not_leaked_into_make_model(self):
+        # Source MSV "2_EXCAVATOR" repeats the body enumeration verbatim in the
+        # MAKE and MODEL columns; codegen copies it into make+model via the
+        # generic CV column rule. Bodies are sub-classes, not make/model — a
+        # make list identical to the model list must be dropped (Chola-gated).
+        bodies = (
+            "Loader, Excavators/Earth Movers, Crane, "
+            "Bulldozers/Bullgraders, Road Rollers, Fork Lift Trucks"
+        )
+        e = RawCommissionEntry(
+            rule_text="MSV 2_EXCAVATOR",
+            commission_value="12%",
+            product_name="Commercial Vehicle",
+            conditions={
+                "vehicle_sub_class": bodies,
+                "vehicle_make": bodies,
+                "vehicle_model": bodies,
+            },
+        )
+        self.t._carrier_code = "Chola"
+        cond = self.t._transform_conditions(e, None, _raw([e]))
+        self.assertIsNone(cond.vehicle_make)
+        self.assertIsNone(cond.vehicle_model)
+        # Bodies still survive as the sub-class dimension.
+        self.assertIn("excavators", cond.vehicle_sub_class)
+        self.assertIn("crane", cond.vehicle_sub_class)
+
+    def test_real_make_model_split_preserved(self):
+        # A genuine make x model grading (make != model, e.g. GCCV 2_UPTO_3.5T
+        # "TATA/Maruti/Mahindra" + model list) must NOT be dropped.
+        e = RawCommissionEntry(
+            rule_text="GCV 2_UPTO_3.5T AP/TS ACT",
+            commission_value="42%",
+            product_name="Commercial Vehicle",
+            conditions={
+                "vehicle_make": "TATA/ Maruti/ Mahindra",
+                "vehicle_model": "Ace, Super Ace, Yodha",
+            },
+        )
+        self.t._carrier_code = "Chola"
+        cond = self.t._transform_conditions(e, None, _raw([e]))
+        self.assertEqual(cond.vehicle_make, ["TATA/ Maruti/ Mahindra"])
+        self.assertEqual(cond.vehicle_model, ["Ace", "Super Ace", "Yodha"])
+
+
+class StaleGccvLeakGuardTests(TestCase):
+    """Chola merged-3W-header leak: GCCV goods rows copied into PCCV/MSV headers
+    must be dropped from non-GCV segments, kept in GCV."""
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+        self.t._carrier_code = "Chola"
+
+    def _entries(self, descs):
+        return [
+            RawCommissionEntry(
+                rule_text=dsc,
+                commission_value="10%",
+                product_name="Commercial Vehicle",
+                coverage_type_text="comprehensive",
+            )
+            for dsc in descs
+        ]
+
+    def _products(self, descs):
+        entries = self._entries(descs)
+        prods = self.t._transform_products(entries, None, _raw(entries))
+        return {p.sub_category: p for p in prods}
+
+    def _descs(self, products, sub):
+        p = products.get(sub)
+        return [r.rule_description for r in p.commission_rules] if p else []
+
+    def test_gccv_leak_dropped_from_pcv_kept_in_gcv(self):
+        # A GCCV goods row + a real PCV row: the GCCV copy must land ONLY in GCV.
+        prods = self._products(["GCCV 3W AP/TS ACT", "PCV 1_3W_AUTO AP/TS ACT"])
+        self.assertFalse(
+            any((d or "").lower().startswith("gccv") for d in self._descs(prods, "PCV"))
+        )
+        self.assertTrue(
+            any((d or "").lower().startswith("gccv") for d in self._descs(prods, "GCV"))
+        )
+        self.assertTrue(
+            any((d or "").startswith("PCV") for d in self._descs(prods, "PCV"))
+        )
+
+    def test_all_leak_segment_never_created(self):
+        # A GCCV row that would segment into MISC-D produces NO MISC-D product
+        # (and no empty-product crash) — it stays a GCV row only.
+        prods = self._products(["GCCV 3W AP ACT"])
+        self.assertNotIn("MISC-D", prods)
+        self.assertIn("GCV", prods)
+
+    def test_gccv_leak_dropped_from_buses(self):
+        # A GCCV goods row + a real bus row: GCCV copy lands only in GCV.
+        prods = self._products(["GCCV 3W AP ACT", "Buses 1_SCHOOL_BUS AP ACT"])
+        self.assertFalse(
+            any(
+                (d or "").lower().startswith("gccv")
+                for d in self._descs(prods, "Buses")
+            )
+        )
+        self.assertIn("Buses", prods)
+        self.assertTrue(
+            any((d or "").lower().startswith("gccv") for d in self._descs(prods, "GCV"))
+        )
+
+    def test_non_chola_not_dropped(self):
+        self.t._carrier_code = "Digit"
+        # A stale source_section forces the GCCV rule_text into a PCV segment;
+        # for a non-Chola carrier the guard must NOT fire.
+        entries = [
+            RawCommissionEntry(
+                rule_text="GCCV 3W AP ACT",
+                commission_value="10%",
+                product_name="Commercial Vehicle",
+                coverage_type_text="comprehensive",
+                source_section="PCV 1_3W_AUTO",
+            )
+        ]
+        prods = {
+            p.sub_category: p
+            for p in self.t._transform_products(entries, None, _raw(entries))
+        }
+        self.assertIn("PCV", prods)
+        self.assertTrue(
+            any(
+                (r.rule_description or "").lower().startswith("gccv")
+                for r in prods["PCV"].commission_rules
+            )
+        )
+
 
 class CommercialFuelBifurcationTests(TestCase):
     """A commercial product that has a dedicated Electric row must pin its

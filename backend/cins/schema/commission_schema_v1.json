@@ -290,7 +290,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["private-car", "taxi", "scooter", "moped", "bike", "e-rickshaw", "auto-rickshaw", "pick-up-delivery-van", "truck", "tractor", "tipper", "heavy-truck-semi-trailer", "dumper", "tanker", "trailer", "refrigerated-van", "bulker", "school-bus", "passenger-bus", "agricultural-tractor", "backhoe-loader", "crane", "ambulance", "loader", "tractor-loader", "harvester", "excavators", "garbage-van", "motor-grader", "transit-mixer", "fork-lift-trucks", "generator-van", "drilling-rigs", "compressors", "other-carts", "plane-loaders-and-other", "road-rollers", "road-sweeper", "staff-bus", "car-carrier", "greater-than-six-seater", "kaali-peeli-taxi", "not-available", "e-bike", "flat-bed-trailer", "kisan-suvidha", "container", "towing-van", "bulldozer", "compactor", "gas-tanker", "jetting-machine", "fire-vehicles"]
+            "enum": ["private-car", "taxi", "scooter", "moped", "bike", "e-rickshaw", "auto-rickshaw", "pick-up-delivery-van", "truck", "tractor", "tipper", "heavy-truck-semi-trailer", "dumper", "tanker", "trailer", "refrigerated-van", "bulker", "school-bus", "passenger-bus", "agricultural-tractor", "backhoe-loader", "crane", "ambulance", "loader", "tractor-loader", "harvester", "excavators", "garbage-van", "motor-grader", "transit-mixer", "fork-lift-trucks", "generator-van", "drilling-rigs", "compressors", "other-carts", "plane-loaders-and-other", "road-rollers", "road-sweeper", "staff-bus", "car-carrier", "greater-than-six-seater", "kaali-peeli-taxi", "not-available", "e-bike", "flat-bed-trailer", "kisan-suvidha", "container", "towing-van", "bulldozer", "compactor", "gas-tanker", "jetting-machine", "fire-vehicles", "maxicab", "others"]
           },
           "description": "Vehicle sub-class(es)"
         },
@@ -414,6 +414,20 @@
             "type": "string"
           },
           "description": "Vehicle model(s), free-text"
+        },
+        "vehicle_make_exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Vehicle make(s) to EXCLUDE — rule matches only when policy make is NOT in this list (e.g. 'All Other Make/Models' bucket)"
+        },
+        "vehicle_model_exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Vehicle model(s) to EXCLUDE — rule matches only when policy model is NOT in this list"
         },
         "vehicle_carrier": {
           "type": "array",
