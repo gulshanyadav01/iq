@@ -26,6 +26,13 @@ from typing import Dict, List, Optional
 from cins.processors.content.indexer import ContentIndexer, IndexedDocument
 from cins.processors.content.prepare_prompt import prepare_extraction_request
 from cins.processors.core.cpa_split import materialize_cpa_split
+from cins.processors.core.sheet_visibility import (
+    all_hidden_error,
+    derive_sheet_sets,
+    describe_hidden,
+    hidden_sheet_names,
+    visible_sheet_names,
+)
 
 logger = logging.getLogger("pipeline")
 
@@ -77,21 +84,30 @@ def derive_pipeline_routing(
     in `commission_intake.tasks.run_extraction`. Keep these in lockstep so the
     pre-created PENDING ExtractionPass rows match the rows the pipeline writes.
 
+    Sheets whose Excel tab is hidden are excluded — from the commission set
+    *and* from the all-sheets fallback. Filtering only the commission set would
+    mean that hiding the one commission sheet empties it, the fallback fires,
+    and every hidden sheet comes back. See `cins.processors.core.sheet_visibility`.
+
     Args:
         source_type: indexed_doc.source_type ("email", "excel", "pdf", ...)
-        sheet_classifications: {sheet_name: {"sheet_type": "commission_data"|...}}
+        sheet_classifications: {sheet_name: {"sheet_type": ..., "visibility": ...}}
         sheet_names: ordered list of all sheet names available
         excel_attachments: list of attachment filenames (email source only)
 
     Returns:
         (sheets_to_process, attachment_name)
     """
-    commission_sheets = [
-        name
-        for name, info in (sheet_classifications or {}).items()
-        if (info or {}).get("sheet_type") == "commission_data"
-    ]
-    sheets_to_process = commission_sheets if commission_sheets else list(sheet_names)
+    commission_sheets, _master_sheets, hidden = derive_sheet_sets(sheet_classifications)
+    visible = visible_sheet_names(sheet_names, sheet_classifications)
+    sheets_to_process = commission_sheets if commission_sheets else visible
+
+    if hidden:
+        logger.info(
+            "Routing excludes %d non-visible sheet(s): %s",
+            len(hidden),
+            describe_hidden(sheet_classifications),
+        )
 
     # Mirrors process_from_indexed: use the attachment name only when there is
     # exactly one attachment for an email source — otherwise blank.
@@ -412,6 +428,23 @@ def _merge_sheet_jsons(
     return combined_data
 
 
+def _extractable_sheet_contents(indexed_doc) -> Dict[str, str]:
+    """Sheet contents minus hidden sheets.
+
+    What the coverage validators must score against: a hidden sheet's rows are
+    deliberately never extracted, so leaving them in makes every data row on it
+    an "uncovered row" and turns this feature into a wall of CRITICAL/HIGH
+    validation errors on any workbook with a hidden data tab.
+    """
+    contents = indexed_doc.get_all_sheet_contents()
+    getter = getattr(indexed_doc, "get_sheet_classifications", None)
+    classifications = getter() if callable(getter) else {}
+    hidden = set(hidden_sheet_names(classifications))
+    if not hidden:
+        return contents
+    return {name: c for name, c in contents.items() if name not in hidden}
+
+
 def _run_validators(output_path: Path, indexed_doc=None):
     """Run SchemaValidator + RuleOverlapChecker (+ RowCoverageValidator when the
     source grid is available). Returns (schema_result, overlap_result).
@@ -430,14 +463,26 @@ def _run_validators(output_path: Path, indexed_doc=None):
     except ImportError:
         logger.warning("Validators not available; skipping validation")
         return None, None
+    extractable = None
     if indexed_doc is not None and schema_result is not None:
+        # Derived once for both validators — the filter walks every sheet and
+        # reads Django settings. Hoisted above both try blocks so the second
+        # cannot NameError when the first fails before assigning.
+        try:
+            extractable = _extractable_sheet_contents(indexed_doc)
+        except Exception as e:  # never let coverage checking break the pipeline
+            logger.warning(f"Could not derive extractable sheet contents: {e}")
+            extractable = None
+
+    if (
+        indexed_doc is not None
+        and schema_result is not None
+        and extractable is not None
+    ):
         try:
             from cins.validators.row_coverage_validator import RowCoverageValidator
 
-            sheet_contents = indexed_doc.get_all_sheet_contents()
-            rc_result = RowCoverageValidator().validate(
-                str(output_path), sheet_contents
-            )
+            rc_result = RowCoverageValidator().validate(str(output_path), extractable)
             schema_result.errors.extend(rc_result.errors)
             schema_result.warnings.extend(rc_result.warnings)
             schema_result.info.extend(rc_result.info)
@@ -449,7 +494,7 @@ def _run_validators(output_path: Path, indexed_doc=None):
             )
 
             ci_result = CoverageIntegrityValidator().validate(
-                str(output_path), indexed_doc.get_all_sheet_contents()
+                str(output_path), extractable
             )
             schema_result.errors.extend(ci_result.errors)
             schema_result.warnings.extend(ci_result.warnings)
@@ -877,12 +922,23 @@ class Pipeline:
                 )
 
         source_meta = indexed_doc.metadata.get("source_metadata", {})
+        classifications = indexed_doc.get_sheet_classifications()
         sheets_to_process, _ = derive_pipeline_routing(
             source_type=indexed_doc.source_type,
-            sheet_classifications=indexed_doc.get_sheet_classifications(),
+            sheet_classifications=classifications,
             sheet_names=list(sheet_contents.keys()),
             excel_attachments=source_meta.get("excel_attachments", []),
         )
+
+        # Every sheet filtered out: completing here would write an empty CICS
+        # doc and read in the UI as "extraction succeeded, no commission data".
+        if not sheets_to_process and sheet_contents:
+            raise ValueError(
+                all_hidden_error(
+                    len(sheet_contents), hidden_sheet_names(classifications)
+                )
+            )
+
         total_sheets = len(sheets_to_process)
 
         email_body_for_pass3 = ""
