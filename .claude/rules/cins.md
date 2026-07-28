@@ -21,15 +21,15 @@ Entry point: `processors/core/pipeline.py`
 
 ## Structure
 
-| Path | Purpose |
-| --- | --- |
-| `processors/core/` | Pipeline orchestration (`pipeline.py`), LLM extraction (`llm_extract.py`), codegen executor (`code_gen_executor.py`), raw→CICS transformer |
-| `processors/extractors/` | File-type handlers: PDF, EML, Excel→CSV, sheet classifier |
-| `processors/content/` | Content utilities: cleaning, CSV→Markdown, indexer, prompt preparation |
-| `processors/llm_services/` | LLM client wrappers |
-| `prompts/` | Markdown prompt templates — one file per pass |
-| `schema/` | CICS data model (`cics_model.py`), JSON schema, extraction pass definitions, raw extraction model |
-| `validators/` | Schema validator, rule overlap checker, raw extraction validator |
+| Path                       | Purpose                                                                                                                                                                                         |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `processors/core/`         | Pipeline orchestration (`pipeline.py`), LLM extraction (`llm_extract.py`), codegen executor (`code_gen_executor.py`), raw→CICS transformer, sheet-visibility predicates (`sheet_visibility.py`) |
+| `processors/extractors/`   | File-type handlers: PDF, EML, Excel→CSV, sheet classifier                                                                                                                                       |
+| `processors/content/`      | Content utilities: cleaning, CSV→Markdown, indexer, prompt preparation                                                                                                                          |
+| `processors/llm_services/` | LLM client wrappers                                                                                                                                                                             |
+| `prompts/`                 | Markdown prompt templates — one file per pass                                                                                                                                                   |
+| `schema/`                  | CICS data model (`cics_model.py`), JSON schema, extraction pass definitions, raw extraction model                                                                                               |
+| `validators/`              | Schema validator, rule overlap checker, raw extraction validator                                                                                                                                |
 
 ## Rules
 
@@ -42,6 +42,7 @@ Entry point: `processors/core/pipeline.py`
 - **LLM calls are expensive** — add new passes only if strictly necessary; prefer extending an existing pass prompt over adding a new pass
 - **Prompt templates use Jinja2** — keep logic minimal in templates; heavy pre-processing belongs in `content/prepare_prompt.py`
 - **Sheet classification** (`extractors/sheet_classifier.py`) determines which sheets feed which passes — changes here affect the entire pipeline
+- **Hidden worksheets never feed extraction** — Excel tabs whose `sheet_state` is `hidden` / `veryHidden` are scratch pads and stale grids. They are still indexed and classified (the UI has to show what was skipped, and a hidden sheet classified `commission_data` is the signal that the wrong tab was hidden), but they never produce rules and never enter a Pass 1/2/3 prompt. Every consumer must derive its sheet sets from `processors/core/sheet_visibility.py` (`derive_sheet_sets`, `is_sheet_visible`, `hidden_sheet_names`, `visible_sheet_names`) — **never inline the visibility comparison**. The moment two call sites compute it differently, the pipeline routes a different sheet set than the one it pre-created `PENDING` `ExtractionPass` rows for, and the UI shows passes that never complete. The filter fails open: a classification entry with no `visibility` key (anything indexed before `INDEXER_VERSION` 1.4, plus `image::` pseudo-sheets) reads as visible. `CINS_SKIP_HIDDEN_SHEETS=false` restores pre-change behaviour without a redeploy, and must keep lifting _every_ gate, including the `rerun-pass` API rejection — not just the routing filter. Contract is pinned by `cins/tests/test_hidden_sheets.py` and `commission_intake/tests/test_hidden_sheet_api.py`
 - **Pass 0C table boundaries are not safe to trust verbatim** — the prompt's "Shared Header Rule" makes the LLM emit cumulative `end_row` values for stacked sub-tables under one shared column-header block (one Two-Wheeler grid produced 24,006 rules instead of ~3,000 before the fix). `detect_csv_tables` post-processes raw LLM boundaries through `_dedupe_overlapping_table_ranges`, which (a) reshapes cumulative siblings — same `(start_row, col band)`, monotonic `end_row` — to "shared header band + own data band" using `header_row_count` from `metadata.formatting.detected_header_rows`, and (b) clips classic overlaps where a later commission table's `start_row` falls inside the prior table's range. Only `table_type == 'commission'` is reshaped; `master` and `notes` are left intact. See `cins/tests/test_table_dedupe.py` for the contract.
 
 ## When changing Pass 0C
