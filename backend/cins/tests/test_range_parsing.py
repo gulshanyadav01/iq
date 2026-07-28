@@ -16,6 +16,7 @@ Run from the backend container:
 
 from unittest import TestCase
 
+from cins.processors.core.code_gen_executor import _SANDBOX_HELPERS
 from cins.processors.core.raw_to_cics_transformer import RawToCICSTransformer
 
 
@@ -150,3 +151,46 @@ class ParseRangeFieldBackwardCompatTests(TestCase):
             self.transformer._parse_range_field("1000 TO 1500 CC"),
             (1000, 1500),
         )
+
+
+class GvwSlugParityTests(TestCase):
+    """`_gvw_slug_or_empty` (host) and the sandbox `parse_gvw_range` must agree
+    on every label — their docstrings claim parity, so the two copies of the
+    bracket-neutralisation and shape guards cannot be allowed to drift."""
+
+    HEADERS = [
+        "UPTO 3.5T",
+        "3.5T TO 7.5T",
+        "12T TO 16T",
+        "ABOVE 40T",
+        "3500-7500 KG",
+        "GVW < 2000",
+        "2_UPTO_3.5T",
+        "2_UPTO_3.5T[Electric]",
+        "GCCV",
+        "SCOOTER",
+        "150cc",
+        "1000 TO 1500 CC",
+        "UPTO 1000 CC[ NCB GT 25%]",
+        "1000CC[Electric]",
+        "7 KW",
+        "> 16 KW",
+        "[ NCB GT 25%]",
+        "",
+        "   ",
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        ns: dict = {}
+        exec(compile(_SANDBOX_HELPERS, "<helpers>", "exec"), ns)
+        cls.parse_gvw_range = staticmethod(ns["parse_gvw_range"])
+        cls.transformer = RawToCICSTransformer()
+
+    def test_parity(self):
+        for header in self.HEADERS:
+            with self.subTest(header=header):
+                self.assertEqual(
+                    self.transformer._gvw_slug_or_empty(header),
+                    self.parse_gvw_range(header),
+                )

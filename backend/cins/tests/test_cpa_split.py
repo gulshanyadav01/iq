@@ -108,6 +108,14 @@ class HelperTests(TestCase):
         self.assertIsNone(deduct_pct(None, 1.5))
         self.assertEqual(deduct_pct("", 1.5), "")
 
+    def test_deduct_pct_clamped_at_zero(self):
+        # A deduction exceeding the base commission (a 1.5% OD-CPA deduction on a
+        # 0.5%-1% Two Wheeler grade) must floor at 0, never emit a negative rate
+        # that fails schema validation. Carriers never pay negative commission.
+        self.assertEqual(deduct_pct(1.0, 1.5), 0.0)
+        self.assertEqual(deduct_pct(0.5, 1.5), 0.0)
+        self.assertEqual(deduct_pct(1.5, 1.5), 0.0)
+
 
 class MaterializeTests(TestCase):
     def test_comprehensive_splits_and_deducts_on_od(self):

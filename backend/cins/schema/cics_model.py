@@ -79,7 +79,10 @@ class RuleConditions(BaseModel):
         None, description="Booking mode(s): online, offline"
     )
     zero_dep: Optional[str] = Field(None, description="Zero depreciation: yes, no")
-    ncb: Optional[bool] = Field(None, description="No Claim Bonus flag")
+    ncb: Optional[bool] = Field(
+        None,
+        description="No Claim Bonus tier: true = the NCB > 25% grid, false = the base (NCB <= 25%) grid, null = no NCB dimension",
+    )
     cpa: Optional[str] = Field(None, description="CPA type: with-cpa, without-cpa")
     fuel_type: Optional[List[str]] = Field(
         None, description="Fuel type(s): petrol, diesel, cng, lpg, electric"

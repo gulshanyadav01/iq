@@ -123,11 +123,17 @@ def _cpa_clause_from_notes(other_conditions):
 
 
 def deduct_pct(v, amount):
-    """Subtract `amount` percentage points from a numeric % cell; pass others through."""
+    """Subtract `amount` percentage points from a numeric % cell; pass others through.
+
+    Clamped at 0: a CPA-not-collected deduction can exceed the base commission
+    on low-rate rows (e.g. a 1.5% OD-CPA deduction on a 0.5%-1% Two Wheeler
+    grade), which would otherwise emit a negative commission that the schema
+    validator flags CRITICAL and fails the whole document on. A carrier never
+    pays a negative commission, so the floor is 0."""
     if v is None or v == "":
         return v
     try:
-        return round(float(v) - amount, 4)
+        return max(0.0, round(float(v) - amount, 4))
     except (TypeError, ValueError):
         return v
 

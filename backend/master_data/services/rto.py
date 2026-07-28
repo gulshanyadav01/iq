@@ -22,6 +22,7 @@ RTO_PREFIX_TO_STATE_SLUG = {
     "ap": "andhra-pradesh",
     "ar": "arunachal-pradesh",
     "as": "assam",
+    "bh": "bihar",  # RTO/grid data uses both BR and BH for Bihar
     "br": "bihar",
     "ch": "chandigarh",
     "cg": "chattisgarh",

@@ -118,3 +118,76 @@ class Pass3CholaFuelTypeSuffixTests(TestCase):
         # Private Car grids (which do not use [P]/[D]) aren't mis-parsed.
         self.assertIn("only", self.llm_prompt.lower())
         self.assertIn("only", self.chola_overlay.lower())
+
+
+class Pass3CholaNcbTierTests(TestCase):
+    """
+    The Chola "NCB > 25%" parallel-table instruction MUST reach the Pass-3
+    codegen extractor via the overlay, and MUST forbid the generated code from
+    setting `conditions["ncb"]` itself — the transformer derives the tier from
+    the marker, and a codegen that guesses `"ncb": "Yes"` on the base table
+    would invert the whole product (defect 3). The shared base prompt must stay
+    carrier-free.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.codegen_prompt = (PROMPTS_DIR / "pass3_rules_codegen_prompt.md").read_text()
+        cls.chola_overlay = (
+            PROMPTS_DIR / "carrier_overlays" / "chola_pass3.md"
+        ).read_text()
+
+    def test_overlay_carries_ncb_tier_section(self):
+        lowered = self.chola_overlay.lower()
+        self.assertIn("ncb > 25%", lowered)
+        self.assertIn("ncb gt 25%", lowered)
+        # Both table sets must be emitted (rates differ — not duplicates).
+        self.assertIn("both table sets", lowered)
+
+    def test_overlay_forbids_setting_ncb_in_codegen(self):
+        lowered = self.chola_overlay.lower()
+        self.assertIn("do not set", lowered)
+        self.assertIn('conditions["ncb"]', self.chola_overlay)
+
+    def test_codegen_base_prompt_has_no_ncb_tier(self):
+        # Carrier-specific NCB tier rule must NOT bleed into the shared base.
+        self.assertNotIn("NCB GT 25%", self.codegen_prompt)
+
+
+class Pass3ColumnIndexLiteralTests(TestCase):
+    """Defect 1: a generated parser that filters blank spacer headers before
+    indexing reads a neighbouring state's column. Both the shared codegen base
+    and the Chola overlay MUST instruct that column indices are LITERAL and the
+    state segment is taken verbatim before the last '>'."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.codegen_prompt = (PROMPTS_DIR / "pass3_rules_codegen_prompt.md").read_text()
+        cls.chola_overlay = (
+            PROMPTS_DIR / "carrier_overlays" / "chola_pass3.md"
+        ).read_text()
+
+    def test_base_prompt_says_indices_are_literal(self):
+        lowered = self.codegen_prompt.lower()
+        self.assertIn("literal", lowered)
+        self.assertIn("enumerate", lowered)
+        self.assertIn("never filter", lowered.replace("`", ""))
+
+    def test_base_prompt_says_state_segment_verbatim(self):
+        lowered = self.codegen_prompt.lower()
+        self.assertIn("verbatim", lowered)
+        self.assertIn("last", lowered)  # "before the last >"
+        self.assertIn("up- east", lowered)
+
+    def test_overlay_says_indices_are_literal_and_state_verbatim(self):
+        lowered = self.chola_overlay.lower()
+        self.assertIn("literal", lowered)
+        self.assertIn("enumerate", lowered)
+        self.assertIn("verbatim", lowered)
+        self.assertIn("up- east", lowered)
+
+    def test_overlay_emits_col_map_self_check(self):
+        # The generated parser must assert one col_map entry per ">"-header cell.
+        self.assertIn("assert len(col_map)", self.chola_overlay)

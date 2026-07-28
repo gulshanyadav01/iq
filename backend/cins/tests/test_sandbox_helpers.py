@@ -144,7 +144,10 @@ class ParseCcRangeLtGtSlugTests(TestCase):
         # No underscore-slug shape → ordinal/wheel strip must not fire.
         self.assertEqual(self.parse_cc_range("150-350cc"), "150-350")
         self.assertEqual(self.parse_cc_range("ABOVE 1500 CC"), ">1500")
-        self.assertEqual(self.parse_cc_range("UPTO 1000 CC"), "1000")
+        # UPTO now yields an explicit lower-open band '0-1000' (was the bare
+        # '1000', which the transformer read as the single point 1000cc). See
+        # ParseCcRangeBracketQualifierTests / the UPTO branch in parse_cc_range.
+        self.assertEqual(self.parse_cc_range("UPTO 1000 CC"), "0-1000")
 
     def test_gvw_guard_reciprocal(self):
         # The CC slug must be rejected by parse_gvw_range (belongs to CC).
@@ -155,3 +158,49 @@ class ParseCcRangeLtGtSlugTests(TestCase):
         # to the join path and yields no CC range (stable, not garbage).
         self.assertEqual(self.parse_cc_range("1_SCHOOL_BUS"), "")
         self.assertEqual(self.parse_cc_range("1_3W_AUTO"), "")
+
+
+class ParseCcRangeBracketQualifierTests(TestCase):
+    """Chola NCB>25% grids suffix CC labels with a bracketed qualifier
+    ('UPTO 1000 CC[ NCB GT 25%]'). The bracket must be stripped before the digit
+    scan; otherwise the trailing '25%]' token leaked in and produced
+    cc=(1000,25) on 82 rules. The strip runs before the GVW/kW/slug guards, so
+    tonnage and LT-slug regressions stay intact."""
+
+    @classmethod
+    def setUpClass(cls):
+        ns: dict = {}
+        exec(compile(_SANDBOX_HELPERS, "<helpers>", "exec"), ns)
+        cls.parse_cc_range = staticmethod(ns["parse_cc_range"])
+        cls.parse_gvw_range = staticmethod(ns["parse_gvw_range"])
+
+    def test_upto_with_ncb_suffix(self):
+        self.assertEqual(self.parse_cc_range("UPTO 1000 CC[ NCB GT 25%]"), "0-1000")
+
+    def test_range_with_ncb_suffix(self):
+        self.assertEqual(
+            self.parse_cc_range("1000 TO 1500 CC[ NCB GT 25%]"), "1000-1500"
+        )
+
+    def test_above_with_ncb_suffix(self):
+        self.assertEqual(self.parse_cc_range("ABOVE 1500 CC[ NCB GT 25%]"), ">1500")
+
+    def test_bracket_p_parity(self):
+        # A '[P]' (petrol) qualifier is stripped just like the NCB one.
+        self.assertEqual(self.parse_cc_range("1000 TO 1500 CC[P]"), "1000-1500")
+
+    def test_electric_slug_regression_guard(self):
+        # Strip runs before the LT-slug branch, so the electric CV slug still
+        # resolves to a lower-open CC band, not garbage.
+        self.assertEqual(self.parse_cc_range("2_4W_LT_1500CC[Electric]"), "0-1500")
+        # And the tonnage guard still fires for the electric GVW slug.
+        self.assertEqual(self.parse_cc_range("2_UPTO_3.5T[Electric]"), "")
+
+    def test_gvw_rejects_bracketed_cc_label(self):
+        # parse_gvw_range must reject the bracketed CC label (belongs to CC),
+        # not read it as a kilogram range via the qualifier fallback.
+        self.assertEqual(self.parse_gvw_range("UPTO 1000 CC[ NCB GT 25%]"), "")
+
+    def test_bracket_only_label(self):
+        # A label that is nothing but a bracketed qualifier yields no CC range.
+        self.assertEqual(self.parse_cc_range("[ NCB GT 25%]"), "")
