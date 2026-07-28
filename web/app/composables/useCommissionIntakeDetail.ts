@@ -39,6 +39,27 @@ export interface CICSResult {
   sheet_results: unknown[]
 }
 
+/** Commission outcome as it appears in the CICS document. */
+export interface RuleOutcome {
+  commission_type?: string
+  percentage_value?: number | null
+  flat_value?: number | null
+  flat_currency?: string | null
+  tiers?: unknown[]
+}
+
+export interface CicsProduct {
+  product_name?: string
+  sub_category?: string
+  commission_rules?: { rule_id: string; outcome?: RuleOutcome }[]
+}
+
+/** Message from a failed $fetch, without reaching for `any`. */
+function errorDetail(err: unknown): string {
+  const detail = (err as { data?: { detail?: unknown } } | null)?.data?.detail
+  return typeof detail === 'string' ? detail : ''
+}
+
 export interface IndexedContent {
   source_type: string
   primary_content: string
@@ -46,6 +67,162 @@ export interface IndexedContent {
   sheet_contents: Record<string, string>
   sheet_metadata: Record<string, unknown>
   indexer_version: string
+  /** Backend's live CINS_SKIP_HIDDEN_SHEETS flag. Absent on older API responses. */
+  hidden_sheets_excluded?: boolean
+}
+
+export interface SheetCoverage {
+  /** Every sheet the indexer captured, hidden ones included. */
+  total: number
+  /** Sheets that fed extraction (total minus hidden minus reference-only). */
+  extracted: number
+  /** Sheets excluded because their Excel tab is hidden/veryHidden. */
+  hiddenNames: string[]
+  /** Visible sheets routing left out: master data, plus unclassified sheets
+   *  that are skipped whenever commission sheets exist. */
+  referenceCount: number
+  allHidden: boolean
+}
+
+// ── Sheet classification + visibility ────────────────────────────────────────
+// Visibility is deliberately kept orthogonal to classification: folding a
+// HIDDEN value into getSheetClassification would erase the "hidden AND
+// commission_data" case, which is the signal that the wrong tab was hidden.
+//
+// These are module-level pure functions so they can be tested without mounting
+// the composable (see useCommissionIntakeDetail.test.ts).
+
+type ClassificationEntry = {
+  sheet_type?: string
+  classification?: string
+  visibility?: string
+}
+
+function classificationsOf(indexed: IndexedContent): Record<string, ClassificationEntry> {
+  return (indexed.sheet_metadata?.classifications ?? {}) as Record<string, ClassificationEntry>
+}
+
+export function getSheetClassification(sheetName: string, indexed: IndexedContent): string {
+  const entry = classificationsOf(indexed)[sheetName]
+  return entry?.classification || entry?.sheet_type || 'unknown'
+}
+
+export function getSheetClassBadge(sheetName: string, indexed: IndexedContent): string {
+  const cls = getSheetClassification(sheetName, indexed)
+  if (cls === 'commission_data') return 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
+  if (cls === 'master_data') return 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400'
+  return 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400'
+}
+
+const VISIBILITY_INDEXER_VERSION = [1, 4]
+
+/**
+ * Whether this document was indexed by a version that records tab visibility.
+ * An absent visibility key is not evidence that a sheet was visible — for
+ * pre-1.4 rows we simply do not know, so we say nothing at all.
+ *
+ * Compared component-wise, not with parseFloat: parseFloat('1.10') is 1.1,
+ * which is < 1.4, so a float compare would silently hide the whole coverage
+ * surface the day INDEXER_VERSION reaches 1.10.
+ */
+export function supportsVisibility(indexed: IndexedContent): boolean {
+  const parts = String(indexed.indexer_version || '').split('.').map(n => parseInt(n, 10))
+  if (!parts.length || parts.some(n => !Number.isFinite(n))) return false
+  for (let i = 0; i < VISIBILITY_INDEXER_VERSION.length; i++) {
+    const actual = parts[i] ?? 0
+    const required = VISIBILITY_INDEXER_VERSION[i]!
+    if (actual !== required) return actual > required
+  }
+  return true
+}
+
+/** Recorded Excel tab state. Absent key => 'visible' (matches the backend). */
+export function getSheetVisibility(sheetName: string, indexed: IndexedContent): string {
+  return classificationsOf(indexed)[sheetName]?.visibility || 'visible'
+}
+
+export function isSheetHidden(sheetName: string, indexed: IndexedContent): boolean {
+  // `hidden_sheets_excluded` is the backend's live rollout flag. Absent (older
+  // API) defaults to true, matching the shipped default. Without it, turning
+  // CINS_SKIP_HIDDEN_SHEETS off would make the backend extract hidden sheets
+  // while this UI kept reporting them as skipped.
+  if (indexed.hidden_sheets_excluded === false) return false
+  return supportsVisibility(indexed) && getSheetVisibility(sheetName, indexed) !== 'visible'
+}
+
+/**
+ * Mirror of the backend's `derive_pipeline_routing`: when any visible sheet is
+ * classified commission_data, ONLY those sheets are extracted; otherwise every
+ * visible sheet is. Counting "extracted" as "not hidden and not master" would
+ * over-report a visible unclassified sheet as extracted (routing skips it when
+ * commission sheets exist) and under-report master sheets in the fallback case.
+ */
+function routedSheetNames(names: string[], indexed: IndexedContent): string[] {
+  const visible = names.filter(n => !isSheetHidden(n, indexed))
+  // `sheet_type` only, matching the backend's `sheet_type_of`. This branch must
+  // NOT use getSheetClassification, whose `classification` fallback the backend
+  // deliberately dropped — honouring a key the router ignores would make the
+  // coverage numbers disagree with what actually got extracted.
+  const commission = visible.filter(
+    n => classificationsOf(indexed)[n]?.sheet_type === 'commission_data'
+  )
+  return commission.length ? commission : visible
+}
+
+/**
+ * Split the indexed sheets into the ones that fed extraction and the ones whose
+ * Excel tab is hidden. The two are listed separately in the UI: a hidden tab is
+ * almost always hidden on purpose, so interleaving them with the real sheets
+ * makes a 14-sheet workbook read as if 10 things went wrong.
+ */
+export function partitionSheetNames(
+  indexed: IndexedContent | undefined | null
+): { visible: string[]; hidden: string[] } {
+  if (!indexed) return { visible: [], hidden: [] }
+  const names = Object.keys(indexed.sheet_contents || {})
+  return {
+    visible: names.filter(n => !isSheetHidden(n, indexed)),
+    hidden: names.filter(n => isSheetHidden(n, indexed)),
+  }
+}
+
+export function computeSheetCoverage(
+  indexed: IndexedContent | undefined | null
+): SheetCoverage | null {
+  if (!indexed || !supportsVisibility(indexed)) return null
+
+  const names = Object.keys(indexed.sheet_contents || {})
+  if (!names.length) return null
+
+  const hiddenNames = names.filter(n => isSheetHidden(n, indexed))
+  const routed = new Set(routedSheetNames(names, indexed))
+
+  return {
+    total: names.length,
+    extracted: routed.size,
+    hiddenNames,
+    referenceCount: names.length - routed.size - hiddenNames.length,
+    allHidden: hiddenNames.length === names.length,
+  }
+}
+
+export function coverageText(coverage: SheetCoverage | null): string {
+  if (!coverage) return ''
+  if (coverage.allHidden) {
+    return `Nothing to extract — all ${coverage.total} sheet(s) in this document are hidden.`
+  }
+  const parts: string[] = []
+  const hidden = coverage.hiddenNames.length
+  if (hidden) {
+    parts.push(`${hidden} hidden ${hidden === 1 ? 'sheet' : 'sheets'} skipped`)
+  }
+  if (coverage.referenceCount) {
+    // Not all of these are master data — an unclassified sheet is also left out
+    // of routing when commission sheets exist. Say "not extracted", which is
+    // true of both, rather than "reference only", which is true of only one.
+    parts.push(`${coverage.referenceCount} not extracted`)
+  }
+  return `${coverage.extracted} of ${coverage.total} sheets extracted — ${parts.join(', ')}.`
 }
 
 export interface ExtractionPass {
@@ -220,7 +397,7 @@ export function useCommissionIntakeDetail() {
     const d = cicsDoc.value
     if (!d) return []
     const products = (d.products as unknown[]) || []
-    const ruleCount = products.reduce((sum, p: any) => sum + (p.commission_rules?.length || 0), 0)
+    const ruleCount = products.reduce((sum, p) => sum + ((p as CicsProduct).commission_rules?.length || 0), 0)
     return [
       { label: 'Products', value: products.length },
       { label: 'Total Rules', value: ruleCount },
@@ -238,10 +415,10 @@ export function useCommissionIntakeDetail() {
     const changeRef = d.change_reference as Record<string, unknown> | undefined
     const rows = [
       { key: 'document_id', value: meta?.document_id },
-      { key: 'provider', value: (provider as any)?.provider_name },
-      { key: 'period_label', value: (period as any)?.period_label },
-      { key: 'effective_from', value: (period as any)?.effective_from },
-      { key: 'effective_to', value: (period as any)?.effective_to },
+      { key: 'provider', value: (provider as Record<string, string>)?.provider_name },
+      { key: 'period_label', value: (period as Record<string, string>)?.period_label },
+      { key: 'effective_from', value: (period as Record<string, string>)?.effective_from },
+      { key: 'effective_to', value: (period as Record<string, string>)?.effective_to },
       { key: 'source_file', value: meta?.source_file },
     ]
     if (changeRef?.is_inherited) {
@@ -253,7 +430,7 @@ export function useCommissionIntakeDetail() {
   const cicsProducts = computed(() => {
     const d = cicsDoc.value
     if (!d) return []
-    return (d.products as any[]) || []
+    return (d.products as CicsProduct[]) || []
   })
 
   // ── Validation computed ────────────────────────────────────────────────────
@@ -322,20 +499,25 @@ export function useCommissionIntakeDetail() {
     }
   }
 
-  function getSheetClassification(sheetName: string, indexed: IndexedContent): string {
-    const classifications = (indexed.sheet_metadata as any)?.classifications || {}
-    const entry = classifications[sheetName]
-    return entry?.classification || entry?.sheet_type || 'unknown'
-  }
+  const sheetCoverage = computed<SheetCoverage | null>(
+    () => computeSheetCoverage(doc.value?.indexed_content)
+  )
 
-  function getSheetClassBadge(sheetName: string, indexed: IndexedContent): string {
-    const cls = getSheetClassification(sheetName, indexed)
-    if (cls === 'commission_data') return 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
-    if (cls === 'master_data') return 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400'
-    return 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400'
-  }
+  /** Sheets that fed extraction vs sheets whose Excel tab is hidden. Listed in
+   *  two places in the UI so the hidden ones never pad the main list. */
+  const excelSheets = computed(() => partitionSheetNames(doc.value?.indexed_content))
 
-  function formatCommissionValue(outcome: any): string {
+  /** The coverage strip is a fact about the document, not about a stage — it
+   *  renders as soon as the document is indexed, so it is a pre-flight check
+   *  rather than a postmortem. Nothing to say when every sheet was extracted. */
+  const showCoverageStrip = computed(() => {
+    const c = sheetCoverage.value
+    return !!c && (c.hiddenNames.length > 0 || c.referenceCount > 0)
+  })
+
+  const coverageStripText = computed(() => coverageText(sheetCoverage.value))
+
+  function formatCommissionValue(outcome: RuleOutcome | null | undefined): string {
     if (!outcome) return '—'
     if (outcome.percentage_value !== null && outcome.percentage_value !== undefined) return `${outcome.percentage_value}%`
     if (outcome.flat_value !== null && outcome.flat_value !== undefined) return `${outcome.flat_currency || 'INR'} ${outcome.flat_value}`
@@ -343,7 +525,7 @@ export function useCommissionIntakeDetail() {
     return '—'
   }
 
-  function formatConditions(conditions: any): string {
+  function formatConditions(conditions: Record<string, unknown> | null | undefined): string {
     if (!conditions) return 'All'
     const labelMap: Record<string, string> = {
       vehicle_sub_class: 'vehicle', policy_type: 'policy', state: 'state',
@@ -459,8 +641,8 @@ export function useCommissionIntakeDetail() {
         `${getBaseUrl()}/api/commission-intake/documents/${route.params.id}/index/`,
         { method: 'POST', headers }
       )
-    } catch (err: any) {
-      actionError.value = err?.data?.detail || 'Failed to trigger indexing'
+    } catch (err: unknown) {
+      actionError.value = errorDetail(err) || 'Failed to trigger indexing'
     } finally {
       actionLoading.value = null
     }
@@ -475,8 +657,8 @@ export function useCommissionIntakeDetail() {
         `${getBaseUrl()}/api/commission-intake/documents/${route.params.id}/extract/`,
         { method: 'POST', headers }
       )
-    } catch (err: any) {
-      actionError.value = err?.data?.detail || 'Failed to trigger extraction'
+    } catch (err: unknown) {
+      actionError.value = errorDetail(err) || 'Failed to trigger extraction'
     } finally {
       actionLoading.value = null
     }
@@ -492,8 +674,8 @@ export function useCommissionIntakeDetail() {
         { method: 'POST', headers, body: { pass_number: passNumber, sheet_name: sheetName, attachment_name: attachmentName } }
       )
       await loadDoc()
-    } catch (err: any) {
-      actionError.value = err?.data?.detail || `Failed to rerun pass ${passNumber}`
+    } catch (err: unknown) {
+      actionError.value = errorDetail(err) || `Failed to rerun pass ${passNumber}`
     } finally {
       actionLoading.value = null
     }
@@ -509,8 +691,8 @@ export function useCommissionIntakeDetail() {
         { method: 'POST', headers }
       )
       await loadDoc()
-    } catch (err: any) {
-      actionError.value = err?.data?.detail || 'Failed to trigger transform'
+    } catch (err: unknown) {
+      actionError.value = errorDetail(err) || 'Failed to trigger transform'
     } finally {
       actionLoading.value = null
     }
@@ -526,8 +708,8 @@ export function useCommissionIntakeDetail() {
         { method: 'POST', headers }
       )
       await loadDoc()
-    } catch (err: any) {
-      actionError.value = err?.data?.detail || 'Failed to trigger validation'
+    } catch (err: unknown) {
+      actionError.value = errorDetail(err) || 'Failed to trigger validation'
     } finally {
       actionLoading.value = null
     }
@@ -542,8 +724,8 @@ export function useCommissionIntakeDetail() {
         `${getBaseUrl()}/api/commission-intake/documents/${route.params.id}/mark-validated/`,
         { method: 'POST', headers }
       )
-    } catch (err: any) {
-      actionError.value = err?.data?.detail || 'Failed to mark document as validated'
+    } catch (err: unknown) {
+      actionError.value = errorDetail(err) || 'Failed to mark document as validated'
     } finally {
       actionLoading.value = null
     }
@@ -558,8 +740,8 @@ export function useCommissionIntakeDetail() {
         `${getBaseUrl()}/api/commission-intake/documents/${route.params.id}/mark-invalidated/`,
         { method: 'POST', headers }
       )
-    } catch (err: any) {
-      actionError.value = err?.data?.detail || 'Failed to remove validation'
+    } catch (err: unknown) {
+      actionError.value = errorDetail(err) || 'Failed to remove validation'
     } finally {
       actionLoading.value = null
     }
@@ -576,8 +758,10 @@ export function useCommissionIntakeDetail() {
     cicsDoc, cicsMetrics, cicsMetadataRows, cicsProducts,
     validationBannerClass, validationBannerIcon, validationBannerText,
     passesForNum, passAggregateStatus,
+    sheetCoverage, showCoverageStrip, coverageStripText, excelSheets,
     isInFlight, getStatusBadgeClass, formatStatus, getPassStatusBadge, getSeverityBadge,
-    getSheetClassification, getSheetClassBadge, formatCommissionValue, formatConditions,
+    getSheetClassification, getSheetClassBadge,
+    formatCommissionValue, formatConditions,
     sheetPassStatus, copyJson, downloadJson, downloadExcel, downloadOriginal, loadDoc, refresh,
     triggerIndex, triggerExtract, triggerRerunPass, triggerTransform, triggerValidate,
     triggerMarkValidated, triggerMarkInvalidated,
