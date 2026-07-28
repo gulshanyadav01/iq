@@ -243,15 +243,32 @@ def run_extraction(document_id: str):
         # and the UI sees an inconsistent pass set.
         if indexed.sheet_contents:
             from cins.processors.core.pipeline import derive_pipeline_routing
+            from cins.processors.core.sheet_visibility import (
+                all_hidden_error,
+                hidden_sheet_names,
+            )
 
             sheet_metadata = indexed.sheet_metadata or {}
             source_meta = sheet_metadata.get("source_metadata", {})
+            classifications = sheet_metadata.get("classifications", {})
             sheets_to_process, attachment_name = derive_pipeline_routing(
                 source_type=indexed.source_type,
-                sheet_classifications=sheet_metadata.get("classifications", {}),
+                sheet_classifications=classifications,
                 sheet_names=list(indexed.sheet_contents.keys()),
                 excel_attachments=source_meta.get("excel_attachments", []),
             )
+
+            # Nothing routable — every sheet's tab is hidden. Fail loudly here,
+            # before any LLM call, rather than completing with zero rules and a
+            # green status the reviewer would read as "no commission data".
+            if not sheets_to_process:
+                raise ValueError(
+                    all_hidden_error(
+                        len(indexed.sheet_contents),
+                        hidden_sheet_names(classifications),
+                    )
+                )
+
             for sheet_name in sheets_to_process:
                 for pass_num in ExtractionPass.PassNumber.values:
                     ExtractionPass.objects.get_or_create(
@@ -669,22 +686,18 @@ def rerun_single_pass(
         ).update(status=ExtractionPass.Status.RUNNING, error="")
 
         from cins.processors.core.pipeline import build_pass_contents
+        from cins.processors.core.sheet_visibility import derive_sheet_sets
 
         sheet_contents = indexed.sheet_contents or {}
         sheet_metadata = indexed.sheet_metadata or {}
         classifications = sheet_metadata.get("classifications", {})
 
-        master_sheets = [
-            s
-            for s, meta in classifications.items()
-            if (meta.get("classification") or meta.get("sheet_type")) == "master_data"
-        ]
-        commission_sheets = [
-            s
-            for s, meta in classifications.items()
-            if (meta.get("classification") or meta.get("sheet_type"))
-            == "commission_data"
-        ]
+        # Same derivation the pipeline routes on. This used to be a local
+        # comprehension keyed on `classification or sheet_type` while routing
+        # keyed on `sheet_type` alone — two readers, one document, two different
+        # Pass 2 prompts. Sharing the helper also means the rerun cannot
+        # re-inject a hidden master sheet the main run excluded.
+        commission_sheets, master_sheets, _hidden = derive_sheet_sets(classifications)
 
         master_context = ""
         for ms in master_sheets:

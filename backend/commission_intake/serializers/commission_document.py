@@ -39,6 +39,8 @@ class CICSResultSerializer(serializers.ModelSerializer):
 
 
 class IndexedContentSummarySerializer(serializers.ModelSerializer):
+    hidden_sheets_excluded = serializers.SerializerMethodField()
+
     class Meta:
         model = IndexedContent
         fields = [
@@ -48,8 +50,23 @@ class IndexedContentSummarySerializer(serializers.ModelSerializer):
             "sheet_contents",
             "sheet_metadata",
             "indexer_version",
+            "hidden_sheets_excluded",
             "created_at",
         ]
+
+    def get_hidden_sheets_excluded(self, obj) -> bool:
+        """Whether the pipeline is currently excluding hidden worksheets.
+
+        The UI cannot derive this: `visibility` is recorded on every sheet
+        regardless, and the `CINS_SKIP_HIDDEN_SHEETS` rollout switch decides
+        whether routing acts on it. Without this field, flipping the flag off
+        makes the backend extract hidden sheets while the UI still reports them
+        as skipped — the rollback path silently turning the coverage notice
+        into a lie.
+        """
+        from cins.processors.core.sheet_visibility import skip_hidden_sheets_enabled
+
+        return skip_hidden_sheets_enabled()
 
 
 class ExtractionPassSerializer(serializers.ModelSerializer):
@@ -82,12 +99,24 @@ class CommissionDocumentCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CommissionDocument
-        fields = ["file", "metadata", "llm_provider", "llm_model", "excel_mode", "processing_mode"]
+        fields = [
+            "file",
+            "metadata",
+            "llm_provider",
+            "llm_model",
+            "excel_mode",
+            "processing_mode",
+        ]
 
     def validate(self, data):
-        if data.get("processing_mode") == CommissionDocument.ProcessingMode.EXTRACT_ONLY:
+        if (
+            data.get("processing_mode")
+            == CommissionDocument.ProcessingMode.EXTRACT_ONLY
+        ):
             raise serializers.ValidationError(
-                {"processing_mode": "extract_only cannot be used when uploading a new document."}
+                {
+                    "processing_mode": "extract_only cannot be used when uploading a new document."
+                }
             )
         return data
 
@@ -112,7 +141,9 @@ class ProcessingModeRequestSerializer(serializers.Serializer):
 class RerunPassRequestSerializer(serializers.Serializer):
     pass_number = serializers.ChoiceField(choices=[1, 2, 3])
     sheet_name = serializers.CharField(required=False, default="", allow_blank=True)
-    attachment_name = serializers.CharField(required=False, default="", allow_blank=True)
+    attachment_name = serializers.CharField(
+        required=False, default="", allow_blank=True
+    )
 
 
 class CommissionDocumentListSerializer(serializers.ModelSerializer):

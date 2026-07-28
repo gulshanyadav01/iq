@@ -18,37 +18,38 @@ Raw file → ContentIndexer → multi-pass LLM extraction → RawExtraction → 
 
 ## Directory layout
 
-| Path | Purpose |
-| --- | --- |
-| `processors/core/pipeline.py` | Top-level `Pipeline` orchestrator. Entry point: `Pipeline(llm_provider="gemini").process("file.xlsx")` |
-| `processors/core/llm_extract.py` | LLM extraction logic per pass — builds prompts, calls LLM, parses structured output |
-| `processors/core/raw_to_cics_transformer.py` | Deterministic RawExtraction → CICSDocument conversion (~1800 lines of mapping tables + normalization logic) |
-| `processors/core/code_gen_executor.py` | Sandboxed exec of LLM-generated Python as fallback for large docs. AST-validated, restricted builtins, threading timeout |
-| `processors/content/indexer.py` | Stage 1: extracts and caches file content per sheet/attachment |
-| `processors/content/prepare_prompt.py` | Loads prompt template + document content for LLM calls |
-| `processors/content/content_cleaning.py` | Pass 0A/0B/0C preprocessing (email cleaning, master data cleaning, table detection) |
-| `processors/content/csv_to_markdown.py` | Converts CSV sheets to markdown for LLM context |
-| `processors/extractors/` | Format-specific extractors: `excel_to_csv.py`, `extract_pdf.py`, `extract_eml.py`, `sheet_classifier.py` |
-| `processors/llm_services/` | LLM provider abstraction. `factory.py` → `get_llm_service()` returns `GeminiService` or `OpenAIService`. Singleton pattern via `LLMServiceMixin` |
-| `schema/extraction_passes.py` | Pydantic models for each pass + `merge_passes()` that combines results into RawExtraction |
-| `schema/raw_extraction.py` | Flat Pydantic models for LLM output (`RawExtraction`, `RawCommissionEntry`). Free-text fields — transformer normalizes to enums |
-| `schema/cics_model.py` | Full CICS Pydantic models (`CICSDocument`, `CommissionRule`, `RuleConditions`, etc.) with strict enums |
-| `schema/commission_schema_v1.json` | JSON Schema (draft-07) for CICS v1.0 — used by validators |
-| `validators/` | `SchemaValidator` (6-tier validation), `RuleOverlapChecker`, `RawExtractionValidator`, CLI `validate.py` |
-| `prompts/` | Markdown prompt templates, one per extraction pass (`pass0a_…`, `pass1_…`, `pass2_…`, `pass3_…`) |
-| `PRODUCT_FIELD_MAPPING.md` | Which fields apply to which product type (Car / TW / CV) |
-| `PRODUCT_FIELD_VALUES.md` | Allowed enum values for all CICS fields (states, vehicle types, etc.) |
+| Path                                         | Purpose                                                                                                                                                                                                                             |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `processors/core/pipeline.py`                | Top-level `Pipeline` orchestrator. Entry point: `Pipeline(llm_provider="gemini").process("file.xlsx")`                                                                                                                              |
+| `processors/core/llm_extract.py`             | LLM extraction logic per pass — builds prompts, calls LLM, parses structured output                                                                                                                                                 |
+| `processors/core/raw_to_cics_transformer.py` | Deterministic RawExtraction → CICSDocument conversion (~1800 lines of mapping tables + normalization logic)                                                                                                                         |
+| `processors/core/code_gen_executor.py`       | Sandboxed exec of LLM-generated Python as fallback for large docs. AST-validated, restricted builtins, threading timeout                                                                                                            |
+| `processors/core/sheet_visibility.py`        | Single source of truth for which worksheets may take part in extraction. `derive_sheet_sets()` → `(commission, master, hidden)`; also `is_sheet_visible`, `hidden_sheet_names`, `visible_sheet_names`, `skip_hidden_sheets_enabled` |
+| `processors/content/indexer.py`              | Stage 1: extracts and caches file content per sheet/attachment                                                                                                                                                                      |
+| `processors/content/prepare_prompt.py`       | Loads prompt template + document content for LLM calls                                                                                                                                                                              |
+| `processors/content/content_cleaning.py`     | Pass 0A/0B/0C preprocessing (email cleaning, master data cleaning, table detection)                                                                                                                                                 |
+| `processors/content/csv_to_markdown.py`      | Converts CSV sheets to markdown for LLM context                                                                                                                                                                                     |
+| `processors/extractors/`                     | Format-specific extractors: `excel_to_csv.py`, `extract_pdf.py`, `extract_eml.py`, `sheet_classifier.py`                                                                                                                            |
+| `processors/llm_services/`                   | LLM provider abstraction. `factory.py` → `get_llm_service()` returns `GeminiService` or `OpenAIService`. Singleton pattern via `LLMServiceMixin`                                                                                    |
+| `schema/extraction_passes.py`                | Pydantic models for each pass + `merge_passes()` that combines results into RawExtraction                                                                                                                                           |
+| `schema/raw_extraction.py`                   | Flat Pydantic models for LLM output (`RawExtraction`, `RawCommissionEntry`). Free-text fields — transformer normalizes to enums                                                                                                     |
+| `schema/cics_model.py`                       | Full CICS Pydantic models (`CICSDocument`, `CommissionRule`, `RuleConditions`, etc.) with strict enums                                                                                                                              |
+| `schema/commission_schema_v1.json`           | JSON Schema (draft-07) for CICS v1.0 — used by validators                                                                                                                                                                           |
+| `validators/`                                | `SchemaValidator` (6-tier validation), `RuleOverlapChecker`, `RawExtractionValidator`, CLI `validate.py`                                                                                                                            |
+| `prompts/`                                   | Markdown prompt templates, one per extraction pass (`pass0a_…`, `pass1_…`, `pass2_…`, `pass3_…`)                                                                                                                                    |
+| `PRODUCT_FIELD_MAPPING.md`                   | Which fields apply to which product type (Car / TW / CV)                                                                                                                                                                            |
+| `PRODUCT_FIELD_VALUES.md`                    | Allowed enum values for all CICS fields (states, vehicle types, etc.)                                                                                                                                                               |
 
 ## Extraction passes
 
-| Pass | Schema (in `extraction_passes.py`) | Purpose |
-| --- | --- | --- |
-| 0A | `EmailCleaningExtraction` | Clean email noise (optional, email sources only) |
-| 0B | `MasterDataCleaningExtraction` | Normalize master data sections |
-| 0C | `CSVTableDetectionExtraction` | Detect table boundaries in CSV sheets |
-| 1 | `MetadataExtraction` | Provider, period, global settings |
-| 2 | `MasterDataExtraction` (aliased as `ProductCatalogExtraction`) | Reference data (RTO mappings, declined lists) |
-| 3 | `RulesExtraction` | Products + commission rules |
+| Pass | Schema (in `extraction_passes.py`)                             | Purpose                                          |
+| ---- | -------------------------------------------------------------- | ------------------------------------------------ |
+| 0A   | `EmailCleaningExtraction`                                      | Clean email noise (optional, email sources only) |
+| 0B   | `MasterDataCleaningExtraction`                                 | Normalize master data sections                   |
+| 0C   | `CSVTableDetectionExtraction`                                  | Detect table boundaries in CSV sheets            |
+| 1    | `MetadataExtraction`                                           | Provider, period, global settings                |
+| 2    | `MasterDataExtraction` (aliased as `ProductCatalogExtraction`) | Reference data (RTO mappings, declined lists)    |
+| 3    | `RulesExtraction`                                              | Products + commission rules                      |
 
 Results from passes 1–3 are merged via `merge_passes()` into a `RawExtraction` dict.
 
@@ -62,6 +63,7 @@ Controlled by `LLM_PROVIDER` env var (default: `"gemini"`). Options: `"gemini"`,
 - **Prompts are markdown files** in `prompts/`, not embedded strings. If adding a new pass, create a `passN_*.md` file.
 - **`ProductCatalogExtraction` is a backward-compat alias** for `MasterDataExtraction` (`extraction_passes.py:370`).
 - **Large documents fall back to code-gen** — when input exceeds size thresholds (`llm_extract.py:30-36`), the pipeline asks the LLM to generate Python code instead of JSON, executed safely by `code_gen_executor.py`.
+- **Hidden worksheets are indexed but never extracted** — `ExcelToCSVConverter` records each tab's `sheet_state`, the indexer stores it as `sheet_classifications[name]["visibility"]`, and every routing decision filters on it via `processors/core/sheet_visibility.py`. Hidden (`hidden` / `veryHidden`) tabs are still converted and classified so the UI can show what was skipped, but they produce no rules and never enter a Pass 1/2/3 prompt. Exclusion happens at the point of _use_, not at enumeration. Rollout switch: `CINS_SKIP_HIDDEN_SHEETS` (default `true`). Fails open — an entry with no `visibility` key (indexed before `INDEXER_VERSION` 1.4, or an `image::` pseudo-sheet) reads as visible.
 - **Langfuse tracing** is integrated via `processors/llm_services/langfuse_client.py`. Controlled by `LANGFUSE_*` env vars.
 - **Pass 0C output is not trusted verbatim** — the prompt's "Shared Header Rule" makes the LLM emit cumulative `end_row` values for stacked sub-tables under one shared column-header block. `detect_csv_tables` post-processes raw boundaries through `_dedupe_overlapping_table_ranges` to (a) reshape cumulative siblings into "header band + own data band" using `metadata.formatting.detected_header_rows`, and (b) clip classic overlaps. Only `table_type == 'commission'` is touched; `master` / `notes` are preserved. The dedupe pass is load-bearing: regressions silently inflate rule counts by 5–10× without surfacing any validation error. Contract is pinned by `cins/tests/test_table_dedupe.py`.
 
@@ -72,3 +74,5 @@ Controlled by `LLM_PROVIDER` env var (default: `"gemini"`). Options: `"gemini"`,
 - The transformer (`raw_to_cics_transformer.py`) contains ~1800 lines of mapping tables. When adding new enum values, update both the mapping dicts in the transformer **and** `PRODUCT_FIELD_VALUES.md`.
 - The `raw_extraction.py` schemas deliberately avoid enums and nested objects. Constraints belong in `cics_model.py` only.
 - Imports inside `cins/` use absolute paths (`from cins.processors.…`), not relative. Follow this pattern.
+- Never inline a sheet-visibility check (`info.get("visibility") != "visible"` and friends). Import the helpers from `processors/core/sheet_visibility.py`. Two call sites computing the sheet set differently makes the pipeline route sheets it never created `PENDING` `ExtractionPass` rows for, and the UI hangs on passes that never complete.
+- Bumping `INDEXER_VERSION` (`processors/content/indexer.py`) does **not** re-index anything. Its only consumer is `_is_cache_valid`, which guards the _on-disk_ index directory — and commission intake never hits that cache, because `tasks.index_document` passes `force_reindex=True` into a `mkdtemp` it deletes afterwards. Nothing compares `IndexedContent.indexer_version` to `INDEXER_VERSION`, so existing DB rows keep their old value until someone re-indexes them by hand (`POST /commission-documents/{id}/index/`; `retry` 400s unless the document is FAILED). Treat the constant as a **data marker** — bump it when the shape of `sheet_metadata` changes so consumers can tell new rows from old, and expect historical rows to stay on the old value.

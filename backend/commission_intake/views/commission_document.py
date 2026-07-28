@@ -5,7 +5,7 @@ import re
 from django.db.models import Count, Q
 from django.http import FileResponse
 from django.utils import timezone
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -15,6 +15,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from cins.processors.core.cpa_split import applied_on_to_column, derive_applied_on
+from cins.processors.core.sheet_visibility import (
+    hidden_sheet_names,
+    skip_hidden_sheets_enabled,
+)
 from commission_intake.models import CommissionDocument
 
 
@@ -105,6 +109,110 @@ def partition_global_modifiers(cics_doc, min_shared=2):
     global_other = {text for text, n in other_counts.items() if n >= min_shared}
     global_clauses = {key for key, n in clause_counts.items() if n >= min_shared}
     return global_other, global_clauses
+
+
+def _write_text_cell(ws, row, column, value):
+    """Write a string cell that Excel will never evaluate as a formula.
+
+    Sheet names come from an uploaded workbook and classification labels come
+    from an LLM, so both are untrusted. openpyxl types any string starting with
+    "=" as TYPE_FORMULA, which would make a tab named `=1+1` a live formula in
+    a workbook an analyst opens on their desktop. Pinning data_type to "s"
+    keeps the displayed text identical while making it inert.
+    """
+    cell = ws.cell(row=row, column=column, value="" if value is None else str(value))
+    cell.data_type = "s"
+    return cell
+
+
+def _write_coverage_sheet(wb, document, header_font, header_fill):
+    """Append a "Sheet Coverage" worksheet describing which source sheets fed
+    the export.
+
+    Reconciliation is done in Excel, away from the app, so the coverage notice
+    on the detail page is invisible exactly when someone is asking "why is this
+    row missing". Three outcomes are distinguished, because one word would
+    conflate them: *Extracted* (fed the extraction passes), *Reference only*
+    (informed the passes but emits no rules of its own), and *Skipped — hidden*.
+
+    The extracted set comes from `derive_pipeline_routing`, the same helper the
+    pipeline routes on — not from the classification labels. Those two are not
+    interchangeable: when any commission sheet exists, routing processes ONLY
+    commission sheets, so a visible unclassified sheet is not extracted; when
+    none exists, routing falls back to every visible sheet, so master sheets
+    ARE extracted. Deriving the fate from labels would over-report coverage in
+    the first case and under-report it in the second, which is precisely the
+    false confidence this sheet exists to prevent.
+
+    No-ops for documents with no indexed sheets.
+    """
+    from commission_intake.models import IndexedContent
+    from cins.processors.core.pipeline import derive_pipeline_routing
+    from cins.processors.core.sheet_visibility import hidden_sheet_names, sheet_state
+
+    indexed = IndexedContent.objects.filter(document=document).first()
+    if not indexed or not indexed.sheet_contents:
+        return
+
+    sheet_metadata = indexed.sheet_metadata or {}
+    classifications = sheet_metadata.get("classifications") or {}
+    source_meta = sheet_metadata.get("source_metadata") or {}
+    sheet_names = list(indexed.sheet_contents.keys())
+
+    routed, _attachment = derive_pipeline_routing(
+        source_type=indexed.source_type,
+        sheet_classifications=classifications,
+        sheet_names=sheet_names,
+        excel_attachments=source_meta.get("excel_attachments", []),
+    )
+    routed_set = set(routed)
+    hidden = hidden_sheet_names(classifications)
+    hidden_set = set(hidden)
+
+    cws = wb.create_sheet(title="Sheet Coverage")
+    coverage_headers = ["Sheet", "Classification", "TabState", "UsedFor"]
+    for col_idx, col_name in enumerate(coverage_headers, start=1):
+        cell = cws.cell(row=1, column=col_idx, value=col_name)
+        cell.font = header_font
+        cell.fill = header_fill
+
+    row = 2
+    for name in sheet_names:
+        info = classifications.get(name) or {}
+        if name in hidden_set:
+            used_for = "Skipped — hidden sheet"
+        elif name in routed_set:
+            used_for = "Extracted"
+        elif (info.get("sheet_type")) == "master_data":
+            used_for = "Reference only (master data)"
+        else:
+            used_for = "Not extracted (unclassified)"
+        _write_text_cell(cws, row, 1, name)
+        _write_text_cell(cws, row, 2, info.get("sheet_type") or "unknown")
+        _write_text_cell(cws, row, 3, sheet_state(info))
+        _write_text_cell(cws, row, 4, used_for)
+        row += 1
+
+    summary_row = row + 1
+    extracted_count = len([n for n in sheet_names if n in routed_set])
+    reference_count = len(sheet_names) - extracted_count - len(hidden_set)
+    cws.cell(row=summary_row, column=1, value="Summary").font = header_font
+    # "not extracted" rather than "used as reference only": the count also
+    # includes visible unclassified sheets, which routing skips whenever any
+    # commission sheet exists. The per-row labels above say the same thing.
+    _write_text_cell(
+        cws,
+        summary_row,
+        2,
+        f"{extracted_count} of {len(sheet_names)} sheet(s) extracted"
+        + (f"; {len(hidden)} hidden sheet(s) skipped" if hidden else "")
+        + (f"; {reference_count} not extracted" if reference_count else ""),
+    )
+
+    cws.column_dimensions["A"].width = 40
+    cws.column_dimensions["B"].width = 20
+    cws.column_dimensions["C"].width = 14
+    cws.column_dimensions["D"].width = 34
 
 
 from commission_intake.serializers import (  # noqa: E402
@@ -311,10 +419,23 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
 
     @extend_schema(
         summary="Re-run single extraction pass",
-        description="Re-runs one of pass 1/2/3 for a specific sheet/attachment.",
+        description=(
+            "Re-runs one of pass 1/2/3 for a specific sheet/attachment. "
+            "Rejects sheet names outside the document's extraction set — hidden "
+            "worksheets and sheets the pipeline does not route are not re-runnable."
+        ),
         tags=["Commission Document"],
         request=RerunPassRequestSerializer,
-        responses={200: CommissionDocumentSerializer},
+        responses={
+            200: CommissionDocumentSerializer,
+            400: OpenApiResponse(
+                description=(
+                    "Document is not indexed, or the sheet is not part of its "
+                    "extraction set."
+                )
+            ),
+            409: OpenApiResponse(description="Document is currently being processed."),
+        },
     )
     @action(detail=True, methods=["post"], url_path="rerun-pass")
     def rerun_pass(self, request, *args, **kwargs):
@@ -330,7 +451,9 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                 {"detail": "Document is currently being processed."},
                 status=status.HTTP_409_CONFLICT,
             )
-        if not IndexedContent.objects.filter(document=instance).exists():
+        # One fetch, reused by the routed-set guard below.
+        indexed = IndexedContent.objects.filter(document=instance).first()
+        if indexed is None:
             return Response(
                 {"detail": "Document must be indexed before a pass can be re-run."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -340,6 +463,49 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         pass_number = req.validated_data["pass_number"]
         sheet_name = req.validated_data.get("sheet_name", "")
         attachment_name = req.validated_data.get("attachment_name", "")
+
+        # The sheet name arrives from the client, and the UI now lists sheets
+        # that were deliberately excluded from extraction. Without this check a
+        # POST naming a hidden sheet would run a full three-pass extraction of
+        # content the pipeline is designed never to touch.
+        #
+        # Gated on the rollout flag: CINS_SKIP_HIDDEN_SHEETS=false is documented
+        # as restoring pre-change behaviour without a redeploy, so it has to
+        # lift this rejection too, not just the routing filter.
+        if sheet_name and indexed.sheet_contents and skip_hidden_sheets_enabled():
+            from cins.processors.core.pipeline import derive_pipeline_routing
+
+            sheet_metadata = indexed.sheet_metadata or {}
+            source_meta = sheet_metadata.get("source_metadata", {})
+            classifications = sheet_metadata.get("classifications", {})
+            routed, _ = derive_pipeline_routing(
+                source_type=indexed.source_type,
+                sheet_classifications=classifications,
+                sheet_names=list(indexed.sheet_contents.keys()),
+                excel_attachments=source_meta.get("excel_attachments", []),
+            )
+            if sheet_name not in routed:
+                # Name the actual reason. A visible master_data sheet is also
+                # outside the routed set, and telling its owner "hidden sheets
+                # are excluded" sends them hunting for a hidden tab that is not
+                # there.
+                if sheet_name in set(hidden_sheet_names(classifications)):
+                    reason = "its Excel tab is hidden"
+                else:
+                    reason = (
+                        f"it is classified "
+                        f"'{(classifications.get(sheet_name) or {}).get('sheet_type') or 'unclassified'}'"
+                        f" and the pipeline only extracts commission sheets"
+                    )
+                return Response(
+                    {
+                        "detail": (
+                            f"Sheet '{sheet_name}' is not part of this document's "
+                            f"extraction set — {reason}."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         # Mark the pass as pending immediately so the UI reflects queued state
         ExtractionPass.objects.update_or_create(
@@ -886,6 +1052,13 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             gws.column_dimensions["C"].width = 80
             gws.column_dimensions["D"].width = 50
             gws.column_dimensions["E"].width = 50
+
+        # ── Sheet Coverage sheet ────────────────────────────────────────
+        # Reconciliation happens in Excel, outside the app, so the coverage
+        # notice on the detail page is invisible at the moment it matters most.
+        # One row per source sheet: what it was classified as, and whether it
+        # contributed rules, was reference-only, or was skipped.
+        _write_coverage_sheet(wb, instance, header_font, header_fill)
 
         buf = io.BytesIO()
         wb.save(buf)

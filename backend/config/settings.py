@@ -9,6 +9,7 @@ https://docs.djangoproject.com/en/5.2/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
+
 import os
 from datetime import timedelta
 from pathlib import Path
@@ -22,7 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Initialise environment variables
 env = environ.Env(
     DEBUG=(bool, False),
-    APP_ENV=(str, 'DEV'),
+    APP_ENV=(str, "DEV"),
     SECRET_KEY=str,
     WEBHOOK_SECRET_KEY=str,
     ALLOWED_HOSTS=(list, []),
@@ -33,47 +34,53 @@ env = environ.Env(
     DB_USER=str,
     DB_PASSWORD=str,
     DB_NAME=str,
-    AWS_S3_ENDPOINT_URL=(str, ''),
-    AWS_S3_PUBLIC_ENDPOINT_URL=(str, ''),
-    AWS_ACCESS_KEY_ID=(str, ''),
-    AWS_SECRET_ACCESS_KEY=(str, ''),
+    AWS_S3_ENDPOINT_URL=(str, ""),
+    AWS_S3_PUBLIC_ENDPOINT_URL=(str, ""),
+    AWS_ACCESS_KEY_ID=(str, ""),
+    AWS_SECRET_ACCESS_KEY=(str, ""),
     AWS_STORAGE_BUCKET_NAME=str,
-    AWS_S3_REGION_NAME=(str, ''),
+    AWS_S3_REGION_NAME=(str, ""),
     CELERY_RESULT_BACKEND=str,
     CELERY_CACHE_BACKEND=str,
     CELERY_BROKER_URL=str,
-    POLICY_EXTRACT_CALLBACK_URL=(str, ''),
-    POLICY_EXTRACT_GEMINI_MODEL=(str, 'gemini-2.5-flash-lite'),
+    POLICY_EXTRACT_CALLBACK_URL=(str, ""),
+    POLICY_EXTRACT_GEMINI_MODEL=(str, "gemini-2.5-flash-lite"),
     POLICY_EXTRACT_GEMINI_SEED=(int, 42),
+    CINS_SKIP_HIDDEN_SHEETS=(bool, True),
 )
-environ.Env.read_env(os.path.join(BASE_DIR, '.env'))
+environ.Env.read_env(os.path.join(BASE_DIR, ".env"))
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = env('SECRET_KEY')
+SECRET_KEY = env("SECRET_KEY")
 
-WEBHOOK_SECRET_KEY = env('WEBHOOK_SECRET_KEY')
+WEBHOOK_SECRET_KEY = env("WEBHOOK_SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = env('DEBUG')
+DEBUG = env("DEBUG")
 
-APP_ENV = env('APP_ENV')
+APP_ENV = env("APP_ENV")
 
-ALLOWED_HOSTS = env('ALLOWED_HOSTS')
+ALLOWED_HOSTS = env("ALLOWED_HOSTS")
 
-CSRF_TRUSTED_ORIGINS = env('CSRF_TRUSTED_ORIGINS')
+CSRF_TRUSTED_ORIGINS = env("CSRF_TRUSTED_ORIGINS")
 
-HOST_NAME = env('HOST_NAME')
+HOST_NAME = env("HOST_NAME")
 
-BETTER_AUTH_URL = env('BETTER_AUTH_URL')
+BETTER_AUTH_URL = env("BETTER_AUTH_URL")
 
-POLICY_EXTRACT_CALLBACK_URL = env('POLICY_EXTRACT_CALLBACK_URL')
+POLICY_EXTRACT_CALLBACK_URL = env("POLICY_EXTRACT_CALLBACK_URL")
 
-POLICY_EXTRACT_GEMINI_MODEL = env('POLICY_EXTRACT_GEMINI_MODEL')
-POLICY_EXTRACT_GEMINI_SEED = env('POLICY_EXTRACT_GEMINI_SEED')
+POLICY_EXTRACT_GEMINI_MODEL = env("POLICY_EXTRACT_GEMINI_MODEL")
+POLICY_EXTRACT_GEMINI_SEED = env("POLICY_EXTRACT_GEMINI_SEED")
+
+# Exclude worksheets whose Excel tab is hidden/veryHidden from commission
+# extraction. Rollout switch — set to False to restore the previous behaviour
+# (every indexed sheet is routable) without a redeploy.
+CINS_SKIP_HIDDEN_SHEETS = env("CINS_SKIP_HIDDEN_SHEETS")
 
 # Application definition
 
@@ -84,22 +91,21 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    'rest_framework',
-    'corsheaders',
-    'django_extensions',
-    'django_celery_results',
-    'django_celery_beat',
-    'drf_spectacular',
-    'django_filters',
-    'storages',
-
-    'accounts',
-    'core',
-    'policy_extract',
-    'pipelines',
-    'commission_intake',
-    'master_data',
-    'system'
+    "rest_framework",
+    "corsheaders",
+    "django_extensions",
+    "django_celery_results",
+    "django_celery_beat",
+    "drf_spectacular",
+    "django_filters",
+    "storages",
+    "accounts",
+    "core",
+    "policy_extract",
+    "pipelines",
+    "commission_intake",
+    "master_data",
+    "system",
 ]
 
 MIDDLEWARE = [
@@ -138,12 +144,12 @@ WSGI_APPLICATION = "config.wsgi.application"
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': env('DB_NAME'),
-        'HOST': env('DB_HOST'),
-        'USER': env('DB_USER'),
-        'PASSWORD': env('DB_PASSWORD')
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": env("DB_NAME"),
+        "HOST": env("DB_HOST"),
+        "USER": env("DB_USER"),
+        "PASSWORD": env("DB_PASSWORD"),
     }
 }
 
@@ -186,7 +192,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = "static/"
-STATIC_ROOT = os.path.join(BASE_DIR, 'static/')
+STATIC_ROOT = os.path.join(BASE_DIR, "static/")
 STATICFILES_FINDERS = (
     "django.contrib.staticfiles.finders.FileSystemFinder",
     "django.contrib.staticfiles.finders.AppDirectoriesFinder",
@@ -207,146 +213,138 @@ STORAGES = {
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
-    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
-    'DEFAULT_RENDERER_CLASSES': [
-        'rest_framework.renderers.JSONRenderer',
-        'rest_framework.renderers.BrowsableAPIRenderer',
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_RENDERER_CLASSES": [
+        "rest_framework.renderers.JSONRenderer",
+        "rest_framework.renderers.BrowsableAPIRenderer",
     ],
-    'DEFAULT_PARSER_CLASSES': [
-        'rest_framework.parsers.JSONParser',
-        'rest_framework.parsers.FormParser',
-        'rest_framework.parsers.MultiPartParser'
+    "DEFAULT_PARSER_CLASSES": [
+        "rest_framework.parsers.JSONParser",
+        "rest_framework.parsers.FormParser",
+        "rest_framework.parsers.MultiPartParser",
     ],
-    'DEFAULT_AUTHENTICATION_CLASSES': [
-        'config.authentication.JWTAuthenticationMiddleware',
-        'rest_framework.authentication.SessionAuthentication',
-        'rest_framework.authentication.BasicAuthentication',
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "config.authentication.JWTAuthenticationMiddleware",
+        "rest_framework.authentication.SessionAuthentication",
+        "rest_framework.authentication.BasicAuthentication",
     ],
-    'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.IsAuthenticated',
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
     ],
-    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 20,
-    'DEFAULT_FILTER_BACKENDS': (
-        'django_filters.rest_framework.DjangoFilterBackend',
-    )
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 20,
+    "DEFAULT_FILTER_BACKENDS": ("django_filters.rest_framework.DjangoFilterBackend",),
 }
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=365),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=365),
-    'ROTATE_REFRESH_TOKENS': True,
-    'BLACKLIST_AFTER_ROTATION': False,
-    'UPDATE_LAST_LOGIN': True,
-
-    'ALGORITHM': 'HS256',
-    'SIGNING_KEY': SECRET_KEY,
-    'VERIFYING_KEY': None,
-    'AUDIENCE': None,
-    'ISSUER': None,
-    'JWK_URL': None,
-    'LEEWAY': 0,
-
-    'AUTH_HEADER_TYPES': ('Bearer',),
-    'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
-    'USER_ID_FIELD': 'id',
-    'USER_ID_CLAIM': 'user_id',
-    'USER_AUTHENTICATION_RULE': 'rest_framework_simplejwt.authentication.default_user_authentication_rule',
-
-    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
-    'TOKEN_TYPE_CLAIM': 'token_type',
-    'TOKEN_USER_CLASS': 'rest_framework_simplejwt.models.TokenUser',
-
-    'JTI_CLAIM': 'jti',
-
-    'SLIDING_TOKEN_REFRESH_EXP_CLAIM': 'refresh_exp',
-    'SLIDING_TOKEN_LIFETIME': timedelta(minutes=5),
-    'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=1),
+    "ACCESS_TOKEN_LIFETIME": timedelta(days=365),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=365),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": False,
+    "UPDATE_LAST_LOGIN": True,
+    "ALGORITHM": "HS256",
+    "SIGNING_KEY": SECRET_KEY,
+    "VERIFYING_KEY": None,
+    "AUDIENCE": None,
+    "ISSUER": None,
+    "JWK_URL": None,
+    "LEEWAY": 0,
+    "AUTH_HEADER_TYPES": ("Bearer",),
+    "AUTH_HEADER_NAME": "HTTP_AUTHORIZATION",
+    "USER_ID_FIELD": "id",
+    "USER_ID_CLAIM": "user_id",
+    "USER_AUTHENTICATION_RULE": "rest_framework_simplejwt.authentication.default_user_authentication_rule",
+    "AUTH_TOKEN_CLASSES": ("rest_framework_simplejwt.tokens.AccessToken",),
+    "TOKEN_TYPE_CLAIM": "token_type",
+    "TOKEN_USER_CLASS": "rest_framework_simplejwt.models.TokenUser",
+    "JTI_CLAIM": "jti",
+    "SLIDING_TOKEN_REFRESH_EXP_CLAIM": "refresh_exp",
+    "SLIDING_TOKEN_LIFETIME": timedelta(minutes=5),
+    "SLIDING_TOKEN_REFRESH_LIFETIME": timedelta(days=1),
     "TOKEN_BLACKLIST_SERIALIZER": "identity.serializers.auth.TokenBlacklistSerializer",
 }
 
 PASSWORD_HASHERS = [
-    'django.contrib.auth.hashers.ScryptPasswordHasher',
-    'django.contrib.auth.hashers.PBKDF2PasswordHasher',
-    'django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher',
-    'django.contrib.auth.hashers.Argon2PasswordHasher',
-    'django.contrib.auth.hashers.BCryptSHA256PasswordHasher',
+    "django.contrib.auth.hashers.ScryptPasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher",
+    "django.contrib.auth.hashers.Argon2PasswordHasher",
+    "django.contrib.auth.hashers.BCryptSHA256PasswordHasher",
 ]
 
-CORS_ALLOW_HEADERS = (
-    *default_headers,
-    "cache-control",
-    "connection"
-)
+CORS_ALLOW_HEADERS = (*default_headers, "cache-control", "connection")
 
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'InsurIQ API',
-    'DESCRIPTION': (
-        'REST API for InsurIQ — commission document intake, CICS extraction, '
-        'and insurance policy parsing.'
+    "TITLE": "InsurIQ API",
+    "DESCRIPTION": (
+        "REST API for InsurIQ — commission document intake, CICS extraction, "
+        "and insurance policy parsing."
     ),
-    'CONTACT': {
-        'email': 'tech@rhobots.ai'
-    },
-    'LICENSE': {
-        'name': 'Proprietary'
-    },
-    'VERSION': '0.0.1',
-    'SERVE_INCLUDE_SCHEMA': False,
-    'COMPONENT_SPLIT_REQUEST': True,
-    'SERVERS': [
-        {"url": f"{HOST_NAME}/service-api", "description": "Server"}
+    "CONTACT": {"email": "tech@rhobots.ai"},
+    "LICENSE": {"name": "Proprietary"},
+    "VERSION": "0.0.1",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "COMPONENT_SPLIT_REQUEST": True,
+    "SERVERS": [{"url": f"{HOST_NAME}/service-api", "description": "Server"}],
+    "TAGS": [
+        {
+            "name": "Commission Document",
+            "description": "Upload and process commission schedule documents.",
+        },
+        {
+            "name": "Policy Extract",
+            "description": "Submit and poll insurance policy extraction requests.",
+        },
+        {"name": "Health", "description": "System health check."},
     ],
-    'TAGS': [
-        {'name': 'Commission Document', 'description': 'Upload and process commission schedule documents.'},
-        {'name': 'Policy Extract', 'description': 'Submit and poll insurance policy extraction requests.'},
-        {'name': 'Health', 'description': 'System health check.'},
-    ],
-    'SCHEMA_PATH_PREFIX': '/api/',
-    'SWAGGER_UI_SETTINGS': {
-        'url': '/service-api/api/schema/',
+    "SCHEMA_PATH_PREFIX": "/api/",
+    "SWAGGER_UI_SETTINGS": {
+        "url": "/service-api/api/schema/",
     },
-    'REDOC_SETTINGS': {
-        'url': '/service-api/api/schema/',
+    "REDOC_SETTINGS": {
+        "url": "/service-api/api/schema/",
     },
 }
 PASSWORD_RESET_TIMEOUT = 259200
 
-AUTH_USER_MODEL = 'accounts.User'
+AUTH_USER_MODEL = "accounts.User"
 
 CORS_ALLOW_ALL_ORIGINS = True
 
+
 def _normalize_s3_endpoint(value):
     """Strip whitespace and auto-prefix scheme so boto3 doesn't reject bare hosts."""
-    value = (value or '').strip()
+    value = (value or "").strip()
     if not value:
-        return ''
-    if '://' not in value:
-        value = f'https://{value}'
+        return ""
+    if "://" not in value:
+        value = f"https://{value}"
     return value
 
 
-AWS_ACCESS_KEY_ID = env('AWS_ACCESS_KEY_ID', default='')
-AWS_SECRET_ACCESS_KEY = env('AWS_SECRET_ACCESS_KEY', default='')
-AWS_STORAGE_BUCKET_NAME = env('AWS_STORAGE_BUCKET_NAME', default='')
-AWS_REGION = env('AWS_REGION', default='ap-south-1')
+AWS_ACCESS_KEY_ID = env("AWS_ACCESS_KEY_ID", default="")
+AWS_SECRET_ACCESS_KEY = env("AWS_SECRET_ACCESS_KEY", default="")
+AWS_STORAGE_BUCKET_NAME = env("AWS_STORAGE_BUCKET_NAME", default="")
+AWS_REGION = env("AWS_REGION", default="ap-south-1")
 AWS_S3_REGION_NAME = AWS_REGION
-AWS_S3_SIGNATURE_VERSION = env('AWS_S3_SIGNATURE_VERSION', default='s3v4')
-AWS_S3_ADDRESSING_STYLE = env('AWS_S3_ADDRESSING_STYLE', default='virtual')
+AWS_S3_SIGNATURE_VERSION = env("AWS_S3_SIGNATURE_VERSION", default="s3v4")
+AWS_S3_ADDRESSING_STYLE = env("AWS_S3_ADDRESSING_STYLE", default="virtual")
 AWS_DEFAULT_ACL = None
 AWS_S3_OBJECT_PARAMETERS = {}
 AWS_QUERYSTRING_AUTH = True
-AWS_QUERYSTRING_EXPIRE = env.int('AWS_QUERYSTRING_EXPIRE', default=3600)
+AWS_QUERYSTRING_EXPIRE = env.int("AWS_QUERYSTRING_EXPIRE", default=3600)
 
-_endpoint = _normalize_s3_endpoint(env('AWS_S3_ENDPOINT_URL', default=''))
+_endpoint = _normalize_s3_endpoint(env("AWS_S3_ENDPOINT_URL", default=""))
 if _endpoint:
     AWS_S3_ENDPOINT_URL = _endpoint
 
-AWS_S3_PUBLIC_ENDPOINT_URL = _normalize_s3_endpoint(env('AWS_S3_PUBLIC_ENDPOINT_URL', default=''))
+AWS_S3_PUBLIC_ENDPOINT_URL = _normalize_s3_endpoint(
+    env("AWS_S3_PUBLIC_ENDPOINT_URL", default="")
+)
 
-CELERY_RESULT_BACKEND = env('CELERY_RESULT_BACKEND')
-CELERY_CACHE_BACKEND = env('CELERY_CACHE_BACKEND')
+CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND")
+CELERY_CACHE_BACKEND = env("CELERY_CACHE_BACKEND")
 CELERY_RESULT_EXTENDED = True
-CELERY_BROKER_URL = env('CELERY_BROKER_URL')
-CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
+CELERY_BROKER_URL = env("CELERY_BROKER_URL")
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 CELERY_RESULT_EXPIRES = 2592000

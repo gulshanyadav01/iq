@@ -145,6 +145,38 @@
         {{ actionError }}
       </div>
 
+      <!--
+        Sheet coverage notice. Document-level, not stage-level: coverage is a
+        property of the document, and nothing routes a reader to the Indexed
+        pane (the stage watcher lands on Validation for a completed document).
+
+        Deliberately neutral, not amber. A hidden tab is almost always hidden on
+        purpose, so this is a statement of what was read, not a problem to fix.
+        Colouring it like a warning trains people to ignore it.
+      -->
+      <div
+        v-if="showCoverageStrip && sheetCoverage"
+        class="flex items-start gap-2.5 bg-gray-50 dark:bg-gray-800/40 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-2.5 text-xs text-gray-600 dark:text-gray-400"
+      >
+        <UIcon name="i-lucide-eye-off" class="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-gray-400" />
+        <div class="min-w-0 flex-1">
+          <span class="font-medium text-gray-700 dark:text-gray-300">{{ coverageStripText }}</span>
+          <!-- First few names only. Listing all 10 turned the strip into the
+               wall of text the redesign removed; "View sheets" has the rest. -->
+          <span v-if="sheetCoverage.hiddenNames.length" class="ml-1 break-words">
+            Hidden: {{ sheetCoverage.hiddenNames.slice(0, 3).join(', ')
+            }}<span v-if="sheetCoverage.hiddenNames.length > 3"> +{{ sheetCoverage.hiddenNames.length - 3 }} more</span>
+          </span>
+        </div>
+        <button
+          class="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-200/60 dark:hover:bg-white/[0.06] hover:text-gray-900 dark:hover:text-white transition flex-shrink-0"
+          @click="viewHiddenSheets"
+        >
+          <UIcon name="i-lucide-eye" class="w-3 h-3" />
+          View sheets
+        </button>
+      </div>
+
       <!-- Loading -->
       <div v-if="!doc && !loadError" class="glass rounded-2xl p-12 flex items-center justify-center gap-2 text-gray-500">
         <UIcon name="i-lucide-loader-circle" class="animate-spin" />
@@ -197,11 +229,11 @@
               <p class="text-xs text-gray-500 mt-0.5">Extracted and cached from source document</p>
             </div>
             <div v-if="doc.indexed_content" class="p-6 space-y-4">
-              <!-- Excel: sheet list -->
+              <!-- Excel: sheet list — extracted sheets only -->
               <template v-if="doc.indexed_content.source_type === 'excel'">
-                <div v-for="(content, sheetName) in doc.indexed_content.sheet_contents" :key="sheetName" class="space-y-2">
+                <div v-for="sheetName in excelSheets.visible" :key="sheetName" class="space-y-2">
                   <div class="flex items-center gap-2">
-                    <span class="text-sm font-medium text-gray-900 dark:text-white">{{ sheetName }}</span>
+                    <span class="text-sm font-medium text-gray-900 dark:text-white truncate max-w-md" :title="sheetName">{{ sheetName }}</span>
                     <span :class="['px-1.5 py-0.5 rounded text-[10px] font-medium uppercase', getSheetClassBadge(sheetName, doc.indexed_content)]">
                       {{ getSheetClassification(sheetName, doc.indexed_content) }}
                     </span>
@@ -212,9 +244,16 @@
                     </summary>
                     <div class="mt-2 overflow-x-auto max-h-64 overflow-y-auto rounded-lg bg-gray-50 dark:bg-gray-900 p-4">
                       <!-- eslint-disable-next-line vue/no-v-html -->
-                      <div class="prose prose-xs dark:prose-invert max-w-none text-xs whitespace-nowrap [&_table]:border-collapse [&_td]:border [&_td]:border-gray-200 [&_td]:dark:border-gray-700 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-200 [&_th]:dark:border-gray-700 [&_th]:px-2 [&_th]:py-1 [&_th]:bg-gray-100 [&_th]:dark:bg-gray-800" v-html="renderMd(content as string)" />
+                      <div class="prose prose-xs dark:prose-invert max-w-none text-xs whitespace-nowrap [&_table]:border-collapse [&_td]:border [&_td]:border-gray-200 [&_td]:dark:border-gray-700 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-200 [&_th]:dark:border-gray-700 [&_th]:px-2 [&_th]:py-1 [&_th]:bg-gray-100 [&_th]:dark:bg-gray-800" v-html="renderMd(doc.indexed_content.sheet_contents[sheetName] as string)" />
                     </div>
                   </details>
+                </div>
+                <div ref="hiddenSheetsAnchor">
+                  <HiddenSheetsSection
+                    :names="excelSheets.hidden"
+                    :indexed="doc.indexed_content"
+                    :open-request="hiddenSheetsOpenRequest"
+                  />
                 </div>
               </template>
               <!-- Email -->
@@ -236,9 +275,9 @@
                 <template v-if="doc.indexed_content.sheet_contents && Object.keys(doc.indexed_content.sheet_contents).length">
                   <div class="pt-2 border-t border-gray-100 dark:border-gray-800 space-y-2">
                     <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-3">Excel Attachments</p>
-                    <div v-for="(content, sheetName) in doc.indexed_content.sheet_contents" :key="sheetName">
+                    <div v-for="sheetName in excelSheets.visible" :key="sheetName">
                       <div class="flex items-center gap-2">
-                        <span class="text-sm font-medium text-gray-900 dark:text-white">{{ sheetName }}</span>
+                        <span class="text-sm font-medium text-gray-900 dark:text-white truncate max-w-md" :title="sheetName">{{ sheetName }}</span>
                         <span :class="['px-1.5 py-0.5 rounded text-[10px] font-medium uppercase', getSheetClassBadge(sheetName, doc.indexed_content)]">
                           {{ getSheetClassification(sheetName, doc.indexed_content) }}
                         </span>
@@ -249,10 +288,17 @@
                         </summary>
                         <div class="mt-2 overflow-x-auto max-h-64 overflow-y-auto rounded-lg bg-gray-50 dark:bg-gray-900 p-4">
                           <!-- eslint-disable-next-line vue/no-v-html -->
-                          <div class="prose prose-xs dark:prose-invert max-w-none text-xs whitespace-nowrap [&_table]:border-collapse [&_td]:border [&_td]:border-gray-200 [&_td]:dark:border-gray-700 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-200 [&_th]:dark:border-gray-700 [&_th]:px-2 [&_th]:py-1 [&_th]:bg-gray-100 [&_th]:dark:bg-gray-800" v-html="renderMd(content as string)" />
+                          <div class="prose prose-xs dark:prose-invert max-w-none text-xs whitespace-nowrap [&_table]:border-collapse [&_td]:border [&_td]:border-gray-200 [&_td]:dark:border-gray-700 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-200 [&_th]:dark:border-gray-700 [&_th]:px-2 [&_th]:py-1 [&_th]:bg-gray-100 [&_th]:dark:bg-gray-800" v-html="renderMd(doc.indexed_content.sheet_contents[sheetName] as string)" />
                         </div>
                       </details>
                     </div>
+                    <div ref="hiddenSheetsAnchor">
+                  <HiddenSheetsSection
+                    :names="excelSheets.hidden"
+                    :indexed="doc.indexed_content"
+                    :open-request="hiddenSheetsOpenRequest"
+                  />
+                </div>
                   </div>
                 </template>
               </template>
@@ -781,7 +827,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { nextTick, ref } from 'vue'
 import MarkdownIt from 'markdown-it'
 import { useCommissionIntakeDetail } from '~/composables/useCommissionIntakeDetail'
 import type { OverlapIssue } from '~/composables/useCommissionIntakeDetail'
@@ -820,12 +866,33 @@ const {
   stages, currentPassSheets, currentPass,
   cicsMetrics, cicsMetadataRows, cicsProducts,
   validationBannerClass, validationBannerIcon, validationBannerText,
+  sheetCoverage, showCoverageStrip, coverageStripText, excelSheets,
   isInFlight, getStatusBadgeClass, formatStatus, getPassStatusBadge, getSeverityBadge,
-  getSheetClassification, getSheetClassBadge, formatCommissionValue, formatConditions,
+  getSheetClassification, getSheetClassBadge,
+  formatCommissionValue, formatConditions,
   sheetPassStatus, copyJson, downloadJson, downloadExcel, downloadOriginal, refresh,
   triggerIndex, triggerExtract, triggerRerunPass, triggerTransform, triggerValidate,
   triggerMarkValidated, triggerMarkInvalidated,
 } = useCommissionIntakeDetail()
+
+// "View sheets" on the coverage notice.
+//
+// Switching activeStage alone did nothing: it defaults to 'indexed' and the
+// stage watcher only reassigns when the current stage is unavailable, so the
+// page is already on Indexed and the click was a no-op. What the reader
+// actually wants is the skipped sheets, which sit below the fold — so scroll
+// to them and expand the group.
+const hiddenSheetsAnchor = ref<HTMLElement | null>(null)
+// Counter, not a flag — see the openRequest prop on HiddenSheetsSection. A
+// boolean would stop re-opening the group after the first click.
+const hiddenSheetsOpenRequest = ref(0)
+
+async function viewHiddenSheets() {
+  activeStage.value = 'indexed'
+  hiddenSheetsOpenRequest.value++
+  await nextTick()
+  hiddenSheetsAnchor.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
 
 function openOverlapRuleModal(overlap: OverlapIssue) {
   overlapRuleModalData.value = overlap
