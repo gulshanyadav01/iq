@@ -15,7 +15,7 @@ import json
 import re
 import hashlib
 from datetime import datetime
-from typing import List, Dict, Optional, Set, Tuple, Any
+from typing import List, Dict, NamedTuple, Optional, Set, Tuple, Any
 
 from cins.schema.carriers import CARRIER_FULL_NAMES, normalize_carrier
 from cins.schema.raw_extraction import (
@@ -419,11 +419,19 @@ STATE_NAME_MAPPINGS = {
     "daman & diu": "dadra-and-nagar-haveli-and-daman-and-diu",
     "dnhdd": "dadra-and-nagar-haveli-and-daman-and-diu",
     "dd": "dadra-and-nagar-haveli-and-daman-and-diu",
-    # 2-letter abbreviations
+    # 2-letter abbreviations.
+    # KNOWN LIMITATION: _expand_state_names lowercases and boundary-matches these
+    # short keys against free text, so tokens that collide with English words are
+    # latently ambiguous — "as"/"an"/"up"/"la"/"ch" can misfire (e.g. "UP TO
+    # 1000" resolves to uttar-pradesh today). "or" is deliberately omitted for
+    # this reason ("MH or GJ" would acquire orissa; Chola uses OD). The real fix
+    # is case-sensitive matching against the original text — its own change, its
+    # own reconciliation run.
     "an": "andaman-and-nicobar",
     "ap": "andhra-pradesh",
     "ar": "arunachal-pradesh",
     "as": "assam",
+    "bh": "bihar",
     "br": "bihar",
     "ch": "chandigarh",
     "cg": "chattisgarh",
@@ -451,11 +459,30 @@ STATE_NAME_MAPPINGS = {
     "sk": "sikkim",
     "tn": "tamil-nadu",
     "ts": "telangana",
+    "tg": "telangana",  # RTO data uses both TS and TG for Telangana
     "tr": "tripura",
     "up": "uttar-pradesh",
     "uk": "uttarakhand",
+    "ua": "uttarakhand",  # RTO data uses both UK and UA for Uttarakhand
     "wb": "west-bengal",
+    "dn": "dadra-and-nagar-haveli-and-daman-and-diu",
 }
+
+
+class _BoundaryKey(NamedTuple):
+    """Structured, hashable boundary-normalization group key.
+
+    ``lists`` holds one slot per kept list field (a sorted tuple or None),
+    ``scalars`` one slot per scalar field, ``ranges`` the other range bounds.
+    Splitting the key by kind lets ``_boundary_keys_compatible`` treat a None
+    list slot as a wildcard — an unset ``fuel_type`` exports as all five fuels
+    (commission_document.py), so a fuel-less rule genuinely overlaps a
+    fuel-tagged ladder's bands and must collect evidence from it.
+    """
+
+    lists: Tuple
+    scalars: Tuple
+    ranges: Tuple
 
 
 class RawToCICSTransformer:
@@ -849,6 +876,15 @@ class RawToCICSTransformer:
                     rule.conditions.number_of_wheels = inferred_wheels
             rules.append(rule)
 
+        # Pair NCB>25% rows with their base twins BEFORE any dedupe/bifurcation.
+        # ncb is a _DEDUPE_SCALAR_FIELD, so running this first lets the two
+        # ladders (True / False) normalize their CC boundaries independently;
+        # running after dedupe would fuse them. Depends on Change A2 — without
+        # the bracket-qualifier fix the NCB>25% label 'UPTO 1000 CC[ NCB GT 25%]'
+        # parses to cc=(1000,25) and never shares a condition key with its base
+        # twin, so pairing finds nothing.
+        self._pair_ncb_tiers(rules)
+
         # De-overlap GVW / CC / seating-capacity boundaries within groups of
         # rules that share every other condition. Source documents express
         # buckets with shared boundaries ("UPTO 3.5T" / "3.5T TO 7.5T"), which
@@ -933,6 +969,17 @@ class RawToCICSTransformer:
                 for r in rules:
                     if r.conditions and not r.conditions.fuel_type:
                         r.conditions.fuel_type = ["petrol", "diesel", "cng", "lpg"]
+
+        # Second boundary-normalization pass (defect 8 completeness). The pass
+        # above runs BEFORE GCV wheel bifurcation so wheel clones inherit
+        # corrected boundaries, but a fuel-less band whose only lower rung lives
+        # in a fuel-tagged sibling ladder is not evidence-complete until that
+        # ladder is fully materialized (bifurcation + fuel completeness). Example
+        # (Chola April GCV): 7 third-party fuel-less 40000-43000 bands stayed on
+        # 40000 while their comprehensive four-fuel siblings, whose rung ends at
+        # 40000, only line up after this point. The pass is evidence-gated and
+        # idempotent, so re-running never bumps an already-monotonic ladder.
+        self._normalize_boundary_overlaps(rules)
 
         # Determine sub-category. For a split commercial group the segment is
         # the canonical SubProduct (GCV / PCV / Buses / MISC-D) — use it
@@ -1587,6 +1634,17 @@ class RawToCICSTransformer:
 
         # NCB (boolean)
         ncb = self._parse_bool_field(entry_conditions.get("ncb"))
+        # NCB > 25% parallel-table marker. Chola PC ships a base grid and a
+        # "… - NCB GT 25%" grid at higher rates; both land ncb=None and would
+        # collide on an identical condition key. Mark the NCB>25% rows True (the
+        # tier the client's prod system encodes as NCB=Yes); _pair_ncb_tiers
+        # then flips their base twins to False. Follows the [Electric] probe
+        # pattern; the marker survives in source_section / rule_text on codegen.
+        if ncb is None and self._NCB_GT25_RE.search(
+            self._segment_probe(entry_conditions, entry)
+        ):
+            ncb = True
+            self.warnings.append("NCB tier: ncb=True from 'NCB > 25%' marker")
 
         # CPA
         cpa = self._normalize_single_field(
@@ -1901,7 +1959,12 @@ class RawToCICSTransformer:
         return None
 
     def _parse_bool_field(self, text: Optional[str]) -> Optional[bool]:
-        """Parse a text value to a boolean."""
+        """Parse a text value to a boolean.
+
+        Returns None for None/empty/whitespace silently (blank NCB cells are
+        the common case and would flood the warnings list). Warns on genuinely
+        unrecognised non-empty input so a mis-encoded NCB value surfaces instead
+        of collapsing to None."""
         if text is None:
             return None
         if isinstance(text, bool):
@@ -1913,6 +1976,8 @@ class RawToCICSTransformer:
         if text_lower in ("no", "false", "0", "n"):
             return False
 
+        if text_lower:
+            self.warnings.append(f"Unrecognised boolean value: {text}")
         return None
 
     def _parse_int_field(self, text: Optional[str]) -> Optional[int]:
@@ -2229,6 +2294,12 @@ class RawToCICSTransformer:
     # legit make/model that merely ends in "…brothers" is NOT matched.
     _SENTINEL_MAKE_MODEL_RE = re.compile(r"\ball other\b|\bothers?$", re.IGNORECASE)
 
+    # Chola PC "NCB > 25%" parallel-table marker. Matches the table title
+    # ("... - NCB GT 25%") and the row-label suffix ("[ NCB GT 25%]") in the
+    # lower-cased _segment_probe blob. Encoded into the ncb boolean as True;
+    # its paired base twin becomes False (see _pair_ncb_tiers).
+    _NCB_GT25_RE = re.compile(r"ncb\s*(?:gt|>|greater\s*than)\s*25", re.IGNORECASE)
+
     @classmethod
     def _is_make_model_sentinel(cls, rule: CommissionRule) -> bool:
         """True when a rule's make or model list is the generic
@@ -2310,6 +2381,51 @@ class RawToCICSTransformer:
                 if isinstance(v, list):
                     cond_dump[k] = sorted(v, key=str)
         return json.dumps(cond_dump, sort_keys=True, default=str)
+
+    def _ncb_tier_pair_key(self, rule: CommissionRule) -> str:
+        """Conditions-only key with ``ncb`` excluded, for NCB-tier twin pairing.
+        Outcome is deliberately excluded — the twins differ only in rate, which
+        is the entire reason they must be distinguished (an NCB>25% rule and its
+        base twin share every condition except ncb)."""
+        cond_dump: Dict[str, Any] = {}
+        if rule.conditions is not None:
+            cond_dump = rule.conditions.model_dump(exclude_none=False)
+            cond_dump.pop("ncb", None)
+            for k, v in list(cond_dump.items()):
+                if isinstance(v, list):
+                    cond_dump[k] = sorted(v, key=str)
+        return json.dumps(cond_dump, sort_keys=True, default=str)
+
+    def _pair_ncb_tiers(self, rules: List[CommissionRule]) -> None:
+        """Flip the ncb=None base twin of an NCB>25% (ncb=True) rule to False.
+
+        Chola PC grids ship two parallel table sets: a base set and a
+        '… - NCB GT 25%' set at higher rates. The NCB>25% rows are marked
+        ncb=True in _transform_conditions; their base twin lands ncb=None. Both
+        would collide on an identical condition key and become ambiguous. Group
+        by a conditions-only key with ncb excluded; in any group containing a
+        True, the None members are the base twins → set them False. Groups with
+        no marked member keep None (no NCB dimension).
+
+        Scoped by condition collision, NOT by product: a marked Package rule
+        must not stamp ncb=False on unrelated SOD rules with a different
+        condition key (that would under-match in prod). Runs before dedupe so
+        the True/False ladders normalize their CC boundaries independently."""
+        groups: Dict[str, List[CommissionRule]] = {}
+        for rule in rules:
+            groups.setdefault(self._ncb_tier_pair_key(rule), []).append(rule)
+        for group in groups.values():
+            if not any(
+                r.conditions is not None and r.conditions.ncb is True for r in group
+            ):
+                continue
+            for r in group:
+                if r.conditions is not None and r.conditions.ncb is None:
+                    r.conditions.ncb = False
+                    self.warnings.append(
+                        "NCB tier: base twin ncb None -> False "
+                        "(paired with an NCB>25% rule)"
+                    )
 
     def _bifurcate_make_buckets(
         self, rules: List[CommissionRule]
@@ -2639,26 +2755,57 @@ class RawToCICSTransformer:
 
     def _boundary_group_key(
         self, conditions: RuleConditions, skip_start: str, skip_end: str
-    ) -> Tuple:
+    ) -> _BoundaryKey:
         """Relaxed _dedupe_group_key: same key minus the fields that legitimately
         fragment a single vehicle's range ladder (state, rto, make, model). Used
         only by _normalize_boundary_overlaps so a tier boundary present anywhere
         in the same product+coverage is treated as evidence — without collapsing
-        genuinely-different vehicle contexts (fuel, sub_class, wheels stay)."""
-        parts: List[Any] = []
+        genuinely-different vehicle contexts (fuel, sub_class, wheels stay).
+
+        Returns a _BoundaryKey split by field kind so evidence collection can
+        treat a None list slot (unset = all values) as a wildcard."""
+        lists: List[Any] = []
         for field in self._DEDUPE_LIST_FIELDS:
             if field in self._BOUNDARY_DROP_FIELDS:
                 continue
             value = getattr(conditions, field, None)
-            parts.append(tuple(sorted(value)) if value else None)
-        for field in self._DEDUPE_SCALAR_FIELDS:
-            parts.append(getattr(conditions, field, None))
+            lists.append(tuple(sorted(value)) if value else None)
+        scalars = [getattr(conditions, f, None) for f in self._DEDUPE_SCALAR_FIELDS]
+        ranges: List[Any] = []
         for start_field, end_field in self._DEDUPE_RANGES:
             if start_field == skip_start:
                 continue
-            parts.append(getattr(conditions, start_field, None))
-            parts.append(getattr(conditions, end_field, None))
-        return tuple(parts)
+            ranges.append(getattr(conditions, start_field, None))
+            ranges.append(getattr(conditions, end_field, None))
+        return _BoundaryKey(tuple(lists), tuple(scalars), tuple(ranges))
+
+    @staticmethod
+    def _boundary_keys_compatible(a: _BoundaryKey, b: _BoundaryKey) -> bool:
+        """Two boundary keys describe the same ladder for evidence purposes when
+        every slot is compatible. A list slot is compatible if either side is
+        None (wildcard: unset means all values) or the two sets intersect; a
+        scalar/range slot is compatible if either side is None or they are equal.
+
+        This keeps ['petrol'] and ['electric'] ladders disjoint (empty
+        intersection) while matching a fuel-less None to both — the exact case
+        the fuel-less 40000-43000 band needs to see the fuel-tagged 40001 rung.
+        """
+        for la, lb in zip(a.lists, b.lists):
+            if la is None or lb is None:
+                continue
+            if not (set(la) & set(lb)):
+                return False
+        for sa, sb in zip(a.scalars, b.scalars):
+            if sa is None or sb is None:
+                continue
+            if sa != sb:
+                return False
+        for ra, rb in zip(a.ranges, b.ranges):
+            if ra is None or rb is None:
+                continue
+            if ra != rb:
+                return False
+        return True
 
     def _normalize_boundary_overlaps(self, rules: List[CommissionRule]) -> None:
         """Evidence-gated boundary normalization (D1=B). Mutates rules in place.
@@ -2677,7 +2824,7 @@ class RawToCICSTransformer:
         """
         for start_field, end_field in self._DEDUPE_RANGES:
             sentinels = self._RANGE_SENTINELS.get((start_field, end_field), set())
-            groups: Dict[Tuple, List[CommissionRule]] = {}
+            groups: Dict[_BoundaryKey, List[CommissionRule]] = {}
             for rule in rules:
                 if not rule.conditions:
                     continue
@@ -2690,17 +2837,42 @@ class RawToCICSTransformer:
                 key = self._boundary_group_key(rule.conditions, start_field, end_field)
                 groups.setdefault(key, []).append(rule)
 
-            for group_rules in groups.values():
-                if len(group_rules) < 2:
-                    continue
-                # Snapshot original boundaries so evidence is order-independent.
-                pairs = [
+            # Per-key snapshot of original boundaries so evidence is
+            # order-independent even as we mutate rules below.
+            group_pairs: Dict[_BoundaryKey, List[Tuple[int, int]]] = {}
+            for key, group_rules in groups.items():
+                group_pairs[key] = [
                     (
                         getattr(r.conditions, start_field),
                         getattr(r.conditions, end_field),
                     )
                     for r in group_rules
                 ]
+
+            keys = list(groups.keys())
+            # O(G^2) over distinct keys. A pathological document (hundreds of
+            # distinct ladders) falls back to exact-key evidence so transform
+            # time can't blow up; the wildcard widening is a precision boost,
+            # never a correctness prerequisite.
+            wildcard_evidence = len(keys) <= 500
+            if not wildcard_evidence:
+                self.warnings.append(
+                    f"Boundary normalization: {len(keys)} distinct groups for "
+                    f"{start_field}; using exact-key evidence (wildcard skipped)"
+                )
+
+            for key, group_rules in groups.items():
+                if len(group_rules) < 2:
+                    continue
+                if wildcard_evidence:
+                    evidence_keys = [
+                        k for k in keys if self._boundary_keys_compatible(key, k)
+                    ]
+                else:
+                    evidence_keys = [key]
+                pairs: List[Tuple[int, int]] = []
+                for k in evidence_keys:
+                    pairs.extend(group_pairs[k])
                 ends = {e for _s, e in pairs}
                 # Values where a wider band starts — confirms a ladder floor.
                 floor_starts = {s for s, e in pairs if e != s}
@@ -2737,6 +2909,22 @@ class RawToCICSTransformer:
         if not h:
             return ""
         hu = h.upper().replace("_", " ")
+        # Neutralise bracketed qualifiers so 'UPTO 1000 CC[ NCB GT 25%]' is
+        # rejected by the CC guard below. Depth-tracking manual scan, matching
+        # code_gen_executor._strip_bracket_qualifiers exactly (parity is pinned
+        # by test_range_parsing).
+        _out, _depth = [], 0
+        for _ch in hu:
+            if _ch == "[":
+                if _depth == 0:
+                    _out.append(" ")
+                _depth += 1
+            elif _ch == "]":
+                if _depth > 0:
+                    _depth -= 1
+            elif _depth == 0:
+                _out.append(_ch)
+        hu = "".join(_out)
         if not any(c.isdigit() for c in hu):
             return ""
         if (
@@ -2865,17 +3053,40 @@ class RawToCICSTransformer:
         return None
 
     def _expand_state_names(
-        self, state_text: Optional[str], master_data: Optional[List[RawMasterDataEntry]]
+        self,
+        state_text: Optional[str],
+        master_data: Optional[List[RawMasterDataEntry]],
+        _top: bool = True,
     ) -> Optional[List[str]]:
         """
         Expand state text to canonical lowercase-hyphenated state names.
         Handles exclusion patterns by expanding to the complement set.
+
+        ``_top`` marks the outermost call. The function recurses for exclusion
+        lists and per master-data entry; the "unknown state" warning and the
+        empty-text fallback only make sense at the top, so recursive call sites
+        pass ``_top=False`` to keep the warnings list from flooding.
         """
         if not state_text:
             if master_data:
-                for m in master_data:
-                    if m.entry_type == "state_mapping" and m.values:
-                        return self._expand_state_names(m.values, None)
+                # Only inherit master-data states when exactly one state_mapping
+                # entry exists. With CAT A = AP,TS and CAT B = MH,GJ, blindly
+                # taking the first entry stamps every state-less rule with CAT
+                # A's states — silently wrong.
+                mappings = [
+                    m
+                    for m in master_data
+                    if m.entry_type == "state_mapping" and m.values
+                ]
+                if len(mappings) == 1:
+                    return self._expand_state_names(
+                        mappings[0].values, None, _top=False
+                    )
+                if len(mappings) > 1 and _top:
+                    self.warnings.append(
+                        "Ambiguous state fallback: multiple state_mapping "
+                        "entries, no state text on rule"
+                    )
             return None
 
         text = state_text.lower()
@@ -2889,7 +3100,9 @@ class RawToCICSTransformer:
             match = re.search(exclude_pattern, state_text, re.IGNORECASE)
             if match:
                 exclude_text = match.group(1)
-                excluded_names = self._expand_state_names(exclude_text, None)
+                excluded_names = self._expand_state_names(
+                    exclude_text, None, _top=False
+                )
                 if excluded_names:
                     return sorted(VALID_STATE_NAMES - set(excluded_names))
 
@@ -2906,7 +3119,7 @@ class RawToCICSTransformer:
                 key_upper = m.key.upper()
                 if re.search(rf"\b{re.escape(key_upper)}\b", upper_text):
                     if m.values:
-                        names = self._expand_state_names(m.values, None)
+                        names = self._expand_state_names(m.values, None, _top=False)
                         if names:
                             discovered_names.extend(names)
 
@@ -2923,6 +3136,8 @@ class RawToCICSTransformer:
         if discovered_names:
             return sorted(set(discovered_names))
 
+        if _top:
+            self.warnings.append(f"Unknown state: {state_text}")
         return None
 
     def _expand_rto_codes(

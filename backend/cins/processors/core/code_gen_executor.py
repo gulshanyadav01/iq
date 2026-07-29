@@ -115,6 +115,27 @@ def extract_notes(tables):
             ))
     return " ".join(parts).strip()
 
+def _strip_bracket_qualifiers(s):
+    \"\"\"
+    Remove [...] qualifier groups (e.g. '[ NCB GT 25%]', '[Electric]') from a
+    header, depth-tracking so nested brackets are handled. No 're' in the
+    sandbox, so this is a manual character scan. Each top-level group collapses
+    to a single space so adjacent tokens do not glue together.
+    \"\"\"
+    out = []
+    depth = 0
+    for ch in s:
+        if ch == "[":
+            if depth == 0:
+                out.append(" ")
+            depth += 1
+        elif ch == "]":
+            if depth > 0:
+                depth -= 1
+        elif depth == 0:
+            out.append(ch)
+    return "".join(out)
+
 def parse_cc_range(header):
     \"\"\"
     Extract a normalised CC (engine-displacement) range string from a header.
@@ -133,10 +154,20 @@ def parse_cc_range(header):
     indiscriminate digit-extraction below mangles tonnage slugs into junk
     CC ranges (e.g. '2_UPTO_3.5T[Electric]' -> '2-3.5' -> cc=(2,4)).
     Symmetric to the CC-rejection guard in parse_gvw_range.
+
+    Bracketed qualifiers ('UPTO 1000 CC[ NCB GT 25%]', '1000CC[Electric]') are
+    stripped first so the trailing '25%]' / 'Electric]' token does not leak into
+    the digit scan and corrupt the range (that suffix produced cc=(1000,25) on
+    82 rules). The strip runs before the GVW/kW/slug guards so
+    '2_UPTO_3.5T[Electric]' still hits the tonnage guard and
+    '2_4W_LT_1500CC[Electric]' still hits the LT-slug branch.
     \"\"\"
     if header is None:
         return ""
     h = header.strip().upper()
+    if not h:
+        return ""
+    h = _strip_bracket_qualifiers(h).strip()
     if not h:
         return ""
     # GVW-shape guards: tonnage (digit + T at word boundary), explicit KG,
@@ -190,6 +221,16 @@ def parse_cc_range(header):
             digits = "".join(c for c in rest if c.isdigit() or c == ".")
             if digits:
                 return ">" + digits
+    # Lower-open band: 'UPTO 1000 CC' -> '0-1000'. Symmetric with the LT slug
+    # branch above (both mean "<= N"). '<=' is checked before '<' so the longer
+    # operator wins. Without this branch the digit scan returned a bare '1000',
+    # which the transformer read as the single point 1000cc.
+    for prefix in ("<=", "<", "UP TO", "UPTO", "BELOW", "LESS THAN", "MAX"):
+        if h.startswith(prefix):
+            rest = h[len(prefix):].strip().split()[0] if h[len(prefix):].strip() else ""
+            digits = "".join(c for c in rest if c.isdigit() or c == ".")
+            if digits:
+                return "0-" + digits
     parts = h.replace("_", " ").replace("-", " ").split()
     nums = ["".join(c for c in p if c.isdigit() or c == ".") for p in parts if any(c.isdigit() for c in p)]
     if len(nums) >= 2:
@@ -225,6 +266,11 @@ def parse_gvw_range(header):
     if not h:
         return ""
     hu = h.upper().replace("_", " ")
+    # Neutralise bracketed qualifiers so the CC/KW guard sees a clean 'CC' token
+    # instead of 'CC[' — 'UPTO 1000 CC[ NCB GT 25%]' must be rejected here (it is
+    # a CC label) rather than falling through to the qualifier fallback and
+    # returning as a bogus GVW range in kilograms.
+    hu = _strip_bracket_qualifiers(hu)
     if not any(c.isdigit() for c in hu):
         return ""
     # Reject CC/KW engine-displacement headers — those belong to parse_cc_range.

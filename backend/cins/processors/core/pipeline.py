@@ -501,6 +501,19 @@ def _run_validators(output_path: Path, indexed_doc=None):
             schema_result.info.extend(ci_result.info)
         except Exception as e:  # never let coverage checking break the pipeline
             logger.warning(f"Coverage-integrity validator failed: {e}")
+        try:
+            from cins.validators.state_column_alignment_validator import (
+                StateColumnAlignmentValidator,
+            )
+
+            sca_result = StateColumnAlignmentValidator().validate(
+                str(output_path), extractable
+            )
+            schema_result.errors.extend(sca_result.errors)
+            schema_result.warnings.extend(sca_result.warnings)
+            schema_result.info.extend(sca_result.info)
+        except Exception as e:  # never let coverage checking break the pipeline
+            logger.warning(f"State-column alignment validator failed: {e}")
     return schema_result, overlap_result
 
 

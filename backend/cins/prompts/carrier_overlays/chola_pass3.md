@@ -109,11 +109,30 @@ plain Package bands have no suffix, so `fuel_type` stays unset).
 qualifying clause to ACT rules (see "Chola — CPA deduction footnote": "TP/PA-only rules are never
 deducted"). Only the `PACK` (comprehensive-OD) rows carry the CPA clause and feed the `cpa_split`.
 
+**Column indices are LITERAL and the state text is VERBATIM.** Build `col_map` by
+enumerating the header row with `parse_md_row` and using the raw split index `i` — the
+markdown preserves blank spacer cells, so `i` is the true column of the data cell below.
+Filtering blank headers or compacting the list before indexing shifts every column after
+a spacer by one, so a state reads a _neighbouring_ state's rate (the progressive
+non-uniform drift observed on the Apr grid: JH read GJ's column, CG read JH's, …). Take
+the state as everything before the **last** `>` unchanged — `"UP- East > ACT"` is state
+`"UP- East"`, coverage `"ACT"` (NOT `"East"`).
+
 Generated-code shape (Package table):
 
 ```python
-# col_map built from the header row: [(state, coverage, col_idx), ...]
-# e.g. [("AP/TS", "ACT", i), ("AP/TS", "PACK", i+1), ("TN", "ACT", j), ...]
+# Build col_map by LITERAL enumerate — never filter/compact the header cells first.
+cells = parse_md_row(header_line)
+col_map = []
+for i, h in enumerate(cells):                       # i is the literal column index
+    if ">" in h:                                    # a "<state> > <ACT|PACK>" header
+        state = h.rsplit(">", 1)[0].strip()         # verbatim; NOT h.split()[-1]
+        coverage = h.rsplit(">", 1)[1].strip()      # "ACT" or "PACK"
+        col_map.append((state, coverage, i))
+# Self-check: one col_map entry per ">"-bearing header cell. If this fails you
+# compacted the header row and the indices are shifted.
+assert len(col_map) == sum(1 for h in cells if ">" in h)
+
 for state, coverage, col_idx in col_map:            # coverage is "ACT" or "PACK", verbatim
     raw_val = row[col_idx].strip() if col_idx < len(row) else ""
     pct = to_pct(raw_val)
@@ -131,6 +150,22 @@ for state, coverage, col_idx in col_map:            # coverage is "ACT" or "PACK
     }
     result.append(rule)
 ```
+
+### Chola — NCB > 25% parallel table set
+
+Chola Private Car ships the CC-band grids TWICE: a **base** set and a parallel set whose
+titles end `… - NCB GT 25%` and whose row labels carry a `[ NCB GT 25%]` suffix (e.g.
+`UPTO 1000 CC[ NCB GT 25%]`). The NCB > 25% grid pays **higher rates** — the two sets are
+**NOT duplicates**. Both table sets **must be emitted**.
+
+- Put the **full table title verbatim** into `source_section` for every rule (e.g.
+  `"Private Car Package - NCB GT 25%"`). The transformer detects the `NCB GT 25%` marker
+  there and sets the NCB tier.
+- **Preserve the `[ NCB GT 25%]` row-label suffix in `rule_text`** — do not strip it. It is a
+  second place the marker survives.
+- **Do NOT set `conditions["ncb"]` yourself.** The transformer derives the NCB tier from the
+  marker (NCB>25% → `ncb=True`) and flips the paired base twin to `ncb=False`. A codegen that
+  guesses `"ncb": "Yes"` on the base table would invert the entire product.
 
 ### Chola — Two Wheeler flattened make × CC grid
 

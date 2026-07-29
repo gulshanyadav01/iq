@@ -380,7 +380,7 @@
         },
         "ncb": {
           "type": "boolean",
-          "description": "No Claim Bonus flag"
+          "description": "No Claim Bonus tier: true = the NCB > 25% grid, false = the base (NCB <= 25%) grid, null = no NCB dimension"
         },
         "cpa": {
           "type": "string",
