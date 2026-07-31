@@ -739,6 +739,9 @@ class Pipeline:
 
         logger.info("Transforming to CICS")
         transformer = RawToCICSTransformer()
+        # No document_date here: this Pass-3 re-run reads only the persisted
+        # pass1/2/3 files, which don't carry the email `Date:` header. The period
+        # falls back to Pass 1's own start_date (from pass1_metadata.json).
         cics_doc, transform_warnings, transform_errors = transformer.transform(
             raw_extraction
         )
