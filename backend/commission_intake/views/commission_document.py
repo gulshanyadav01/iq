@@ -3,6 +3,7 @@ import json
 import re
 
 from django.db.models import Count, Q
+from django.db.models.fields.json import KeyTextTransform
 from django.http import FileResponse
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiResponse, extend_schema
@@ -230,6 +231,29 @@ from commission_intake.tasks import (  # noqa: E402
 )
 
 
+# Real model columns loaded for the lean list query. Kept explicit (not
+# `*ListSerializer.Meta.fields`) because that fields list now includes the
+# non-column `applicable_period` SerializerMethodField — passing it to `.only()`
+# would raise FieldError. Drift between the two is intentionally visible here.
+_LIST_MODEL_FIELDS = (
+    "id",
+    "status",
+    "processing_mode",
+    "original_filename",
+    "source_type",
+    "provider",
+    "llm_provider",
+    "llm_model",
+    "excel_mode",
+    "error",
+    "index_progress",
+    "is_validated",
+    "validated_at",
+    "created_at",
+    "updated_at",
+)
+
+
 class CommissionDocumentViewSet(viewsets.GenericViewSet):
     """
     Commission document intake with background Celery processing.
@@ -280,9 +304,21 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         responses={200: CommissionDocumentListSerializer(many=True)},
     )
     def list(self, request, *args, **kwargs):
+        cd = "cics_result__cics_doc"
+
+        def _p(key):
+            # cics_doc -> "commission_period" -> {key}, extracted at the DB layer
+            # over the reverse-O2O LEFT JOIN. NULL when the row/key is absent.
+            return KeyTextTransform(key, KeyTextTransform("commission_period", cd))
+
         queryset = (
             self.get_queryset()
-            .only(*CommissionDocumentListSerializer.Meta.fields)
+            .only(*_LIST_MODEL_FIELDS)
+            .annotate(
+                _period_label=_p("period_label"),
+                _period_effective_from=_p("effective_from"),
+                _period_effective_to=_p("effective_to"),
+            )
             .order_by("-created_at")
         )
         serializer = CommissionDocumentListSerializer(queryset, many=True)

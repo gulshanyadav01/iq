@@ -44,6 +44,29 @@ from cins.schema.cics_model import (
 )
 
 
+def parse_document_date(content: str) -> Optional[str]:
+    """Best-effort ISO ``YYYY-MM-DD`` from a document's own date signal.
+
+    Used as the commission-period fallback when the extraction found no written
+    period. Today only the email ``Date:`` header (RFC 2822) is recognised — it
+    is machine-parseable and authoritative for the "effective from" of a grid
+    mailed with no explicit period. Returns ``None`` for non-email content or an
+    unparsable header, so callers fall through to their last-resort default.
+    """
+    if not content:
+        return None
+    from email.utils import parsedate_to_datetime
+
+    m = re.search(r"^\s*Date:\s*(.+)$", content, re.MULTILINE)
+    if not m:
+        return None
+    try:
+        dt = parsedate_to_datetime(m.group(1).strip())
+    except (TypeError, ValueError):
+        return None
+    return dt.strftime("%Y-%m-%d") if dt else None
+
+
 # Mapping tables for normalizing free-text to enum values
 
 BOOKING_MODE_MAPPINGS = {
@@ -501,13 +524,17 @@ class RawToCICSTransformer:
         self._carrier_code: str = ""
 
     def transform(
-        self, raw: RawExtraction
+        self, raw: RawExtraction, document_date: Optional[str] = None
     ) -> Tuple[CICSDocument, List[str], List[str]]:
         """
         Transform RawExtraction to CICSDocument.
 
         Args:
             raw: The raw extraction from AI
+            document_date: ISO ``YYYY-MM-DD`` fallback for the commission period
+                when the extraction found no date (e.g. the email's own send
+                date). Prevents fabricating today's processing date. See
+                ``parse_document_date``.
 
         Returns:
             Tuple of (CICSDocument, warnings, errors)
@@ -527,7 +554,7 @@ class RawToCICSTransformer:
         )
 
         # Transform commission period
-        period = self._transform_period(raw)
+        period = self._transform_period(raw, document_date)
 
         # Group entries by product and transform
         products = self._transform_products(
@@ -648,11 +675,29 @@ class RawToCICSTransformer:
 
     # ==================== PERIOD ====================
 
-    def _transform_period(self, raw: RawExtraction) -> CommissionPeriod:
-        """Transform commission period from raw extraction."""
+    def _transform_period(
+        self, raw: RawExtraction, document_date: Optional[str] = None
+    ) -> CommissionPeriod:
+        """Transform commission period from raw extraction.
+
+        Fallback order for the required ``effective_from``:
+        1. the extracted ``start_date`` (LLM/prompt path),
+        2. the document's own date (email ``Date:`` header) — deterministic,
+        3. today's processing date, only as a last resort and with a warning,
+           since it fabricates a period that is always wrong.
+        """
         effective_from = self._parse_date(raw.start_date)
+        if not effective_from and document_date:
+            effective_from = document_date
+            self.warnings.append(
+                f"No commission period found; using document date "
+                f"{document_date} as effective_from."
+            )
         if not effective_from:
-            self.warnings.append(f"Could not parse start_date: {raw.start_date}")
+            self.warnings.append(
+                f"No commission period and no document date; falling back to "
+                f"today. Raw start_date was: {raw.start_date!r}"
+            )
             effective_from = datetime.utcnow().strftime("%Y-%m-%d")
 
         effective_to = None
