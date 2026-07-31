@@ -114,6 +114,9 @@
                   Type
                 </th>
                 <th class="text-left px-4 py-3 text-xs font-semibold uppercase tracking-widest text-gray-600 dark:text-gray-400">
+                  Period
+                </th>
+                <th class="text-left px-4 py-3 text-xs font-semibold uppercase tracking-widest text-gray-600 dark:text-gray-400">
                   Status
                 </th>
                 <th class="text-left px-4 py-3 text-xs font-semibold uppercase tracking-widest text-gray-600 dark:text-gray-400">
@@ -147,6 +150,10 @@
                   <span v-if="doc.source_type" class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 uppercase">
                     {{ doc.source_type }}
                   </span>
+                  <span v-else class="text-gray-400 text-sm">—</span>
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-600 dark:text-gray-400 max-w-[8rem] truncate" :title="doc.applicable_period || ''">
+                  <template v-if="doc.applicable_period">{{ doc.applicable_period }}</template>
                   <span v-else class="text-gray-400 text-sm">—</span>
                 </td>
                 <td class="px-4 py-3">
@@ -375,6 +382,7 @@ interface CommissionDocument {
   llm_provider: string
   llm_model: string
   excel_mode: string
+  applicable_period: string | null
   is_validated: boolean
   error: string | null
   created_at: string
