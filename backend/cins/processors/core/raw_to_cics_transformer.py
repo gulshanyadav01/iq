@@ -14,6 +14,7 @@ This transformer handles all deterministic transformations:
 import json
 import re
 import hashlib
+from collections import OrderedDict
 from datetime import datetime
 from typing import List, Dict, NamedTuple, Optional, Set, Tuple, Any
 
@@ -921,6 +922,13 @@ class RawToCICSTransformer:
                     rule.conditions.number_of_wheels = inferred_wheels
             rules.append(rule)
 
+        # Recover the electric goods 3-wheeler BEFORE any collapse/dedupe, while
+        # rules are still in codegen emission order (base value emitted before
+        # its electric twin). Deterministic net for the merged-header 3W cell's
+        # second trailing value when codegen fails to tag it Electric.
+        if self._carrier_code == "Chola" and product_subproduct == "commercial-gcv":
+            self._recover_gcv_3w_electric(rules)
+
         # Pair NCB>25% rows with their base twins BEFORE any dedupe/bifurcation.
         # ncb is a _DEDUPE_SCALAR_FIELD, so running this first lets the two
         # ladders (True / False) normalize their CC boundaries independently;
@@ -956,6 +964,12 @@ class RawToCICSTransformer:
             and product_subproduct.startswith("commercial")
         ):
             rules = self._bifurcate_make_buckets(rules)
+            # Fan out MSV / MISC-D body enumerations (relocated into
+            # vehicle_sub_class by _transform_conditions) into one distinct deal
+            # per subclass. Runs before collapse so identical state/coverage
+            # clones dedupe; the collapse key keeps vehicle_sub_class, so the
+            # distinct-subclass clones themselves survive.
+            rules = self._bifurcate_subclass_buckets(rules)
 
         rules = self._collapse_duplicate_rules(rules)
 
@@ -1153,6 +1167,30 @@ class RawToCICSTransformer:
             for v in values
             for stem in cls._FOUR_WHEEL_ONLY_SUBCLASS_STEMS
         )
+
+    # GCV-3W sub-class slug ("1_GCCV_3W", "GCV 3W"). Matches gcv/gccv followed
+    # by a 3-wheeler token, tolerant of underscore/space/hyphen separators.
+    _GCV_3W_SUBCLASS_RE = re.compile(r"g[c]{1,2}v[_\s-]*3\s*w", re.IGNORECASE)
+
+    @classmethod
+    def _is_all_gvw_three_wheeler(cls, number_of_wheels, subclass_probe="") -> bool:
+        """True for a goods 3-wheeler row (all-GVW, never weight-graded).
+
+        The GCV-3W merged-header row the Chola overlay recovers is scoped to 3W
+        (number_of_wheels="3W", vehicle_sub_class="1_GCCV_3W") and carries NO gvw
+        band. Signal is either the explicit 3W wheel token (WITHOUT a paired 4W
+        value — a mixed 3W+4W rule may carry a real weight grade) or a GCV-3W
+        sub-class slug. The slug is probed from the RAW entry text
+        (source_section / rule_text / raw sub-class) because _normalize_list_field
+        drops the unmapped "1_GCCV_3W" token before it reaches the transformed
+        vehicle_sub_class — same reason the [Electric] backstop probes raw text.
+        Used to widen the degenerate (0, 0) gvw default to the open (0, 999999)
+        ceiling.
+        """
+        wheels = [str(w).lower() for w in (number_of_wheels or [])]
+        if "3w" in wheels and "4w-and-above" not in wheels:
+            return True
+        return bool(cls._GCV_3W_SUBCLASS_RE.search(subclass_probe or ""))
 
     def _extract_wheels_from_key(self, product_key: str) -> Optional[List[str]]:
         """Extract number_of_wheels hint encoded in a commercial-vehicle product key.
@@ -1737,6 +1775,24 @@ class RawToCICSTransformer:
                 self._SENTINEL_MAKE_MODEL_RE.search(str(m)) for m in vehicle_make
             )
         ):
+            # The enumeration IS a vehicle sub-class list (Loader / Excavators /
+            # Earth Movers / Crane / Bulldozers / Road Rollers / Fork Lift
+            # Trucks), not a genuine make x model grading. Relocate it into
+            # vehicle_sub_class — mapping each body to its canonical subclass via
+            # VEHICLE_SUB_CLASS_MAPPINGS — so the enumeration survives instead of
+            # being dropped; _bifurcate_subclass_buckets then fans it out into
+            # one distinct deal per subclass. This REPLACES the coarse section
+            # bucket ("2_EXCAVATOR" -> ["excavators"]) with the fine list. Falls
+            # back to the historical null-both behaviour when no body token maps
+            # (a genuine but unrecognised enumeration — never silently kept as a
+            # bogus make/model split).
+            relocated = self._normalize_list_field(
+                ", ".join(str(m) for m in vehicle_make),
+                VEHICLE_SUB_CLASS_MAPPINGS,
+                "vehicle_sub_class",
+            )
+            if relocated:
+                vehicle_sub_class = relocated
             vehicle_make = None
             vehicle_model = None
         # Make/model EXCLUSION lists (rule matches when policy make/model is NOT
@@ -1786,6 +1842,29 @@ class RawToCICSTransformer:
             recovered = self._recover_gvw_range(entry_conditions, raw)
             if recovered is not None:
                 gvw_start, gvw_end = recovered
+
+        # GVW-3W open-ceiling backstop (Chola goods 3-wheeler). GVW is the only
+        # range field whose "absent" default is the degenerate (0, 0) instead of
+        # an open (0, ceiling) — cf. CC (0, 99999), seating (0, 99), NOP
+        # (0, 999999). A goods 3-wheeler (auto) is all-GVW, never weight-graded,
+        # so the overlay correctly sets no gvw and the row lands on (0, 0) — but
+        # (0, 0) exports as a 0-0 band, not an open ceiling. Widen it to the
+        # canonical gvwRange ceiling (999999). Mirrors the EV-TW CC reset below;
+        # guarded tightly on the 3W signal so a real 4W weight grade that
+        # legitimately parsed to (0, 0) is never widened.
+        if (gvw_start, gvw_end) == (0, 0) and self._is_all_gvw_three_wheeler(
+            number_of_wheels,
+            " ".join(
+                str(v)
+                for v in (
+                    entry_conditions.get("vehicle_sub_class"),
+                    getattr(entry, "source_section", ""),
+                    getattr(entry, "rule_text", ""),
+                )
+                if v
+            ),
+        ):
+            gvw_start, gvw_end = 0, 999999
 
         cc_start, cc_end = self._parse_range_field(entry_conditions.get("cc"))
         if cc_start is None and cc_end is None:
@@ -2343,7 +2422,15 @@ class RawToCICSTransformer:
     # ("... - NCB GT 25%") and the row-label suffix ("[ NCB GT 25%]") in the
     # lower-cased _segment_probe blob. Encoded into the ncb boolean as True;
     # its paired base twin becomes False (see _pair_ncb_tiers).
-    _NCB_GT25_RE = re.compile(r"ncb\s*(?:gt|>|greater\s*than)\s*25", re.IGNORECASE)
+    # Tolerates the label variants across grid months: Apr'26 ships
+    # "[ NCB GT 25%]" while May'26 ships "[ NCB GT OR Equal to 25%]" — the
+    # "OR Equal to" infix between GT and 25 broke the old regex, so May PC rows
+    # stayed ncb=None and base/>25% tiers collapsed onto one key. Also accept
+    # >=, ≥, GTE, and "greater than or equal to".
+    _NCB_GT25_RE = re.compile(
+        r"ncb\s*(?:>=|≥|g\.?t\.?e|(?:gt|>|greater\s*than)(?:\s*or\s*equal\s*to)?)\s*25",
+        re.IGNORECASE,
+    )
 
     @classmethod
     def _is_make_model_sentinel(cls, rule: CommissionRule) -> bool:
@@ -2440,6 +2527,80 @@ class RawToCICSTransformer:
                 if isinstance(v, list):
                     cond_dump[k] = sorted(v, key=str)
         return json.dumps(cond_dump, sort_keys=True, default=str)
+
+    def _gcv3w_pair_key(self, rule: CommissionRule) -> str:
+        """Conditions-only key with ``fuel_type`` excluded, for pairing the
+        base and electric goods 3-wheeler twins. Outcome is excluded — the twins
+        differ only in fuel and rate, which is exactly what must be recovered."""
+        cond_dump: Dict[str, Any] = {}
+        if rule.conditions is not None:
+            cond_dump = rule.conditions.model_dump(exclude_none=False)
+            cond_dump.pop("fuel_type", None)
+            for k, v in list(cond_dump.items()):
+                if isinstance(v, list):
+                    cond_dump[k] = sorted(v, key=str)
+        return json.dumps(cond_dump, sort_keys=True, default=str)
+
+    def _recover_gcv_3w_electric(self, rules: List[CommissionRule]) -> None:
+        """Deterministic safety net for the electric goods 3-wheeler.
+
+        The GCCV merged-header 3W cell carries two trailing values
+        (``> v_base > v_elec``); codegen emits BOTH as fuel-agnostic
+        (``fuel_type=None``) rows and does not reliably tag the electric one
+        (the overlay asks for a ``1_GCCV_3W[Electric]`` sub-class + Electric
+        fuel, but codegen is non-deterministic). Left alone, the pair is two
+        same-condition rows with different rates — an ambiguous overlap that
+        drops the electric deal.
+
+        Recover it deterministically: group GCV-3W rows by every condition
+        except ``fuel_type``. In a group with exactly TWO distinct rates and no
+        fuel tag, the source column order is ``[base, electric]``, so the
+        later-first-emitted rate is the electric one — tag those rows
+        ``fuel_type=["electric"]``. The base rows stay fuel-None and are pinned
+        to the four non-electric fuels by the fuel-bifurcation completeness step,
+        yielding two clean deals. Runs before collapse/dedupe, while ``rules`` is
+        still in codegen emission order, so the base-before-electric ordering
+        holds. Chola GCV-3W only: a goods auto is all-GVW with no other grading
+        dimension, so two rates on an otherwise-identical row can only be the
+        base/electric column pair.
+        """
+        groups: "OrderedDict[str, List[Tuple[int, CommissionRule]]]" = OrderedDict()
+        for idx, rule in enumerate(rules):
+            cond = rule.conditions
+            if cond is None or cond.fuel_type:
+                continue
+            wheels = [str(w).lower() for w in (cond.number_of_wheels or [])]
+            if "3w" not in wheels:
+                continue
+            groups.setdefault(self._gcv3w_pair_key(rule), []).append((idx, rule))
+
+        n_tagged = 0
+        for members in groups.values():
+            # Distinct rates keyed by first emission index (source column order).
+            rate_first_idx: Dict[Any, int] = {}
+            for idx, rule in members:
+                rate = rule.outcome.percentage_value if rule.outcome else None
+                if rate is None:
+                    continue
+                if rate not in rate_first_idx:
+                    rate_first_idx[rate] = idx
+            if len(rate_first_idx) != 2:
+                continue
+            # base = earlier-emitted rate; electric = the later one.
+            elec_rate = sorted(rate_first_idx, key=lambda r: rate_first_idx[r])[1]
+            for _idx, rule in members:
+                if (
+                    rule.outcome
+                    and rule.outcome.percentage_value == elec_rate
+                    and rule.conditions is not None
+                ):
+                    rule.conditions.fuel_type = ["electric"]
+                    n_tagged += 1
+        if n_tagged:
+            self.warnings.append(
+                f"GCV-3W electric recovery: tagged {n_tagged} row(s) "
+                f"fuel=electric from the base/electric rate pair"
+            )
 
     def _pair_ncb_tiers(self, rules: List[CommissionRule]) -> None:
         """Flip the ncb=None base twin of an NCB>25% (ncb=True) rule to False.
@@ -2626,6 +2787,67 @@ class RawToCICSTransformer:
                 f"Make-bucket 0% synthesis: added {n_synth} all-other 0% "
                 f"bucket pair(s) for make/model-graded cells with no source "
                 f"all-other rate"
+            )
+        return result
+
+    def _bifurcate_subclass_buckets(
+        self, rules: List[CommissionRule]
+    ) -> List[CommissionRule]:
+        """Fan out a multi-subclass rule into one distinct deal per subclass.
+
+        Chola MSV / MISC-D grids publish a body enumeration in a single
+        ``2_EXCAVATOR`` row ("Loader, Excavators/Earth Movers, Crane,
+        Bulldozers/Bullgraders, Road Rollers, Fork Lift Trucks"), repeated in
+        the make and model cells. ``_transform_conditions`` relocates that
+        enumeration into ``vehicle_sub_class``; the client wants each body as
+        its own deal (Earth Mover / Bulldozer / Road Rollers …), so clone the
+        rule once per subclass with a single-value ``vehicle_sub_class``.
+
+        Rules already scoped to a single subclass pass through unchanged. The
+        clones keep priority / outcome / dates / description and share the same
+        rate; ``rule_id`` gets a subclass suffix to stay unique. Runs before
+        duplicate collapse (whose key retains ``vehicle_sub_class``), so
+        identical state/coverage clones dedupe while the distinct subclasses
+        survive.
+        """
+        if not rules:
+            return rules
+        result: List[CommissionRule] = []
+        n_split = 0
+        for rule in rules:
+            cond = rule.conditions
+            sub = cond.vehicle_sub_class if cond is not None else None
+            if not sub or len(sub) <= 1:
+                result.append(rule)
+                continue
+            for sc in sub:
+                clone_cond = cond.model_copy(deep=True)
+                clone_cond.vehicle_sub_class = [sc]
+                # Deep-copy the outcome too: the clones share one source rule, so
+                # a by-reference outcome would let a later in-place mutation on
+                # one subclass bleed into its siblings (conditions are already
+                # deep-copied above — keep the two symmetric).
+                clone_outcome = (
+                    rule.outcome.model_copy(deep=True)
+                    if rule.outcome is not None
+                    else None
+                )
+                result.append(
+                    CommissionRule(
+                        rule_id=f"{rule.rule_id}_SC_{sc}",
+                        priority=rule.priority,
+                        conditions=clone_cond,
+                        outcome=clone_outcome,
+                        valid_from=rule.valid_from,
+                        valid_to=rule.valid_to,
+                        rule_description=rule.rule_description,
+                    )
+                )
+            n_split += 1
+        if n_split:
+            self.warnings.append(
+                f"Subclass fan-out: split {n_split} multi-subclass rule(s) "
+                f"into one distinct deal per subclass"
             )
         return result
 
