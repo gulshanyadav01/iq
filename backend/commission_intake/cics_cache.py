@@ -108,6 +108,12 @@ def compute_cache_key(
     llm_model: str,
     pipeline_version: str = CICS_PIPELINE_VERSION,
 ) -> str:
+    """SHA256 of the six components (in order) that can change extraction output.
+
+    Provider and model are lowercased; components are `\\x1f`-joined so a free-text
+    model name can't merge into an adjacent field. Any component change → new key →
+    cache miss → fresh extraction.
+    """
     parts = [
         content_hash or "",
         indexer_version or "",
@@ -226,7 +232,17 @@ def detect_regression(
     base_total = sum(base.values())
     new_total = sum(new.values())
 
-    disappeared = [k for k, v in base.items() if v > 0 and new.get(k, 0) == 0]
+    # A product/segment present before but now empty. Only count this as a
+    # regression when the sheet's TOTAL rule count also dropped — a legitimate
+    # sub_category rename (e.g. "gcv-3w" -> "goods carrying 3w") moves the same
+    # rules to a new bucket, so the old key "disappears" while the total is
+    # preserved. Flagging that would refuse to cache forever and re-warn on every
+    # rerun (the taxonomy-churn false-positive), so require a real net loss.
+    disappeared = (
+        [k for k, v in base.items() if v > 0 and new.get(k, 0) == 0]
+        if new_total < base_total
+        else []
+    )
 
     ratio = (new_total / base_total) if base_total else 1.0
     big_shortfall = (

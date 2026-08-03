@@ -199,6 +199,15 @@ class RegressionGuardTests(TestCase):
         self.assertEqual(r.reason, "disappeared products")
         self.assertIn("buses", r.warning.lower())
 
+    def test_subcategory_rename_preserving_total_not_flagged(self):
+        # A sub_category rename moves the same rules to a new bucket: the old key
+        # disappears but the total is preserved → NOT a regression (taxonomy churn).
+        base = _cics([("Commercial Vehicle", "gcv-3w", 100), ("Private Car", "", 50)])
+        new = _cics(
+            [("Commercial Vehicle", "goods carrying 3w", 100), ("Private Car", "", 50)]
+        )
+        self.assertFalse(cics_cache.detect_regression(base, new).is_regression)
+
     def test_big_total_shortfall_flagged(self):
         base = _cics([("Commercial Vehicle", "GCV", 400)])
         new = _cics([("Commercial Vehicle", "GCV", 200)])  # 50% < 0.75 floor

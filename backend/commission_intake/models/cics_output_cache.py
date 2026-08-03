@@ -20,11 +20,17 @@ class CicsOutputCache(TimeStampedUUIDModel):
 
     Only gate-passing, non-``requires_review`` results are cached (see
     ``cics_cache.should_cache``) so a reproducibly-wrong program is never frozen in.
+
+    Lifecycle: rows are never evicted here — a version bump writes a NEW key and the
+    prior-version row is deliberately kept so ``find_prior_baseline`` can diff against
+    it (the regression guard). Growth is bounded per document to one row per
+    (version tuple); across many documents × bumps this table grows monotonically.
+    Prune out of band if it ever matters (e.g. keep latest N per ``content_hash``).
     """
 
     # SHA256 over (content_hash, indexer_version, prompt_version_hash,
-    # llm_provider, llm_model, pipeline_version). Unique — one row per key.
-    cache_key = models.CharField(max_length=64, unique=True, db_index=True)
+    # llm_provider, llm_model, pipeline_version). unique=True already indexes it.
+    cache_key = models.CharField(max_length=64, unique=True)
 
     # Key components, stored denormalised for debugging / invalidation queries.
     content_hash = models.CharField(max_length=128, db_index=True)

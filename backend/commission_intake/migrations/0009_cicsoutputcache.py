@@ -27,7 +27,7 @@ class Migration(migrations.Migration):
                 ("updated_at", models.DateTimeField(auto_now=True)),
                 (
                     "cache_key",
-                    models.CharField(db_index=True, max_length=64, unique=True),
+                    models.CharField(max_length=64, unique=True),
                 ),
                 ("content_hash", models.CharField(db_index=True, max_length=128)),
                 ("indexer_version", models.CharField(max_length=16)),

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from celery import chain, shared_task
 from celery.exceptions import Ignore
+from django.db import models, transaction
 
 if TYPE_CHECKING:
     from commission_intake.models import IndexedContent
@@ -222,6 +223,7 @@ def run_extraction(document_id: str):
         ExtractionPass,
         CICSResult,
         ValidationResult,
+        CicsOutputCache,
     )
     from cins.processors.content.indexer import IndexedDocument
     from cins.processors.core.pipeline import Pipeline
@@ -264,9 +266,14 @@ def run_extraction(document_id: str):
                 f"CICS output-cache HIT for {document_id} (key={cache_key[:12]}…) "
                 f"— repopulating without LLM"
             )
-            _repopulate_from_cache(doc, cached)
-            cached.hit_count = (cached.hit_count or 0) + 1
-            cached.save(update_fields=["hit_count", "updated_at"])
+            # Rebuild the UI rows atomically: the stale-data delete above already
+            # ran, so a partial repopulate must not leave a half-empty document.
+            with transaction.atomic():
+                _repopulate_from_cache(doc, cached)
+            # Atomic increment so concurrent reruns of the same doc don't lose a count.
+            CicsOutputCache.objects.filter(pk=cached.pk).update(
+                hit_count=models.F("hit_count") + 1
+            )
             return document_id
 
         # Pre-create ExtractionPass rows as PENDING for each sheet × 3 passes the

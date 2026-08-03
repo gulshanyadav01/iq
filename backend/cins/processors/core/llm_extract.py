@@ -820,6 +820,12 @@ def _extract_pass3_via_codegen(
     # we keep the partial output but flag the pass loudly instead of shipping a
     # silent-green empty (the client-visible May1/June whole-segment drop).
     gate_requires_review = False
+    # Best (largest) valid set seen across attempts. The gate can force extra
+    # retries on a shortfall; if a later attempt then HARD-fails (empty result /
+    # all-invalid), we must fall back to this instead of shipping zero — the gate
+    # exists to prevent a drop, it must never manufacture one.
+    best_entries = []
+    best_code = ""
 
     for attempt in range(1, MAX_CODEGEN_ATTEMPTS + 1):
         print(
@@ -914,6 +920,12 @@ def _extract_pass3_via_codegen(
             error_context = _build_error_context(msg, code, attempt)
             if attempt < MAX_CODEGEN_ATTEMPTS:
                 continue
+            if best_entries:
+                # A prior attempt produced real rows (gate forced this retry) —
+                # keep them, flagged, rather than shipping an empty result.
+                valid_entries, code = best_entries, best_code
+                gate_requires_review = True
+                break
             return (
                 RulesExtraction(
                     products=[],
@@ -939,6 +951,12 @@ def _extract_pass3_via_codegen(
             if len(error_notes) > 5:
                 print(f"#     ... and {len(error_notes) - 5} more", file=sys.stderr)
 
+        # Remember the largest valid set across attempts, so a gate-forced retry
+        # that later hard-fails can fall back to it instead of shipping zero.
+        if len(valid_entries) > len(best_entries):
+            best_entries = valid_entries
+            best_code = code
+
         # All entries failed validation — retry
         if not valid_entries and error_notes:
             msg = "\n".join(error_notes[:3])
@@ -946,6 +964,12 @@ def _extract_pass3_via_codegen(
             error_context = _build_error_context(msg, code, attempt)
             if attempt < MAX_CODEGEN_ATTEMPTS:
                 continue
+            if best_entries:
+                # Fall back to a prior attempt's real rows rather than shipping
+                # empty (the gate must not manufacture the drop it guards against).
+                valid_entries, code = best_entries, best_code
+                gate_requires_review = True
+                break
             return (
                 RulesExtraction(
                     products=[],
@@ -994,6 +1018,12 @@ def _extract_pass3_via_codegen(
         # Partial or full success — use what we have
         print(f"#   ✓ Code-gen succeeded on attempt {attempt}", file=sys.stderr)
         break
+
+    # A gate-forced retry can end on a thinner attempt than an earlier one; ship
+    # the fullest valid set we saw so a later degraded attempt never loses rows.
+    if len(best_entries) > len(valid_entries):
+        valid_entries, code = best_entries, best_code
+        gate_requires_review = True
 
     # ── Assemble RulesExtraction from valid entries ──────────────────────────
     products_map = {}
