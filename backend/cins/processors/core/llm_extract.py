@@ -1011,6 +1011,19 @@ def _extract_pass3_via_codegen(
     )
 
 
+def _commission_grid_present(content) -> bool:
+    """True when the Pass 3 content actually carries a commission rate grid.
+
+    Guards the inherits_from_previous early-exit: a forwarded "we continue last
+    month's grid" cover email may still ship the full month's sheets, and those
+    must be extracted rather than skipped. The ``[type: commission]`` tag is the
+    indexer's own commission-table classification marker, so this fires only on
+    genuine grid content and never on a bare no-change email (which carries no
+    commission table).
+    """
+    return bool(content) and "[type: commission]" in content
+
+
 def extract_multi_pass(
     prompt_text,
     api_key=None,
@@ -1158,8 +1171,26 @@ def extract_multi_pass(
                 f"\n\n---\n\n{pass3_content}"
             )
 
-        # Early exit: if document states rates are unchanged, skip Pass 2 and Pass 3
-        if metadata.inherits_from_previous:
+        # Early exit: if document states rates are unchanged, skip Pass 2 and
+        # Pass 3 — BUT only when there is no commission grid actually attached
+        # to extract. A forwarded "we continue last month's grid" cover email
+        # commonly still ships the full month's sheets (Chola June'26: the email
+        # said "same grid as May 2026" yet the workbook carried complete CV /
+        # Private Car / TW grids). Skipping those on the inheritance flag alone
+        # produced an empty document with no previous_document_id to copy from.
+        # When a real grid is present, honour the data over the cover note and
+        # extract normally. The "[type: commission]" tag is the indexer's own
+        # commission-table classification marker, so this fires only on genuine
+        # grid content, never on a bare no-change email.
+        _grid_attached = _commission_grid_present(pass3_content)
+        if metadata.inherits_from_previous and _grid_attached:
+            print(
+                "# INHERITANCE OVERRIDDEN: Pass 1 reported inherits_from_previous"
+                "=True, but a commission grid is attached — extracting it instead"
+                " of skipping.",
+                file=sys.stderr,
+            )
+        if metadata.inherits_from_previous and not _grid_attached:
             print("=" * 70, file=sys.stderr)
             print(
                 "# NO CHANGE DETECTED: Skipping Pass 2 and Pass 3 (rates unchanged)",

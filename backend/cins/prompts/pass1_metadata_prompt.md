@@ -133,6 +133,12 @@ Then also add a short explanation in `inheritance_note`.
 **Do NOT set `inherits_from_previous: true` if:**
 
 - The email is a request for confirmation, not a confirmation itself
+- **A commission grid/rate table is actually attached in the document content**
+  (any sheet or table with commission rates). A forwarded cover note may say
+  "continuing the same grid as last month" while still shipping the full month's
+  grid — in that case the attached grid is the source of truth and MUST be
+  extracted, so set `inherits_from_previous: false`. Only inherit when there is
+  genuinely no rate table anywhere in the document to extract.
 
 ---
 

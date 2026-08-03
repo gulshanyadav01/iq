@@ -265,27 +265,38 @@ value, emit a 3-wheeler rule:
   3-wheeler is all-GVW (never weight-graded).
 - `coverage_type_text` = the coverage token verbatim (`ACT` → third-party, `PACK` →
   comprehensive; the transformer maps these).
-- `conditions["vehicle_sub_class"] = "1_GCCV_3W"`; `product_name = "Commercial Vehicle"`.
+- `product_name = "Commercial Vehicle"`.
 - `state_text` = the state group (`AP/TS`, `MH/GA`, `GJ`, …) verbatim — the transformer
   expands the slash-grouped codes.
-- Fuel split (only when a 4th segment is present):
-  - one trailing value (`> v`) → ONE rule, all fuel types (leave `fuel_type` unset),
-    `commission_value = to_pct(v)`.
-  - two trailing values (`> v_base > v_elec`) → emit TWO rules: one with
-    `conditions["fuel_type"] = "Petrol, Diesel, CNG, LPG"` value `v_base`, and one with
-    `conditions["fuel_type"] = "Electric"` value `v_elec`.
+- **Fuel split — align each trailing value to its SUBCLASS-label segment.** Split the merged
+  SUBCLASS header cell on `>` to get the subclass segments (`["1_GCCV_3W", "1_GCCV_3W[Electric]"]`). The i-th trailing value `parts[2 + i]` belongs to the i-th
+  subclass segment — copy that segment **verbatim** into `conditions["vehicle_sub_class"]`:
+  - one trailing value (`> v`) → ONE rule, `conditions["vehicle_sub_class"] = "1_GCCV_3W"`,
+    all fuel types (leave `fuel_type` unset), `commission_value = to_pct(v)`.
+  - two trailing values (`> v_base > v_elec`) → emit TWO rules:
+    - base: `conditions["vehicle_sub_class"] = "1_GCCV_3W"`,
+      `conditions["fuel_type"] = "Petrol, Diesel, CNG, LPG"`, value `v_base`.
+    - electric: `conditions["vehicle_sub_class"] = "1_GCCV_3W[Electric]"`,
+      `conditions["fuel_type"] = "Electric"`, value `v_elec`.
 - Attach the same CPA `conditional_deduction` qualifying clause you attach to every other CV
   rule (see "Chola — CPA deduction footnote"); 3-wheeler without-CPA is deducted too.
 - Skip `0` / `0%` / empty trailing values.
 
 The `[Electric]` token in the merged SUBCLASS label (`1_GCCV_3W > 1_GCCV_3W[Electric]`) is
 the reason a cell can carry two trailing values — it is NOT a state or coverage column.
+**The `[Electric]` suffix on the electric row's `vehicle_sub_class` is MANDATORY, not
+optional decoration**: it is the marker the transformer's deterministic `[Electric]` backstop
+reads to recover `fuel_type="Electric"` if this codegen ever omits the `fuel_type` field, so
+the electric 3W deal is never silently collapsed into its base twin. Emit BOTH the `[Electric]`
+sub-class suffix AND `fuel_type="Electric"` on the electric row — do not rely on either alone.
 
 **CRITICAL codegen shape — do NOT append trailing to every data row.** The trailing
 `parts[2:]` of each HEADER cell belongs to the ONE merged `1_GCCV_3W` row, not to the
 positional weight-band data rows below. Emit the 3-wheeler rules in a SEPARATE loop over the
-header's `col_map` (once per state×coverage), each with
-`conditions["number_of_wheels"]="3W"`, `vehicle_sub_class="1_GCCV_3W"`, and NO gvw. Then run
+header's `col_map` (once per state×coverage, and once MORE per state×coverage that carries an
+electric 4th segment), each with `conditions["number_of_wheels"]="3W"`, NO gvw, and
+`vehicle_sub_class` set to the matching SUBCLASS segment (`"1_GCCV_3W"` for the base value,
+`"1_GCCV_3W[Electric]"` for the electric value). Then run
 the normal per-data-row loop using ONLY `row[col_idx]` (never `vals.extend(trailing)`) — mixing
 the header's 3W values into every weight-band row misattributes rates and inflates the rule
 count several-fold.

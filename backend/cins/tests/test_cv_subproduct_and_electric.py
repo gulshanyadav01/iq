@@ -17,6 +17,7 @@ Run from the backend container:
 from unittest import TestCase
 
 from cins.processors.core.raw_to_cics_transformer import RawToCICSTransformer
+from cins.schema.cics_model import CommissionRule
 from cins.schema.raw_extraction import (
     RawCommissionEntry,
     RawExtraction,
@@ -200,6 +201,60 @@ class ElectricTwoWheelerCcTests(TestCase):
         )
         cond = self.t._transform_conditions(entry, None, _raw([entry]))
         self.assertEqual((cond.cc_start_range, cond.cc_end_range), (150, 350))
+
+
+class Gcv3wOpenGvwTests(TestCase):
+    """A goods 3-wheeler carries no gvw band (all-GVW, never weight-graded).
+    Its degenerate (0, 0) default must widen to the open (0, 999999) ceiling."""
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+
+    def test_gcv_3w_wheel_token_widens_gvw(self):
+        entry = RawCommissionEntry(
+            rule_text="Commercial Vehicle 1_GCCV_3W AP/TS PACK",
+            commission_value="20%",
+            product_name="Commercial Vehicle",
+            conditions={
+                "number_of_wheels": "3W",
+                "vehicle_sub_class": "1_GCCV_3W",
+            },
+        )
+        cond = self.t._transform_conditions(entry, None, _raw([entry]))
+        self.assertEqual((cond.gvw_start_range, cond.gvw_end_range), (0, 999999))
+
+    def test_gcv_3w_subclass_only_widens_gvw(self):
+        # Wheel token absent, only the GCV-3W sub-class slug carries the signal.
+        entry = RawCommissionEntry(
+            rule_text="Commercial Vehicle 1_GCCV_3W AP/TS PACK",
+            commission_value="20%",
+            product_name="Commercial Vehicle",
+            conditions={"vehicle_sub_class": "1_GCCV_3W"},
+        )
+        cond = self.t._transform_conditions(entry, None, _raw([entry]))
+        self.assertEqual((cond.gvw_start_range, cond.gvw_end_range), (0, 999999))
+
+    def test_real_gvw_band_preserved(self):
+        # A genuine 4W weight grade must NOT be widened.
+        entry = RawCommissionEntry(
+            rule_text="Commercial Vehicle GCV 4W 3500-7500 PACK",
+            commission_value="20%",
+            product_name="Commercial Vehicle",
+            conditions={"number_of_wheels": "4W & Above", "gvw": "3500-7500"},
+        )
+        cond = self.t._transform_conditions(entry, None, _raw([entry]))
+        self.assertEqual((cond.gvw_start_range, cond.gvw_end_range), (3500, 7500))
+
+    def test_four_wheel_zero_zero_not_widened(self):
+        # 4W row that legitimately parsed to (0, 0) stays (0, 0) — no 3W signal.
+        entry = RawCommissionEntry(
+            rule_text="Commercial Vehicle GCV 4W PACK",
+            commission_value="20%",
+            product_name="Commercial Vehicle",
+            conditions={"number_of_wheels": "4W & Above"},
+        )
+        cond = self.t._transform_conditions(entry, None, _raw([entry]))
+        self.assertEqual((cond.gvw_start_range, cond.gvw_end_range), (0, 0))
 
 
 class TwMakeCcBandGuardTests(TestCase):
@@ -541,6 +596,205 @@ class MsvDistinctRulesTests(TestCase):
         cond = self.t._transform_conditions(e, None, _raw([e]))
         self.assertEqual(cond.vehicle_make, ["TATA/ Maruti/ Mahindra"])
         self.assertEqual(cond.vehicle_model, ["Ace", "Super Ace", "Yodha"])
+
+
+class ElectricGcv3wTests(TestCase):
+    """P3: the electric goods 3-wheeler (merged-header 4th segment) carries a
+    "1_GCCV_3W[Electric]" sub-class. The transformer's [Electric] backstop must
+    recover fuel_type=electric even when codegen drops the fuel_type field, so
+    the electric deal stays distinct from its non-electric base twin."""
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+        self.t._carrier_code = "Chola"
+
+    def test_electric_suffix_recovers_fuel_without_fuel_field(self):
+        # Codegen omitted fuel_type; only the [Electric] sub-class suffix marks it.
+        e = RawCommissionEntry(
+            rule_text="Commercial Vehicle 1_GCCV_3W[Electric] AP PACK",
+            commission_value="27.5%",
+            product_name="Commercial Vehicle",
+            conditions={
+                "number_of_wheels": "3W",
+                "vehicle_sub_class": "1_GCCV_3W[Electric]",
+            },
+        )
+        cond = self.t._transform_conditions(e, None, _raw([e]))
+        self.assertEqual(cond.fuel_type, ["electric"])
+        # FIX 2 still widens the all-GVW 3W band.
+        self.assertEqual((cond.gvw_start_range, cond.gvw_end_range), (0, 999999))
+
+    def test_base_and_electric_stay_distinct_deals(self):
+        base = RawCommissionEntry(
+            rule_text="Commercial Vehicle 1_GCCV_3W AP PACK",
+            commission_value="30%",
+            product_name="Commercial Vehicle",
+            product_type="GCV",
+            coverage_type_text="comprehensive",
+            conditions={
+                "number_of_wheels": "3W",
+                "vehicle_sub_class": "1_GCCV_3W",
+                "fuel_type": "Petrol, Diesel, CNG, LPG",
+            },
+        )
+        elec = RawCommissionEntry(
+            rule_text="Commercial Vehicle 1_GCCV_3W[Electric] AP PACK",
+            commission_value="27.5%",
+            product_name="Commercial Vehicle",
+            product_type="GCV",
+            coverage_type_text="comprehensive",
+            conditions={
+                "number_of_wheels": "3W",
+                "vehicle_sub_class": "1_GCCV_3W[Electric]",
+            },
+        )
+        product = self.t._transform_product(
+            "Commercial Vehicle", [base, elec], None, _raw([base, elec]), segment="GCV"
+        )
+        threew = [
+            r
+            for r in product.commission_rules
+            if r.conditions
+            and "3w" in [str(w).lower() for w in (r.conditions.number_of_wheels or [])]
+        ]
+        fuels = [tuple(r.conditions.fuel_type or []) for r in threew]
+        # Exactly one electric 3W deal, and at least one non-electric sibling.
+        self.assertTrue(any("electric" in f for f in fuels), fuels)
+        self.assertTrue(any("electric" not in f for f in fuels), fuels)
+
+    def test_recover_gcv_3w_electric_tags_second_rate(self):
+        # Codegen emitted both trailing values as fuel-None rows (base 30 first,
+        # electric 27.5 second) with NO electric marker at all. The deterministic
+        # net must tag the later-emitted rate as electric.
+        from cins.schema.cics_model import CommissionOutcome, RuleConditions
+
+        def _r(rate):
+            return CommissionRule(
+                rule_id=f"r{str(rate).replace('.', '_')}",
+                priority=10,
+                conditions=RuleConditions(
+                    number_of_wheels=["3w"],
+                    vehicle_sub_class=["1_gccv_3w"],
+                    state=["tamil-nadu"],
+                    policy_type=["comprehensive"],
+                    gvw_start_range=0,
+                    gvw_end_range=999999,
+                ),
+                outcome=CommissionOutcome(
+                    commission_type="percentage", percentage_value=rate
+                ),
+            )
+
+        rules = [_r(30.0), _r(27.5)]  # base emitted first, electric second
+        self.t._recover_gcv_3w_electric(rules)
+        by_rate = {r.outcome.percentage_value: r for r in rules}
+        self.assertEqual(by_rate[27.5].conditions.fuel_type, ["electric"])
+        self.assertIsNone(by_rate[30.0].conditions.fuel_type)
+
+    def test_recover_gcv_3w_electric_single_rate_untouched(self):
+        # A state with only a base 3W rate (no electric column) stays fuel-None.
+        from cins.schema.cics_model import CommissionOutcome, RuleConditions
+
+        rule = CommissionRule(
+            rule_id="solo",
+            priority=10,
+            conditions=RuleConditions(
+                number_of_wheels=["3w"],
+                vehicle_sub_class=["1_gccv_3w"],
+                state=["karnataka"],
+                policy_type=["comprehensive"],
+            ),
+            outcome=CommissionOutcome(
+                commission_type="percentage", percentage_value=25.0
+            ),
+        )
+        self.t._recover_gcv_3w_electric([rule])
+        self.assertIsNone(rule.conditions.fuel_type)
+
+
+class ExcavatorSubclassSplitTests(TestCase):
+    """P2: the MSV 2_EXCAVATOR body enumeration (repeated verbatim in make and
+    model) is relocated into vehicle_sub_class and fanned out into one distinct
+    deal per subclass."""
+
+    BODIES = (
+        "Loader, Excavators/Earth Movers, Crane, "
+        "Bulldozers/Bullgraders, Road Rollers, Fork Lift Trucks"
+    )
+    EXPECTED = {
+        "loader",
+        "excavators",
+        "crane",
+        "bulldozer",
+        "road-rollers",
+        "fork-lift-trucks",
+    }
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+        self.t._carrier_code = "Chola"
+
+    def test_coarse_slug_relocated_to_fine_subclasses(self):
+        # Real production shape: vehicle_sub_class is the COARSE section slug
+        # "2_EXCAVATOR"; the fine enumeration lives only in make == model.
+        e = RawCommissionEntry(
+            rule_text="MISC-D 2_EXCAVATOR AP ACT",
+            commission_value="12%",
+            product_name="Commercial Vehicle",
+            conditions={
+                "vehicle_sub_class": "2_EXCAVATOR",
+                "vehicle_make": self.BODIES,
+                "vehicle_model": self.BODIES,
+            },
+        )
+        cond = self.t._transform_conditions(e, None, _raw([e]))
+        self.assertIsNone(cond.vehicle_make)
+        self.assertIsNone(cond.vehicle_model)
+        self.assertEqual(set(cond.vehicle_sub_class), self.EXPECTED)
+
+    def test_fan_out_one_deal_per_subclass(self):
+        entries = [
+            RawCommissionEntry(
+                rule_text=f"MISC-D 2_EXCAVATOR AP {cov}",
+                commission_value="12%",
+                product_name="Commercial Vehicle",
+                product_type="MISC-D",
+                coverage_type_text="comprehensive",
+                conditions={
+                    "vehicle_sub_class": "2_EXCAVATOR",
+                    "vehicle_make": self.BODIES,
+                    "vehicle_model": self.BODIES,
+                },
+            )
+            for cov in ("ACT", "PACK")
+        ]
+        product = self.t._transform_product(
+            "Commercial Vehicle", entries, None, _raw(entries), segment="MISC-D"
+        )
+        subclasses = [
+            tuple(r.conditions.vehicle_sub_class or [])
+            for r in product.commission_rules
+        ]
+        # Every emitted rule is scoped to exactly ONE subclass.
+        self.assertTrue(all(len(s) == 1 for s in subclasses))
+        self.assertEqual({s[0] for s in subclasses}, self.EXPECTED)
+
+    def test_unrecognised_enumeration_falls_back_to_null(self):
+        # A make == model with no mappable body token keeps the historical
+        # null-both behaviour (never kept as a bogus make/model split).
+        e = RawCommissionEntry(
+            rule_text="GCV 2_UPTO_3.5T AP ACT",
+            commission_value="12%",
+            product_name="Commercial Vehicle",
+            conditions={
+                "vehicle_sub_class": "2_UPTO_3.5T",
+                "vehicle_make": "Zeta, Omega",
+                "vehicle_model": "Zeta, Omega",
+            },
+        )
+        cond = self.t._transform_conditions(e, None, _raw([e]))
+        self.assertIsNone(cond.vehicle_make)
+        self.assertIsNone(cond.vehicle_model)
 
 
 class StaleGccvLeakGuardTests(TestCase):

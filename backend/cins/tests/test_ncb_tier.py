@@ -72,6 +72,34 @@ class NcbMarkerTests(TestCase):
         cond = self.t._transform_conditions(entry, None, _raw([entry]))
         self.assertIs(cond.ncb, True)
 
+    def test_may_label_variant_gt_or_equal_to(self):
+        # May'26 grid ships "[ NCB GT OR Equal to 25%]" — the "OR Equal to"
+        # infix broke the old regex, leaving all 638 May PC rows ncb=None.
+        for label in (
+            "Private Car UPTO 1000 CC[ NCB GT OR Equal to 25%] AP PACK",
+            "Private Car UPTO 1000 CC[ NCB >= 25%] AP PACK",
+            "Private Car UPTO 1000 CC[ NCB greater than or equal to 25%] AP PACK",
+        ):
+            entry = RawCommissionEntry(
+                rule_text=label,
+                commission_value="20%",
+                product_name="Private Car",
+            )
+            cond = self.t._transform_conditions(entry, None, _raw([entry]))
+            self.assertIs(cond.ncb, True, label)
+
+    def test_apr_label_variant_still_matches(self):
+        # Regression guard: the Apr'26 "[ NCB GT 25%]" title form must keep
+        # matching after the regex was broadened for the May variant.
+        entry = RawCommissionEntry(
+            rule_text="Private Car UPTO 1000 CC AP PACK",
+            commission_value="20%",
+            product_name="Private Car",
+            source_section="Private Car Package - NCB GT 25%",
+        )
+        cond = self.t._transform_conditions(entry, None, _raw([entry]))
+        self.assertIs(cond.ncb, True)
+
     def test_base_table_stays_none(self):
         entry = RawCommissionEntry(
             rule_text="Private Car UPTO 1000 CC AP PACK",
