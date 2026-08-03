@@ -71,6 +71,30 @@ def get_safe_sheet_name(sheet_name: str) -> str:
     return safe_name[:50]
 
 
+def _table_shape_for_sheet(table_splits, sheet_name: str, safe_name: str):
+    """Per-sheet ``table_splits`` entry for the codegen completeness gate.
+
+    Looks up the sheet's persisted table shape ({"tables": [...]} with each
+    commission table carrying ``rate_cell_count``). The indexer keys ``table_splits``
+    by its own filename sanitizer (truncates at 100 chars) while the pipeline uses
+    ``get_safe_sheet_name`` (50 chars), so a direct key hit can miss on long names —
+    fall back to matching the stored ``original_sheet_name``. Returns ``None`` when
+    absent (legacy docs); the gate fails open on ``None``.
+    """
+    splits = table_splits or {}
+    if not isinstance(splits, dict) or not splits:
+        return None
+    entry = splits.get(safe_name)
+    if entry is None:
+        for val in splits.values():
+            if isinstance(val, dict) and val.get("original_sheet_name") == sheet_name:
+                entry = val
+                break
+    if isinstance(entry, dict) and isinstance(entry.get("tables"), list):
+        return entry
+    return None
+
+
 def derive_pipeline_routing(
     source_type: str,
     sheet_classifications: dict,
@@ -1110,6 +1134,11 @@ class Pipeline:
                         on_pass_complete=_on_pass_done,
                         on_pass_start=_on_pass_start,
                         provider=self.llm_provider,
+                        table_shape=_table_shape_for_sheet(
+                            (indexed_doc.metadata or {}).get("table_splits", {}),
+                            sheet_name,
+                            safe_name,
+                        ),
                     )
                 except Exception as e:
                     error_msg = str(e)

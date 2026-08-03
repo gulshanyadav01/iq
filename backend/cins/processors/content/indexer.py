@@ -20,6 +20,7 @@ from cins.processors.extractors.convert_xlsb import (
     XlsbConversionError,
 )
 from cins.processors.content.csv_to_markdown import csv_to_markdown
+from cins.processors.core.codegen_coverage import count_rate_bearing_rows
 from cins.processors.content.content_cleaning import (
     clean_email_content,
     clean_master_data_content,
@@ -44,7 +45,14 @@ logger = logging.getLogger("content_indexer")
 # force_reindex=True into a temp dir it then deletes). The frontend uses the
 # persisted value to tell rows that carry visibility data from ones that do not.
 # Nothing re-indexes existing rows automatically — they keep 1.3 until re-indexed.
-INDEXER_VERSION = "1.4"
+#
+# 1.5 — each commission table in table_splits carries a deterministic
+# `header_row_count` and `rate_cell_count` (host-counted rate-bearing data rows
+# from the raw CSV slice). The codegen completeness gate
+# (`processors/core/codegen_coverage.py`) reconciles emitted rules against
+# rate_cell_count to catch whole-table/segment drops. Docs indexed before 1.5
+# lack these keys; the gate fails open on them.
+INDEXER_VERSION = "1.5"
 
 
 def _retag_single_commission_table(content_str: str, sheet_name: str) -> str:
@@ -1215,6 +1223,7 @@ class ContentIndexer:
                                     table_type = table_info.get(
                                         "table_type", "commission"
                                     )
+                                    hrc = sheet_header_row_counts.get(sheet_name, 0)
                                     if table_type == "notes":
                                         import csv as _csv
                                         import io as _io
@@ -1240,7 +1249,6 @@ class ContentIndexer:
                                             else "[Empty notes section]"
                                         )
                                     else:
-                                        hrc = sheet_header_row_counts.get(sheet_name, 0)
                                         table_md = csv_to_markdown(
                                             table_info["table_csv_content"],
                                             header_row_count=hrc,
@@ -1251,6 +1259,20 @@ class ContentIndexer:
 
                                     if table_info.get("confidence", 1.0) < 0.7:
                                         requires_review = True
+
+                                    # Deterministic shape contract for the codegen
+                                    # completeness gate: count the rate-bearing data
+                                    # rows this commission table CONTAINS while its raw
+                                    # CSV slice is still in hand (it is discarded after
+                                    # markdown build). Only commission tables gate.
+                                    rate_cell_count = (
+                                        count_rate_bearing_rows(
+                                            table_info.get("table_csv_content", ""),
+                                            header_row_count=hrc,
+                                        )
+                                        if table_type == "commission"
+                                        else 0
+                                    )
 
                                     split_tables_meta.append(
                                         {
@@ -1270,6 +1292,8 @@ class ContentIndexer:
                                             ),
                                             "start_row": table_info.get("start_row"),
                                             "end_row": table_info.get("end_row"),
+                                            "header_row_count": hrc,
+                                            "rate_cell_count": rate_cell_count,
                                         }
                                     )
 
