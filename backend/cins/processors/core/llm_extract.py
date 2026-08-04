@@ -678,6 +678,7 @@ def _extract_pass3_via_codegen(
     master_data_extraction,
     output_dir=None,
     filename_prefix="",
+    table_shape=None,
 ):
     """
     Code-generation fallback for Pass 3.
@@ -716,6 +717,7 @@ def _extract_pass3_via_codegen(
         validate_code_ast,
         validate_entries,
     )
+    from cins.processors.core.codegen_coverage import table_coverage_report
 
     MAX_CODEGEN_ATTEMPTS = 3
 
@@ -814,6 +816,16 @@ def _extract_pass3_via_codegen(
     valid_entries = []
     error_notes = []
     code = ""
+    # Set when the deterministic completeness gate still fails on the final attempt:
+    # we keep the partial output but flag the pass loudly instead of shipping a
+    # silent-green empty (the client-visible May1/June whole-segment drop).
+    gate_requires_review = False
+    # Best (largest) valid set seen across attempts. The gate can force extra
+    # retries on a shortfall; if a later attempt then HARD-fails (empty result /
+    # all-invalid), we must fall back to this instead of shipping zero — the gate
+    # exists to prevent a drop, it must never manufacture one.
+    best_entries = []
+    best_code = ""
 
     for attempt in range(1, MAX_CODEGEN_ATTEMPTS + 1):
         print(
@@ -908,6 +920,12 @@ def _extract_pass3_via_codegen(
             error_context = _build_error_context(msg, code, attempt)
             if attempt < MAX_CODEGEN_ATTEMPTS:
                 continue
+            if best_entries:
+                # A prior attempt produced real rows (gate forced this retry) —
+                # keep them, flagged, rather than shipping an empty result.
+                valid_entries, code = best_entries, best_code
+                gate_requires_review = True
+                break
             return (
                 RulesExtraction(
                     products=[],
@@ -933,6 +951,12 @@ def _extract_pass3_via_codegen(
             if len(error_notes) > 5:
                 print(f"#     ... and {len(error_notes) - 5} more", file=sys.stderr)
 
+        # Remember the largest valid set across attempts, so a gate-forced retry
+        # that later hard-fails can fall back to it instead of shipping zero.
+        if len(valid_entries) > len(best_entries):
+            best_entries = valid_entries
+            best_code = code
+
         # All entries failed validation — retry
         if not valid_entries and error_notes:
             msg = "\n".join(error_notes[:3])
@@ -940,6 +964,12 @@ def _extract_pass3_via_codegen(
             error_context = _build_error_context(msg, code, attempt)
             if attempt < MAX_CODEGEN_ATTEMPTS:
                 continue
+            if best_entries:
+                # Fall back to a prior attempt's real rows rather than shipping
+                # empty (the gate must not manufacture the drop it guards against).
+                valid_entries, code = best_entries, best_code
+                gate_requires_review = True
+                break
             return (
                 RulesExtraction(
                     products=[],
@@ -950,9 +980,50 @@ def _extract_pass3_via_codegen(
                 user_prompt,
             )
 
+        # ── Completeness gate ────────────────────────────────────────────────
+        # Reconcile emitted rules against the host-counted rate-bearing rows per
+        # commission table. A dropped table / segment fails the attempt so the
+        # retry channel re-prompts with a deterministic, table-specific gap message.
+        # Fails open when no shape was persisted (legacy docs).
+        coverage = table_coverage_report(
+            table_shape, valid_entries, markdown=commission_data_content
+        )
+        print(
+            f"#   → coverage: expected~{coverage.expected} emitted={coverage.emitted} "
+            f"passed={coverage.passed} ({coverage.reason})",
+            file=sys.stderr,
+        )
+        for note in coverage.advisory:
+            print(f"#     [coverage] {note}", file=sys.stderr)
+        if coverage.failed:
+            print(
+                f"#   ⚠ Completeness gate failed ({coverage.reason}): "
+                f"expected ~{coverage.expected} rate rows, emitted {coverage.emitted} rules",
+                file=sys.stderr,
+            )
+            if attempt < MAX_CODEGEN_ATTEMPTS:
+                error_context = _build_error_context(
+                    coverage.gap_message, code, attempt
+                )
+                continue
+            # Exhausted retries but still incomplete — keep what we have and flag
+            # loudly rather than accept a partial-drop silently.
+            print(
+                "#   ⚠ Completeness gate still failing after all attempts — "
+                "flagging pass requires_review",
+                file=sys.stderr,
+            )
+            gate_requires_review = True
+
         # Partial or full success — use what we have
         print(f"#   ✓ Code-gen succeeded on attempt {attempt}", file=sys.stderr)
         break
+
+    # A gate-forced retry can end on a thinner attempt than an earlier one; ship
+    # the fullest valid set we saw so a later degraded attempt never loses rows.
+    if len(best_entries) > len(valid_entries):
+        valid_entries, code = best_entries, best_code
+        gate_requires_review = True
 
     # ── Assemble RulesExtraction from valid entries ──────────────────────────
     products_map = {}
@@ -1000,11 +1071,18 @@ def _extract_pass3_via_codegen(
     for p in products:
         print(f"#   → {p.product_name}: {len(p.rules)} rules", file=sys.stderr)
 
+    ambiguities = list(error_notes) if error_notes else []
+    if gate_requires_review:
+        ambiguities.append(
+            "Completeness gate: emitted rules fall short of the source grid's "
+            "rate-bearing rows — a table/segment may have been dropped. Manual review."
+        )
+
     return (
         RulesExtraction(
             products=products,
-            overall_ambiguities=error_notes if error_notes else [],
-            overall_requires_review=bool(error_notes),
+            overall_ambiguities=ambiguities,
+            overall_requires_review=bool(error_notes) or gate_requires_review,
         ),
         code,
         user_prompt,
@@ -1039,6 +1117,7 @@ def extract_multi_pass(
     on_pass_complete=None,
     on_pass_start=None,
     provider=None,
+    table_shape=None,
     **kwargs,
 ):
     """
@@ -1323,6 +1402,7 @@ def extract_multi_pass(
                 master_data_extraction,
                 output_dir=out_path,
                 filename_prefix=filename_prefix,
+                table_shape=table_shape,
             )
         )
         _pass3_duration = time.monotonic() - _pass3_start

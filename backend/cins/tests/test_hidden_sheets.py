@@ -822,10 +822,12 @@ class IndexerProducerTests(TestCase):
             )
 
     def test_indexer_version_marks_visibility_support(self):
-        # The frontend gates the whole coverage surface on this value.
+        # The frontend gates the whole coverage surface on this value. Visibility
+        # support landed in 1.4; 1.5 adds per-table rate_cell_count for the codegen
+        # completeness gate — both carry the visibility marker, so assert >= 1.4.
         from cins.processors.content.indexer import INDEXER_VERSION
 
-        self.assertEqual(INDEXER_VERSION, "1.4")
+        self.assertGreaterEqual(tuple(map(int, INDEXER_VERSION.split("."))), (1, 4))
 
 
 class AllHiddenTerminalTests(TestCase):

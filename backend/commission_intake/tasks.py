@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from celery import chain, shared_task
 from celery.exceptions import Ignore
+from django.db import models, transaction
 
 if TYPE_CHECKING:
     from commission_intake.models import IndexedContent
@@ -222,6 +223,7 @@ def run_extraction(document_id: str):
         ExtractionPass,
         CICSResult,
         ValidationResult,
+        CicsOutputCache,
     )
     from cins.processors.content.indexer import IndexedDocument
     from cins.processors.core.pipeline import Pipeline
@@ -231,10 +233,48 @@ def run_extraction(document_id: str):
         doc = CommissionDocument.objects.get(id=document_id)
         indexed = IndexedContent.objects.get(document=doc)
 
+        # ── Output-cache lookup (before any LLM work) ────────────────────────
+        # Same byte-identical input + same prompts/model/pipeline version → serve
+        # the pinned, gate-passing result verbatim instead of re-rolling codegen.
+        from commission_intake import cics_cache
+        from cins.processors.llm_services.factory import get_llm_service
+
+        try:
+            _resolved_model = get_llm_service(
+                provider=doc.llm_provider,
+                **({"model": doc.llm_model} if doc.llm_model else {}),
+            ).model
+        except Exception:
+            _resolved_model = doc.llm_model or ""
+
+        cache_key = cics_cache.compute_cache_key(
+            content_hash=indexed.content_hash,
+            indexer_version=indexed.indexer_version,
+            prompt_version_hash=cics_cache.compute_prompt_version_hash(),
+            llm_provider=doc.llm_provider or "",
+            llm_model=_resolved_model,
+        )
+
         # Clear stale data from any previous extraction run.
         ExtractionPass.objects.filter(document=doc).delete()
         CICSResult.objects.filter(document=doc).delete()
         ValidationResult.objects.filter(document=doc).delete()
+
+        cached = cics_cache.lookup(cache_key)
+        if cached is not None:
+            logger.info(
+                f"CICS output-cache HIT for {document_id} (key={cache_key[:12]}…) "
+                f"— repopulating without LLM"
+            )
+            # Rebuild the UI rows atomically: the stale-data delete above already
+            # ran, so a partial repopulate must not leave a half-empty document.
+            with transaction.atomic():
+                _repopulate_from_cache(doc, cached)
+            # Atomic increment so concurrent reruns of the same doc don't lose a count.
+            CicsOutputCache.objects.filter(pk=cached.pk).update(
+                hit_count=models.F("hit_count") + 1
+            )
+            return document_id
 
         # Pre-create ExtractionPass rows as PENDING for each sheet × 3 passes the
         # pipeline will actually run. Use the pipeline's own routing helper so
@@ -323,6 +363,33 @@ def run_extraction(document_id: str):
             # Final upsert for any entries not yet persisted by the callback.
             _save_extraction_passes(doc, result)
 
+            # ── Cross-run regression guard ───────────────────────────────────
+            # Diff this (cache-miss) extraction against the last gate-passing run
+            # of the same source content. A lost product/segment or big shortfall
+            # → surface a loud warning and refuse to pin the regressed result, so a
+            # prompt/pipeline bump can't silently drop a segment the good run had.
+            regression = cics_cache.RegressionReport()
+            try:
+                baseline = cics_cache.find_prior_baseline(
+                    indexed.content_hash, exclude_cache_key=cache_key
+                )
+                if baseline is not None:
+                    regression = cics_cache.detect_regression(
+                        baseline.cics_doc, result.cics_doc
+                    )
+                    if regression.is_regression:
+                        result.warnings = list(result.warnings or []) + [
+                            regression.warning
+                        ]
+                        logger.warning(
+                            f"Regression guard for {document_id}: "
+                            f"{regression.reason} "
+                            f"(baseline {regression.baseline_total} → "
+                            f"{regression.new_total} rules)"
+                        )
+            except Exception as re_exc:  # guard is best-effort; never fail extraction
+                logger.warning(f"Regression guard failed: {re_exc}")
+
             # Save final CICS result
             CICSResult.objects.update_or_create(
                 document=doc,
@@ -347,6 +414,38 @@ def run_extraction(document_id: str):
             if provider_id and provider_id != "UNKNOWN_PROVIDER":
                 doc.provider = provider_id.replace("_", " ")
                 doc.save(update_fields=["provider", "updated_at"])
+
+            # ── Output-cache write ───────────────────────────────────────────
+            # Pin only clean, gate-passing results so a rerun is reproducible and
+            # a segment-dropping / requires_review run is never frozen in.
+            try:
+                if cics_cache.should_cache(result) and not regression.is_regression:
+                    cics_cache.store(
+                        cache_key=cache_key,
+                        content_hash=indexed.content_hash,
+                        indexer_version=indexed.indexer_version,
+                        prompt_version_hash=cics_cache.compute_prompt_version_hash(),
+                        llm_provider=doc.llm_provider or "",
+                        llm_model=_resolved_model,
+                        result=result,
+                        provider_id=provider_id or "",
+                    )
+                    logger.info(
+                        f"CICS output-cache STORE for {document_id} "
+                        f"(key={cache_key[:12]}…)"
+                    )
+                else:
+                    reason = (
+                        "regression vs prior good run"
+                        if regression.is_regression
+                        else "errors or requires_review"
+                    )
+                    logger.info(
+                        f"CICS output-cache SKIP for {document_id} "
+                        f"({reason} — not pinning)"
+                    )
+            except Exception as ce:  # cache is best-effort; never fail extraction
+                logger.warning(f"CICS output-cache write failed: {ce}")
 
         finally:
             shutil.rmtree(fake_dir, ignore_errors=True)
@@ -453,6 +552,38 @@ def _save_extraction_passes(doc, result) -> None:
     """Final upsert of any sheet_pass_results not already persisted by the callback."""
     if result.sheet_pass_results:
         _upsert_extraction_passes(doc, result.sheet_pass_results)
+
+
+def _repopulate_from_cache(doc, cached) -> None:
+    """Rebuild ExtractionPass + CICSResult rows from a cache hit, no LLM.
+
+    ``run_extraction`` deletes those rows before the lookup, so a hit must fully
+    re-materialise them or the UI would show an empty document. Validation is left
+    to the normal ``run_validation`` task that follows in the chain (it reads the
+    repopulated CICSResult and is deterministic/cheap).
+    """
+    from commission_intake.models import CICSResult
+
+    _upsert_extraction_passes(doc, cached.sheet_pass_results or [])
+
+    CICSResult.objects.update_or_create(
+        document=doc,
+        defaults={
+            "cics_doc": cached.cics_doc,
+            "raw_extraction": None,
+            "warnings": cached.warnings or [],
+            "errors": cached.errors or [],
+            "duration_seconds": cached.duration_seconds or 0.0,
+            "sheet_results": cached.sheet_results or [],
+        },
+    )
+
+    provider_id = cached.provider_id or (
+        (cached.cics_doc or {}).get("provider", {}).get("provider_id", "")
+    )
+    if provider_id and provider_id != "UNKNOWN_PROVIDER":
+        doc.provider = provider_id.replace("_", " ")
+        doc.save(update_fields=["provider", "updated_at"])
 
 
 # ---------------------------------------------------------------------------
@@ -786,9 +917,26 @@ def rerun_single_pass(
                     f"## Email Commission Data\n\n{email_body}\n\n---\n\n{pass3_prompt}"
                 )
 
+            # Per-sheet shape for the codegen completeness gate (fails open if
+            # the doc was indexed before rate_cell_count existed).
+            from cins.processors.core.pipeline import (
+                get_safe_sheet_name,
+                _table_shape_for_sheet,
+            )
+
+            pass3_table_shape = _table_shape_for_sheet(
+                (indexed.sheet_metadata or {}).get("table_splits", {}),
+                sheet_name,
+                get_safe_sheet_name(sheet_name),
+            )
+
             # Pass 3 always runs via codegen (matches the main pipeline).
             result_obj, p3_codegen_code, _ = _extract_pass3_via_codegen(
-                pass3_prompt, service, metadata_obj, master_data_obj
+                pass3_prompt,
+                service,
+                metadata_obj,
+                master_data_obj,
+                table_shape=pass3_table_shape,
             )
             p3_extraction_method = "codegen"
             result_dict = result_obj.model_dump()
