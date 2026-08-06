@@ -13,6 +13,8 @@ from typing import Optional
 
 from master_data.models import (
     CarrierMaster,
+    CarrierProductHierarchyMaster,
+    CarrierRTOZoneMaster,
     FuelTypeMaster,
     InsurerMaster,
     PlanTypeMaster,
@@ -133,8 +135,8 @@ class MasterDataResolver:
         for r in VehicleSubClassMaster.objects.all():
             self._subclass_by_product.setdefault(r.product, []).append(r)
             if r.vehicle_class_id is not None:
-                self._subclass_class_id[(r.product, int(r.pb_vehicle_subclass_id))] = int(
-                    r.vehicle_class_id
+                self._subclass_class_id[(r.product, int(r.pb_vehicle_subclass_id))] = (
+                    int(r.vehicle_class_id)
                 )
             pid = CODE_TO_PRODUCT_ID.get(r.product)
             if pid is None:
@@ -149,6 +151,7 @@ class MasterDataResolver:
             self._rto_by_state.setdefault(r.state_slug, []).append(
                 {
                     "value": r.value,
+                    "code": r.code,
                     "car_zone": r.car_zone,
                     "cv_zone": r.cv_zone,
                     "tw_zone": r.tw_zone,
@@ -230,10 +233,10 @@ class MasterDataResolver:
         returns an unmatched Resolution (never guesses).
         """
         ordered = [
-            self.resolve_product_id(product_text).id,           # 1. product
-            self.resolve_product_id(vehicle_class_text).id,     # 2. vehicle class
+            self.resolve_product_id(product_text).id,  # 1. product
+            self.resolve_product_id(vehicle_class_text).id,  # 2. vehicle class
             self._product_from_subclass(vehicle_subclass_text),  # 3. vehicle subclass
-            self._product_from_carrier(carrier_text),           # 4. carrier (CV-only)
+            self._product_from_carrier(carrier_text),  # 4. carrier (CV-only)
         ]
         present = [pid for pid in ordered if pid is not None]
         if not present:
@@ -278,7 +281,7 @@ class MasterDataResolver:
 
     # ------------------------------ rto ------------------------------
 
-    def rtos_for_states(self, slugs, product) -> list:
+    def rtos_for_states(self, slugs, product, exclude_codes=None) -> list:
         """Return the product-active RTO display values for the given states.
 
         ``slugs`` is an iterable of canonical state slugs (e.g.
@@ -287,14 +290,21 @@ class MasterDataResolver:
         marks it active for that product). Returns a sorted, de-duplicated list.
         Returns ``[]`` for an unknown product, empty slugs, or states with no
         product-active RTOs — callers treat ``[]`` as "leave the cell empty".
+
+        ``exclude_codes`` (optional) drops RTOs whose ``code`` is in the set —
+        used by the export's state-derived fill to subtract RTOs a sibling
+        rule already claims explicitly (e.g. a Chola "UP" fill excluding the
+        codes an "UP- East" zone rule claims), matched by ``code`` rather than
+        the display ``value`` string since callers hold bare codes.
         """
         zone_attr = _PRODUCT_ZONE_ATTR.get(str(product or "").strip().upper())
         if zone_attr is None or not slugs:
             return []
+        excl = set(exclude_codes or ())
         out: set[str] = set()
         for slug in slugs:
             for rto in self._rto_by_state.get(slug, []):
-                if rto.get(zone_attr) is not None:
+                if rto.get(zone_attr) is not None and rto["code"] not in excl:
                     out.add(rto["value"])
         return sorted(out)
 
@@ -425,3 +435,48 @@ class MasterDataResolver:
             return Resolution(id=1, canonical="Private Car", matched=True)
 
         return Resolution(id=None, canonical="", matched=False)
+
+
+# --------------------------- carrier-scoped masters ---------------------------
+#
+# Deliberately module-level functions, NOT methods on MasterDataResolver: they
+# run a scoped query (filter(carrier=...)) rather than the eager `_reload()`
+# that loads every table for every one of the ~20 carriers. Callers (the
+# Chola-gated transformer path, the product-hierarchy validator) only ever
+# need one carrier's rows, so a broadened `_reload` would be wasted work on
+# every non-Chola document.
+
+
+def carrier_zone_expansions(carrier: str) -> dict[str, dict[str, list[str]]]:
+    """UW-zone slug -> {"rto": [...], "state": [...]} for a carrier.
+
+    Sorted/deduped. A zone spanning multiple states (e.g. Chola's "ncr",
+    which mixes Haryana and Uttar Pradesh RTO codes) naturally aggregates
+    every state its RTO codes belong to.
+    """
+    if not carrier:
+        return {}
+    zones: dict[str, dict[str, set]] = {}
+    rows = CarrierRTOZoneMaster.objects.filter(carrier=carrier).values(
+        "zone", "rto_code", "state_slug"
+    )
+    for row in rows:
+        bucket = zones.setdefault(row["zone"], {"rto": set(), "state": set()})
+        bucket["rto"].add(row["rto_code"])
+        bucket["state"].add(row["state_slug"])
+    return {
+        zone: {"rto": sorted(v["rto"]), "state": sorted(v["state"])}
+        for zone, v in zones.items()
+    }
+
+
+def carrier_product_hierarchy(carrier: str) -> list[dict]:
+    """(product, sub_product, vehicle_subclass, canonical_subclass) rows for
+    a carrier, via a scoped query."""
+    if not carrier:
+        return []
+    return list(
+        CarrierProductHierarchyMaster.objects.filter(carrier=carrier).values(
+            "product", "sub_product", "vehicle_subclass", "canonical_subclass"
+        )
+    )

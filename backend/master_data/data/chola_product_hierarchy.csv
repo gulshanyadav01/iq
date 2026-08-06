@@ -1,0 +1,57 @@
+carrier,product,sub_product,vehicle_subclass
+Chola,Car,,PrivateCar
+Chola,Car,,Taxi
+Chola,Car,,Kaali Peeli Taxi
+Chola,TW,,Bike
+Chola,TW,,E-Bike
+Chola,TW,,Scooter
+Chola,TW,,Moped
+Chola,CV,GCV,Pickup/ Delivery Van
+Chola,CV,GCV,Truck
+Chola,CV,GCV,Tractor
+Chola,CV,GCV,Tipper
+Chola,CV,GCV,Heavy Truck/Semi Trailer
+Chola,CV,GCV,Dumper
+Chola,CV,GCV,Tanker
+Chola,CV,GCV,Trailer
+Chola,CV,GCV,Refridgerated Van
+Chola,CV,GCV,Bulker
+Chola,CV,GCV,Not Available
+Chola,CV,GCV,Flat Bed Trailer
+Chola,CV,GCV,Container
+Chola,CV,GCV,Gas Tanker
+Chola,CV,GCV,Car Carrier
+Chola,CV,PCV,E-Rickshaw
+Chola,CV,PCV,Auto Rickshaw
+Chola,CV,PCV,Taxi
+Chola,CV,PCV,Greater Than Six Seater
+Chola,CV,PCV,Kaali Peeli Taxi
+Chola,CV,Buses,School Bus
+Chola,CV,Buses,Passenger Bus
+Chola,CV,Buses,Staff Bus
+Chola,CV,MISC-D,Agricultural Tractor
+Chola,CV,MISC-D,Backhoe Loader
+Chola,CV,MISC-D,Crane
+Chola,CV,MISC-D,Ambulance
+Chola,CV,MISC-D,Loader
+Chola,CV,MISC-D,Tractor Loader
+Chola,CV,MISC-D,Harvester
+Chola,CV,MISC-D,Excavaters
+Chola,CV,MISC-D,Garbage Van
+Chola,CV,MISC-D,Motor Grader
+Chola,CV,MISC-D,Tranist Mixer
+Chola,CV,MISC-D,Fork Lift Trucks
+Chola,CV,MISC-D,Generator Van
+Chola,CV,MISC-D,Drilling Rigs
+Chola,CV,MISC-D,Compressors
+Chola,CV,MISC-D,Other Carts
+Chola,CV,MISC-D,Plane Loaders and Other
+Chola,CV,MISC-D,Road Rollers
+Chola,CV,MISC-D,Road Sweepers
+Chola,CV,MISC-D,Car Carrier
+Chola,CV,MISC-D,Not Available
+Chola,CV,MISC-D,KISAN SUVIDHA
+Chola,CV,MISC-D,Towing Van
+Chola,CV,MISC-D,Buldozer
+Chola,CV,MISC-D,Compactor
+Chola,CV,MISC-D,Jetting Machine
