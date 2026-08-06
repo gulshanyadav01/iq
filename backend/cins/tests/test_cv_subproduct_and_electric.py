@@ -594,7 +594,9 @@ class MsvDistinctRulesTests(TestCase):
         )
         self.t._carrier_code = "Chola"
         cond = self.t._transform_conditions(e, None, _raw([e]))
-        self.assertEqual(cond.vehicle_make, ["TATA/ Maruti/ Mahindra"])
+        # Preserved AND split into its three constituent makes — see
+        # cins.tests.test_composite_make_split.
+        self.assertEqual(cond.vehicle_make, ["TATA", "Maruti", "Mahindra"])
         self.assertEqual(cond.vehicle_model, ["Ace", "Super Ace", "Yodha"])
 
 

@@ -26,6 +26,7 @@ from typing import Dict, List, Optional
 from cins.processors.content.indexer import ContentIndexer, IndexedDocument
 from cins.processors.content.prepare_prompt import prepare_extraction_request
 from cins.processors.core.cpa_split import materialize_cpa_split
+from cins.processors.core.rule_priority import normalize_rule_priorities
 from cins.processors.core.sheet_visibility import (
     all_hidden_error,
     derive_sheet_sets,
@@ -49,6 +50,11 @@ class PipelineResult:
     cics_doc: dict  # parsed CICS JSON
     output_path: Path  # where the file was written
     warnings: List[str] = field(default_factory=list)
+    # Informational audit trail from the transformer (boundary bumps, fan-outs,
+    # recovered dimensions) — deliberate normalizations, not problems. Kept out
+    # of `warnings` so the UI banner and the confidence score only count real
+    # failures; a CV document emits hundreds of these.
+    notices: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     validation_issues: list = field(default_factory=list)  # from SchemaValidator
     overlap_issues: list = field(default_factory=list)  # from RuleOverlapChecker
@@ -787,6 +793,9 @@ class Pipeline:
         # Materialize CPA-deduction rules into With/Without-CPA variants so the
         # canonical document, the validators, and every consumer see the split.
         cics_json = materialize_cpa_split(cics_json)
+        # Every fan-out above (wheel/make/subclass bifurcation, cpa split) clones
+        # rules with the parent's priority, so renumber once the rule list is final.
+        cics_json = normalize_rule_priorities(cics_json)
 
         # Determine output file name from the folder (use folder name + .json)
         output_path = output_folder / f"{output_folder.name}.json"
@@ -800,6 +809,7 @@ class Pipeline:
             cics_doc=cics_json,
             output_path=output_path,
             warnings=transform_warnings or [],
+            notices=list(transformer.notices),
             errors=transform_errors or [],
             validation_issues=schema_result.errors if schema_result else [],
             overlap_issues=overlap_result.overlaps if overlap_result else [],
@@ -914,6 +924,7 @@ class Pipeline:
                 parsed_result = {}
 
         parsed_result = materialize_cpa_split(parsed_result)
+        parsed_result = normalize_rule_priorities(parsed_result)
         json_result = json.dumps(parsed_result, indent=2)
         output_path.write_text(json_result, encoding="utf-8")
 
@@ -923,6 +934,12 @@ class Pipeline:
         return PipelineResult(
             cics_doc=parsed_result,
             output_path=output_path,
+            warnings=(pass_result.get("transform_warnings") or [])
+            if isinstance(pass_result, dict)
+            else [],
+            notices=(pass_result.get("transform_notices") or [])
+            if isinstance(pass_result, dict)
+            else [],
             validation_issues=schema_result.errors if schema_result else [],
             overlap_issues=overlap_result.overlaps if overlap_result else [],
             duration=duration,
@@ -1004,11 +1021,16 @@ class Pipeline:
         results = []
         errors = []
         sheet_pass_results = []
+        # Transformer output aggregated across sheets (each sheet runs its own
+        # transformer inside extract_multi_pass).
+        sheet_transform_warnings: List[str] = []
+        sheet_transform_notices: List[str] = []
 
         # All shared mutable state is guarded by this lock. Per-sheet workers
-        # only need it when appending to `sheet_pass_results`, `results`, or
-        # `errors`, and when invoking the `on_sheet_complete` callback (the
-        # callback writes to Django ORM and we want serialised writes per row).
+        # only need it when appending to `sheet_pass_results`, `results`,
+        # `errors`, or the transform warning/notice accumulators, and when
+        # invoking the `on_sheet_complete` callback (the callback writes to
+        # Django ORM and we want serialised writes per row).
         results_lock = threading.Lock()
 
         from cins.processors.llm_services.factory import get_llm_service
@@ -1188,6 +1210,18 @@ class Pipeline:
                 # pass_result is a dict when return_passes=True
                 if isinstance(pass_result, dict) and "cics" in pass_result:
                     parsed_result = pass_result["cics"]
+                    # Collect the transformer's output per sheet. Without this
+                    # the multi-sheet path returned a PipelineResult with empty
+                    # warnings, so a normal extraction stored zero transform
+                    # warnings and the UI banner never appeared — only the
+                    # rerun_transform path ever surfaced them.
+                    with results_lock:
+                        sheet_transform_warnings.extend(
+                            pass_result.get("transform_warnings") or []
+                        )
+                        sheet_transform_notices.extend(
+                            pass_result.get("transform_notices") or []
+                        )
                 else:
                     # Unexpected shape — mark any passes not yet persisted as failed.
                     # `extract_multi_pass` swallows upstream exceptions (e.g.
@@ -1247,6 +1281,9 @@ class Pipeline:
                     encoding="utf-8",
                 )
 
+                # Renumber here too so the per-sheet validation_status agrees
+                # with the combined one (this path has no cpa split of its own).
+                parsed_result = normalize_rule_priorities(parsed_result)
                 sheet_output_path.write_text(
                     json.dumps(parsed_result, indent=2)
                     if isinstance(parsed_result, dict)
@@ -1318,6 +1355,9 @@ class Pipeline:
                 successful_results, base_name, output_dir
             )
             combined_data = materialize_cpa_split(combined_data)
+            # _merge_products concatenates rule sets that each numbered themselves
+            # from 10, so the merge itself is a collision source — renumber after it.
+            combined_data = normalize_rule_priorities(combined_data)
             combined_path.write_text(
                 json.dumps(combined_data, indent=2), encoding="utf-8"
             )
@@ -1338,6 +1378,8 @@ class Pipeline:
             else [],
             duration=duration,
             sheet_results=results,
+            warnings=sheet_transform_warnings,
+            notices=sheet_transform_notices,
             errors=[e["error"] for e in errors],
             sheet_pass_results=sheet_pass_results,
         )

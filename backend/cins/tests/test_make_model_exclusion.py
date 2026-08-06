@@ -268,7 +268,7 @@ class ZeroAllOtherSynthesisTests(TestCase):
             set(c[0].conditions.vehicle_make_exclude), {"TATA", "Maruti", "Mahindra"}
         )
         self.assertTrue(
-            any("0% synthesis" in w for w in self.t.warnings), self.t.warnings
+            any("0% synthesis" in n for n in self.t.notices), self.t.notices
         )
 
     def test_sentinel_present_no_zero_synthesis(self):
@@ -283,7 +283,7 @@ class ZeroAllOtherSynthesisTests(TestCase):
         self.assertEqual(len(c), 1, rules)
         self.assertEqual(c[0].outcome.percentage_value, 20.0)
         self.assertFalse(
-            any("0% synthesis" in w for w in self.t.warnings), self.t.warnings
+            any("0% synthesis" in n for n in self.t.notices), self.t.notices
         )
 
     def test_no_makemodel_row_no_synthesis(self):

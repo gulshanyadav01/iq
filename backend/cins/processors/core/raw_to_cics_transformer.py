@@ -142,6 +142,17 @@ VEHICLE_SUB_CLASS_MAPPINGS = {
     "e-rickshaw": "e-rickshaw",
     "auto rickshaw": "auto-rickshaw",
     "auto-rickshaw": "auto-rickshaw",
+    # Chola CV segment slugs, fed through _normalize_subclass_slug (which strips
+    # the "N_" index and any "[QUALIFIER]", then unpacks underscores). A goods or
+    # passenger three-wheeler is an auto on these grids; the wheel count itself is
+    # already carried by number_of_wheels, so the slug's value here is the body.
+    "gccv 3w": "auto-rickshaw",
+    "3w auto": "auto-rickshaw",
+    # Source spells the segment "3_HARVESTOR"; the master and the enum use the
+    # correct "Harvester".
+    "harvestor": "harvester",
+    # "1_TRAC[RENEWAL]" reduces to a bare "trac" after slug normalization.
+    "trac": "tractor",
     "pick up/delivery van": "pick-up-delivery-van",
     "pick-up-delivery-van": "pick-up-delivery-van",
     "pickup van": "pick-up-delivery-van",
@@ -241,6 +252,17 @@ VEHICLE_SUB_CLASS_MAPPINGS = {
 # a real make. Excludes make-bucket sentinels like "others".
 _MISSPLIT_BODY_TOKENS = frozenset({"scooter", "bike", "moped", "motorcycle"})
 
+# The Car-product slice of VEHICLE_SUB_CLASS_MAPPINGS, used to disambiguate a
+# Chola Car segment label before defaulting to "private-car". Deliberately a
+# subset: the probe blob is a structural label (product key / segment /
+# source_section), and matching it against the FULL dict would let an unrelated
+# body word elsewhere in the label win over the segment's own meaning.
+CAR_SUB_CLASS_PROBE_MAPPINGS = {
+    k: v
+    for k, v in VEHICLE_SUB_CLASS_MAPPINGS.items()
+    if v in ("private-car", "taxi", "kaali-peeli-taxi")
+}
+
 FUEL_TYPE_MAPPINGS = {
     "petrol": "petrol",
     "diesel": "diesel",
@@ -299,6 +321,16 @@ DEAL_PARAMETER_MAPPINGS = {
     "flat amount": "flat-amount",
     "flat-amount": "flat-amount",
     "ape": "ape",
+    # Chola states the liability payout basis as "TP/PA Premium" on both the TW
+    # and Private Car grids ("TW Liability policy is on TP/PA Premium"). It only
+    # ever appears on ACT/liability rules, so it is the regular-TP basis.
+    # "Total Premium" is the same basis under a looser label — it occurs solely
+    # on Private Car ACT rows whose own T&C reads "Private Car Liability policy
+    # Pay-out is on TP/PA Premium". Both keys are longer than 5 chars, so
+    # _normalize_list_field matches them as plain substrings ahead of "tp".
+    "tp/pa premium": "regular-tp",
+    "tp/pa": "regular-tp",
+    "total premium": "regular-tp",
 }
 
 # Maps raw product key substrings → canonical product name shown in output
@@ -519,13 +551,23 @@ class RawToCICSTransformer:
     """
 
     def __init__(self):
-        """Initialize transformer with empty warnings/errors lists."""
+        """Initialize transformer with empty warnings/notices/errors lists."""
         self.warnings: List[str] = []
+        # Informational audit trail of deliberate normalizations (boundary
+        # bumps, fan-outs, recovered dimensions). Kept separate from
+        # ``warnings``, which means "could not map / lost data": a CV document
+        # emits hundreds of boundary bumps, and merging the two buried the real
+        # failures and dragged the confidence score down for correct work.
+        self.notices: List[str] = []
         self.errors: List[str] = []
         self._trace_counter = 0
         # Short carrier code (e.g. "Chola") for carrier-scoped transforms.
         # Set per-document in transform(); empty until then.
         self._carrier_code: str = ""
+        # Subproduct of the product currently being transformed (e.g.
+        # "commercial-pcv"). Set per product group in _transform_product so the
+        # per-rule helpers can scope themselves; empty outside that loop.
+        self._product_subproduct: str = ""
         # Chola UW-zone -> {"rto": [...], "state": [...]} expansion map. Built
         # from a scoped CarrierRTOZoneMaster query in transform() when the
         # carrier is Chola; empty (and inert) for every other carrier or when
@@ -552,9 +594,11 @@ class RawToCICSTransformer:
             Tuple of (CICSDocument, warnings, errors)
         """
         self.warnings = []
+        self.notices = []
         self.errors = []
         self._trace_counter = 0
         self._zone_warned = set()
+        self._product_subproduct = ""
 
         # Generate document metadata
         doc_metadata = self._transform_metadata(raw)
@@ -866,6 +910,10 @@ class RawToCICSTransformer:
             product_subproduct = "car"
         else:
             product_subproduct = self._detect_product_subproduct(product_key, entries)
+        # Expose it for the per-rule helpers (see _apply_chola_pcv_subclass);
+        # _transform_conditions is several frames down and has no other route
+        # to the product it belongs to.
+        self._product_subproduct = product_subproduct or ""
         vehicle_type = self._detect_vehicle_type(product_key, entries)
 
         # Compute priorities based on specificity
@@ -884,6 +932,10 @@ class RawToCICSTransformer:
         is_commercial = bool(
             product_subproduct and product_subproduct.startswith("commercial-")
         )
+        # Chola treats vehicle_sub_class as mandatory on every rule, so its
+        # non-commercial products get the same section/rule_text sub-class probe
+        # commercial ones already had (see the backfill block below).
+        is_chola = self._carrier_code == "Chola"
         product_key_wheels = (
             self._extract_wheels_from_key(product_key) if is_commercial else None
         )
@@ -914,13 +966,14 @@ class RawToCICSTransformer:
             rule_text = getattr(entry, "rule_text", "") or ""
             entry_wheels = None
             entry_sub_class = None
-            if is_commercial:
+            if is_commercial or is_chola:
                 for hint_src in (section, rule_text):
                     if not hint_src:
                         continue
-                    entry_wheels = entry_wheels or self._extract_wheels_from_key(
-                        hint_src
-                    )
+                    if is_commercial:
+                        entry_wheels = entry_wheels or self._extract_wheels_from_key(
+                            hint_src
+                        )
                     entry_sub_class = (
                         entry_sub_class or self._extract_sub_class_from_key(hint_src)
                     )
@@ -946,6 +999,33 @@ class RawToCICSTransformer:
                     rule.conditions.vehicle_sub_class = inferred_sub_class
                 if inferred_wheels and not rule.conditions.number_of_wheels:
                     rule.conditions.number_of_wheels = inferred_wheels
+
+            # Chola last-resort: derive the sub-class from the product segment
+            # when no grid label carried a body word. Only "car" has an
+            # unambiguous default — a Chola Car grid with no body word is the
+            # Private Car book, and the Taxi / Kaali Peeli books always label
+            # themselves. Two-wheeler is deliberately NOT defaulted: scooter,
+            # bike, e-bike and moped are genuinely distinct sub-classes with no
+            # majority case, so a hint-less TW rule is left empty for
+            # CholaProductHierarchyValidator to flag rather than guessed at.
+            # Commercial keeps the hint path above for the same reason.
+            if (
+                is_chola
+                and product_subproduct == "car"
+                and (rule.conditions is None or not rule.conditions.vehicle_sub_class)
+            ):
+                probe = " ".join(p for p in (product_key, segment or "", section) if p)
+                warn_mark = len(self.warnings)
+                derived = self._normalize_list_field(
+                    probe, CAR_SUB_CLASS_PROBE_MAPPINGS, "vehicle_sub_class"
+                )
+                # A no-match here is the default case, not an extraction gap —
+                # drop the warning _normalize_list_field appends for it.
+                del self.warnings[warn_mark:]
+                if rule.conditions is None:
+                    rule.conditions = RuleConditions()
+                rule.conditions.vehicle_sub_class = derived or ["private-car"]
+
             rules.append(rule)
 
         # Recover the electric goods 3-wheeler BEFORE any collapse/dedupe, while
@@ -1153,6 +1233,13 @@ class RawToCICSTransformer:
             ("scooter", "scooter"),
             ("e-rickshaw", "e-rickshaw"),
             ("e rickshaw", "e-rickshaw"),
+            # Two-wheeler bodies. Chola requires a sub-class on every rule, and
+            # the TW grids encode the body in the section/product label only.
+            # "e-bike" precedes "bike" so the longer token wins.
+            ("e-bike", "e-bike"),
+            ("e bike", "e-bike"),
+            ("moped", "moped"),
+            ("bike", "bike"),
         ]
         for pattern, sub_class in hints:
             if pattern in key_lower:
@@ -1638,8 +1725,9 @@ class RawToCICSTransformer:
         business_type = self._normalize_list_field(
             entry.customer_type_text, BUSINESS_TYPE_MAPPINGS, "business_type"
         )
+        coverage_text = self._recover_composite_coverage(entry)
         policy_type = self._normalize_list_field(
-            entry.coverage_type_text, POLICY_TYPE_MAPPINGS, "policy_type"
+            coverage_text, POLICY_TYPE_MAPPINGS, "policy_type"
         )
 
         # Normalize vehicle sub-class from global_vehicle_type_text
@@ -1732,14 +1820,19 @@ class RawToCICSTransformer:
             "deal_parameter",
         )
 
-        # Vehicle sub-class from conditions dict (may override global)
-        cond_vehicle_sub_class = self._normalize_list_field(
-            entry_conditions.get("vehicle_sub_class"),
-            VEHICLE_SUB_CLASS_MAPPINGS,
-            "vehicle_sub_class",
-        )
-        if cond_vehicle_sub_class:
-            vehicle_sub_class = cond_vehicle_sub_class
+        # Vehicle sub-class from conditions dict (may override global).
+        # Codegen writes the raw CV segment slug here ("1_GCCV_3W",
+        # "1_TRAC[RENEWAL]"), so strip the slug scaffolding first and skip the
+        # slugs that are really a weight/CC dimension rather than a body type.
+        cond_sub_class_raw = entry_conditions.get("vehicle_sub_class")
+        if not self._subclass_slug_is_dimension(cond_sub_class_raw):
+            cond_vehicle_sub_class = self._normalize_list_field(
+                self._normalize_subclass_slug(cond_sub_class_raw),
+                VEHICLE_SUB_CLASS_MAPPINGS,
+                "vehicle_sub_class",
+            )
+            if cond_vehicle_sub_class:
+                vehicle_sub_class = cond_vehicle_sub_class
 
         # NCB (boolean)
         ncb = self._parse_bool_field(entry_conditions.get("ncb"))
@@ -1753,7 +1846,7 @@ class RawToCICSTransformer:
             self._segment_probe(entry_conditions, entry)
         ):
             ncb = True
-            self.warnings.append("NCB tier: ncb=True from 'NCB > 25%' marker")
+            self.notices.append("NCB tier: ncb=True from 'NCB > 25%' marker")
 
         # CPA
         cpa = self._normalize_single_field(
@@ -1832,6 +1925,15 @@ class RawToCICSTransformer:
             entry_conditions.get("vehicle_model_exclude")
         )
 
+        # Split composite make cells ("TATA/ Maruti/ Mahindra", "Hero vs Bajaj")
+        # into their constituent makes. Deliberately runs AFTER the make==model
+        # body-row guard above, which compares the two lists as parsed — splitting
+        # only the make side first would break that equality and let sub-class
+        # enumerations survive as bogus makes. Models are left alone: a slash in a
+        # model cell is usually part of the variant name.
+        vehicle_make = self._split_composite_makes(vehicle_make)
+        vehicle_make_exclude = self._split_composite_makes(vehicle_make_exclude)
+
         # RTO from conditions dict — expand categories via master data.
         # The LLM may use "rto", "rto_category", "rto_zone", or similar — accept any.
         cond_rto_text = None
@@ -1892,7 +1994,9 @@ class RawToCICSTransformer:
         ):
             gvw_start, gvw_end = 0, 999999
 
-        cc_start, cc_end = self._parse_range_field(entry_conditions.get("cc"))
+        cc_start, cc_end = self._parse_range_field(
+            self._cc_or_leaked_rate(entry_conditions.get("cc"))
+        )
         if cc_start is None and cc_end is None:
             cc_start, cc_end = 0, 99999
         elif cc_start is None:
@@ -2015,6 +2119,21 @@ class RawToCICSTransformer:
         od_term = self._parse_int_field(entry_conditions.get("od_term"))
         tp_term = self._parse_int_field(entry_conditions.get("tp_term"))
 
+        # Chola PCV body-class rules (client-supplied). Runs last: it needs the
+        # resolved fuel_type, seating band and wheel count together.
+        vehicle_sub_class, seat_start, seat_end = self._apply_chola_pcv_subclass(
+            vehicle_sub_class,
+            cond_sub_class_raw,
+            fuel_type,
+            number_of_wheels,
+            seat_start,
+            seat_end,
+        )
+        vehicle_sub_class = self._apply_chola_gcv_subclass(vehicle_sub_class)
+        vehicle_sub_class = self._apply_chola_tw_subclass(
+            vehicle_sub_class, entry, cc_start, cc_end
+        )
+
         return RuleConditions(
             vehicle_sub_class=vehicle_sub_class,
             policy_type=policy_type,
@@ -2048,6 +2167,63 @@ class RawToCICSTransformer:
         )
 
     # ==================== NORMALIZATION HELPERS ====================
+
+    @staticmethod
+    def _is_numeric_text(text) -> bool:
+        """True when the whole string parses as a number (a rate, not a label)."""
+        if text is None:
+            return False
+        try:
+            float(str(text).strip())
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    def _recover_composite_coverage(self, entry: RawCommissionEntry) -> Optional[str]:
+        """Recover the coverage token from a mis-split composite state header.
+
+        Chola grids publish the coverage type as a sub-column of the state
+        header: ``"UP- East > ACT"``. The Pass-3 recipe splits that with
+        ``rsplit(">", 1)`` — correct for the two-segment Private Car form, but
+        the commercial-vehicle grids carry the rate columns in the same cell
+        (``"AP/TS > ACT > 0.325"``), so the split lands one segment right:
+        ``state_text`` keeps ``"AP/TS > ACT"`` and ``coverage_type_text`` gets
+        the rate. `policy_type` then normalises to None and the whole
+        comprehensive-vs-liability dimension is lost on the CV products.
+
+        When ``coverage_type_text`` is numeric and ``state_text`` still carries
+        a ``>``, peel the trailing numeric segments off ``state_text`` and take
+        the last remaining segment as the coverage token. ``_expand_state_names``
+        needs no matching fix — it is a substring scan, so the inert
+        ``"> ACT"`` tail never stopped AP/TS from resolving.
+
+        Returns ``coverage_type_text`` unchanged whenever it is not a
+        recoverable mis-split, so a genuinely unmappable value still warns.
+        """
+        coverage_text = entry.coverage_type_text
+        # Chola-scoped: only its grids use the "STATE > COVERAGE" header form,
+        # and a cross-carrier rewrite could mangle a legitimately numeric field.
+        if self._carrier_code != "Chola" or not self._is_numeric_text(coverage_text):
+            return coverage_text
+
+        state_text = getattr(entry, "state_text", "") or ""
+        if ">" not in state_text:
+            return coverage_text
+
+        segments = [s.strip() for s in state_text.split(">")]
+        # A four-segment header (state > coverage > rate > rate) shifts twice,
+        # so peel every trailing rate, not just one.
+        while len(segments) > 1 and self._is_numeric_text(segments[-1]):
+            segments.pop()
+        if len(segments) < 2:
+            return coverage_text
+
+        recovered = segments[-1]
+        self.notices.append(
+            f"Coverage recovered from composite state header: "
+            f"{state_text!r} -> {recovered!r} (was {coverage_text!r})"
+        )
+        return recovered
 
     def _normalize_list_field(
         self, text: Optional[str], mappings: Dict[str, str], field_name: str
@@ -2151,6 +2327,57 @@ class RawToCICSTransformer:
 
         items = [item.strip() for item in str(text).split(",") if item.strip()]
         return items if items else None
+
+    # Separators that join SEVERAL makes inside one grid cell. Chola's GCCV
+    # "2_UPTO_3.5T" MAKE cell is the newline-joined "TATA/\nMaruti/\nMahindra"
+    # (the indexer flattens the newlines to spaces), and the TW sheet ships a
+    # "Hero vs Bajaj" comparison column. Both arrived as a single opaque make
+    # string, so any downstream match on "TATA" or "Bajaj" missed the rule.
+    # Slash form tolerates surrounding whitespace; the "vs" form is
+    # word-anchored (also "v/s", "vs.") so a make merely containing those
+    # letters is untouched.
+    _COMPOSITE_MAKE_SPLIT_RE = re.compile(r"\s*/\s*|\s+(?:vs\.?|v/s)\s+", re.IGNORECASE)
+
+    def _split_composite_makes(self, makes: Optional[List[str]]) -> Optional[List[str]]:
+        """Split `/`- and `vs`-joined composite make cells into separate makes.
+
+        Order-preserving and duplicate-free. Two guards keep it conservative:
+
+        - A **sentinel** item ("All Other Make/Models") is left verbatim. Its
+          slash is part of the phrase, and `_bifurcate_make_buckets` matches the
+          intact string to fan the bucket out into exclusion rules.
+        - A split is only accepted when EVERY resulting segment still looks like
+          a make (non-empty, carries a letter). "TATA/ Maruti/ Mahindra" splits;
+          a cell ending in a stray "/" does not degrade into a blank make.
+        """
+        if not makes:
+            return makes
+
+        out: List[str] = []
+        seen = set()
+        for raw in makes:
+            item = str(raw).strip()
+            if not item:
+                continue
+            if self._SENTINEL_MAKE_MODEL_RE.search(item):
+                segments = [item]
+            else:
+                candidates = [
+                    s.strip() for s in self._COMPOSITE_MAKE_SPLIT_RE.split(item)
+                ]
+                # Reject the split unless every segment is a plausible make.
+                if len(candidates) > 1 and all(
+                    s and re.search(r"[A-Za-z]", s) for s in candidates
+                ):
+                    segments = candidates
+                else:
+                    segments = [item]
+            for s in segments:
+                key = s.casefold()
+                if key not in seen:
+                    seen.add(key)
+                    out.append(s)
+        return out or None
 
     def _parse_range_field(
         self, text: Optional[str]
@@ -2623,7 +2850,7 @@ class RawToCICSTransformer:
                     rule.conditions.fuel_type = ["electric"]
                     n_tagged += 1
         if n_tagged:
-            self.warnings.append(
+            self.notices.append(
                 f"GCV-3W electric recovery: tagged {n_tagged} row(s) "
                 f"fuel=electric from the base/electric rate pair"
             )
@@ -2654,7 +2881,7 @@ class RawToCICSTransformer:
             for r in group:
                 if r.conditions is not None and r.conditions.ncb is None:
                     r.conditions.ncb = False
-                    self.warnings.append(
+                    self.notices.append(
                         "NCB tier: base twin ncb None -> False "
                         "(paired with an NCB>25% rule)"
                     )
@@ -2755,7 +2982,7 @@ class RawToCICSTransformer:
             fanned_keys.add(self._make_bucket_match_key(r))
             n_split += 1
         if n_split:
-            self.warnings.append(
+            self.notices.append(
                 f"Make-bucket fan-out: split {n_split} sentinel row(s) into "
                 f"make/model exclusion buckets"
             )
@@ -2809,7 +3036,7 @@ class RawToCICSTransformer:
             )
             n_synth += 1
         if n_synth:
-            self.warnings.append(
+            self.notices.append(
                 f"Make-bucket 0% synthesis: added {n_synth} all-other 0% "
                 f"bucket pair(s) for make/model-graded cells with no source "
                 f"all-other rate"
@@ -2871,7 +3098,7 @@ class RawToCICSTransformer:
                 )
             n_split += 1
         if n_split:
-            self.warnings.append(
+            self.notices.append(
                 f"Subclass fan-out: split {n_split} multi-subclass rule(s) "
                 f"into one distinct deal per subclass"
             )
@@ -3177,7 +3404,7 @@ class RawToCICSTransformer:
                     # Floor point-range: (X,X) with a sibling band starting at X.
                     if start == end and start > 0 and start in floor_starts:
                         setattr(cond, start_field, 0)
-                        self.warnings.append(
+                        self.notices.append(
                             f"Boundary floor-promotion {start_field} "
                             f"({start},{end}) -> (0,{end})"
                         )
@@ -3186,10 +3413,260 @@ class RawToCICSTransformer:
                     if 0 < start < end and start in ends:
                         new_start = start + 1
                         setattr(cond, start_field, new_start)
-                        self.warnings.append(
+                        self.notices.append(
                             f"Boundary bump {start_field} {start} -> {new_start} "
                             f"(shared tier edge in ladder)"
                         )
+
+    # Chola PCV seating bands, supplied by the client. The grids only ever say
+    # "UPTO 5" / "ABOVE 6", so the segment label picks the body class and these
+    # bands supply the real seating range the label implies.
+    _PCV_MAXI_CAB_SEATING = (13, 16)
+    _PCV_BIG_TAXI_SEATING = (6, 12)
+
+    def _apply_chola_pcv_subclass(
+        self,
+        vehicle_sub_class,
+        slug,
+        fuel_type,
+        number_of_wheels,
+        seat_start,
+        seat_end,
+    ):
+        """Resolve the Chola PCV body class and its implied seating band.
+
+        Client rules:
+        * PCV 3-wheelers are Auto Rickshaw and E-Rickshaw. The grid already
+          publishes them as SEPARATE rows at different rates (a fuel-tagged
+          Electric row beside the plain one), so this labels each row rather
+          than fanning one row into two — a fan-out would copy one rate onto
+          both bodies.
+        * A PCV taxi seating 13-16 is a Maxi Cab.
+        * A PCV taxi seating 6-12 is a Big Taxi, which Chola's own hierarchy
+          master calls "Greater Than Six Seater".
+        * A 4-wheel PCV seating <=5 is an ordinary Taxi. The grid identifies
+          those rows only by their CC band ("2_4W_LT_1500CC"), which carries no
+          body word at all.
+
+        Returns ``(vehicle_sub_class, seat_start, seat_end)`` unchanged for every
+        other carrier, product and row shape.
+        """
+        if (
+            self._carrier_code != "Chola"
+            or self._product_subproduct != "commercial-pcv"
+        ):
+            return vehicle_sub_class, seat_start, seat_end
+
+        wheels = {str(w).lower() for w in (number_of_wheels or [])}
+        current = set(vehicle_sub_class or ())
+        slug_text = str(slug or "").lower()
+        is_electric = any("electric" in str(f).lower() for f in (fuel_type or ()))
+
+        # 3-wheeler: Electric row -> E-Rickshaw, plain row -> Auto Rickshaw.
+        if "3w" in wheels or "3w_auto" in slug_text.replace(" ", "_"):
+            return (
+                ["e-rickshaw"] if is_electric else ["auto-rickshaw"],
+                seat_start,
+                seat_end,
+            )
+
+        if "4w-and-above" not in wheels:
+            return vehicle_sub_class, seat_start, seat_end
+
+        # 4-wheeler <=5 seats: an ordinary taxi. Only claim the rows that have
+        # no body class of their own, so "maxi cab" is never overwritten.
+        if not current and (seat_end is not None and seat_end <= 5):
+            return ["taxi"], seat_start, seat_end
+
+        if "maxicab" in current:
+            return vehicle_sub_class, *self._PCV_MAXI_CAB_SEATING
+        if "taxi" in current and (seat_start or 0) >= 6:
+            # "Big Taxi" — the source says only "ABOVE 6", i.e. (6, 99).
+            return ["greater-than-six-seater"], *self._PCV_BIG_TAXI_SEATING
+
+        return vehicle_sub_class, seat_start, seat_end
+
+    # A cc-band token in a TW column header ("150cc", "150_350cc", "350cc").
+    _TW_CC_BAND_RE = re.compile(r"\d+\s*(?:_\s*\d+\s*)?cc\b", re.IGNORECASE)
+
+    def _apply_chola_tw_subclass(self, vehicle_sub_class, entry, cc_start, cc_end):
+        """Derive the Chola two-wheeler body from its grid column.
+
+        Each make group publishes four columns — a ``SCOOTER`` column beside
+        three motorcycle displacement bands::
+
+            | Hero OEM > 150cc | Hero OEM > SCOOTER | Hero OEM > 150_350cc | Hero OEM > 350cc |
+
+        Scooters are not cc-graded here, motorcycles are, so a cc-graded column
+        is a Bike. Codegen only carries the body word through when the header
+        said ``SCOOTER``; the cc columns arrive with no sub-class at all (1101
+        entries on doc 733711bd), which is what left 1523 rules failing the
+        mandatory-sub-class check.
+
+        The ``All Electric Make`` group already resolves to bike/scooter with
+        ``fuel_type`` Electric and is left exactly as-is — this only fills an
+        EMPTY value.
+        """
+        if self._carrier_code != "Chola" or self._product_subproduct != "two-wheeler":
+            return vehicle_sub_class
+        if vehicle_sub_class:
+            return vehicle_sub_class
+
+        probe = " ".join(
+            str(v)
+            for v in (
+                getattr(entry, "rule_text", "") or "",
+                getattr(entry, "source_section", "") or "",
+            )
+            if v
+        )
+
+        # An explicit body word always wins. _extract_sub_class_from_key already
+        # owns that hint table (scooter / e-bike / moped / bike, longest-first),
+        # so a "TW E-BIKE" section is never overruled by the cc fallback below —
+        # its rows still read "UPTO 150 CC".
+        hinted = self._extract_sub_class_from_key(probe)
+        if hinted:
+            return hinted
+
+        # No body word: fall back to the column's grading axis. Scooters are not
+        # cc-graded in this grid, motorcycles are.
+        if self._TW_CC_BAND_RE.search(probe):
+            return ["bike"]
+        # Sanitised cc bands survive as a real range; the (0, 99999) sentinel
+        # means "no cc filter" and proves nothing about the body.
+        if (cc_start, cc_end) != (0, 99999) and (cc_start or cc_end):
+            return ["bike"]
+        return vehicle_sub_class
+
+    # Smallest plausible engine displacement, in cc. Below this a "cc" value is
+    # a rate that leaked out of a payout column, not a displacement — the TW
+    # grid produced cc=0.37 / 0.22 / -0.205 / -0.055 on 124 rows.
+    _MIN_PLAUSIBLE_CC = 50
+
+    def _cc_or_leaked_rate(self, cc_text):
+        """Drop a "cc" value that is really a commission rate.
+
+        The TW grid's payout cells sometimes land in the cc condition, giving
+        fractional (and occasionally negative) displacements. Left alone they
+        become a bogus tight band like (0, 0) that silently excludes every real
+        policy. A single-valued cc below 50cc cannot be an engine size, so treat
+        it as absent and let the open (0, 99999) sentinel apply; the row's real
+        band, when it has one, is recovered from the slug further down.
+
+        Ranges are left untouched — a genuine band always has a plausible upper
+        bound, and dropping half of one would be worse than keeping it.
+        """
+        if cc_text is None or isinstance(cc_text, (list, tuple, dict)):
+            return cc_text
+        text = str(cc_text).strip()
+        if not text:
+            return cc_text
+        try:
+            value = float(text)
+        except ValueError:
+            return cc_text  # "UPTO 150", "150-350" etc — a real range expression
+        if abs(value) >= self._MIN_PLAUSIBLE_CC:
+            return cc_text
+        self.warnings.append(
+            f"Discarded implausible cc value {text!r} (below {self._MIN_PLAUSIBLE_CC}cc "
+            f"— a commission rate leaked into the cc column)"
+        )
+        return None
+
+    def _apply_chola_gcv_subclass(self, vehicle_sub_class):
+        """Default a body-less Chola GCV rule to the explicit "not available".
+
+        The GCCV grid's own SUBCLASS column holds the weight ladder, not a body
+        type::
+
+            | GCCV | 2_UPTO_3.5T    | TATA/ Maruti/ Mahindra | Ace, Super Ace, … |
+            | GCCV | 3_3.5T_TO_7.5T | 3_3.5T_TO_7.5T         | 3_3.5T_TO_7.5T    |
+
+        So there is no body class in the source to extract — the weight band is
+        already captured as the gvw range. Chola's own hierarchy master lists
+        "Not Available" among the valid GCV subclasses for exactly this case, so
+        record it explicitly rather than leaving the mandatory field null (or
+        guessing "Truck" from tonnage, which the grid never states).
+
+        Only fills an EMPTY value, so the genuine 3-wheeler rows keep the
+        auto-rickshaw body resolved from their "1_GCCV_3W" slug.
+        """
+        if (
+            self._carrier_code != "Chola"
+            or self._product_subproduct != "commercial-gcv"
+            or vehicle_sub_class
+        ):
+            return vehicle_sub_class
+        return ["not-available"]
+
+    # Leading enumeration index on a CV segment slug ("1_GCCV_3W", "3_HARVESTOR").
+    _SUBCLASS_SLUG_INDEX_RE = re.compile(r"^\s*\d+\s*_")
+    # Bracketed qualifier ("1_TRAC[RENEWAL]", "1_GCCV_3W[Electric]") — the
+    # renewal/electric dimension is picked up elsewhere, never a body type.
+    _SUBCLASS_SLUG_QUALIFIER_RE = re.compile(r"\[[^\]]*\]")
+    # CC-band slug ("2_4W_LT_1500CC"), matching _recover_cc_range's anchoring.
+    _SUBCLASS_CC_BAND_RE = re.compile(r"(?:^|[_\s])(?:lt|gt)[_\s]*\d+\s*cc", re.I)
+
+    @classmethod
+    def _normalize_subclass_slug(cls, text) -> Optional[str]:
+        """Strip CV segment-slug scaffolding so the mappings can see the body word.
+
+        Codegen writes the grid's segment label verbatim into
+        ``conditions["vehicle_sub_class"]``: ``"1_GCCV_3W"``, ``"1_TRAC[RENEWAL]"``,
+        ``"3_HARVESTOR"``. ``_normalize_list_field`` word-boundary-matches keys of
+        5 characters or fewer against ``[\\s,;/\\-]`` only, so an underscore-joined
+        slug can never match a short key like "trac". Drop the leading index and
+        the bracketed qualifier, and turn underscores into spaces, leaving plain
+        text for the normal mapping pass. Non-slug input is returned unchanged.
+        """
+        if text is None:
+            return None
+        if isinstance(text, (list, tuple)):
+            text = ", ".join(str(t) for t in text if t)
+        s = str(text)
+        s = cls._SUBCLASS_SLUG_QUALIFIER_RE.sub(" ", s)
+        s = cls._SUBCLASS_SLUG_INDEX_RE.sub("", s)
+        s = s.replace("_", " ")
+        return re.sub(r"\s+", " ", s).strip()
+
+    def _subclass_slug_is_dimension(self, text) -> bool:
+        """True when a "sub-class" slug actually encodes a weight or CC band.
+
+        The Chola CV grids enumerate their GVW ladder as segment labels
+        ("2_UPTO_3.5T", "7_20T_TO_40T") and the 4W taxi CC split as
+        "2_4W_LT_1500CC". Codegen files those under ``vehicle_sub_class``, but
+        they are dimensions, not body types — ``_recover_gvw_range`` and
+        ``_recover_cc_range`` already harvest them into the gvw/cc ranges. They
+        were then re-read as a sub-class and emitted 223 bogus
+        "Unknown vehicle_sub_class" warnings per document. Shape-guarded by the
+        same ``_gvw_slug_or_empty`` the recovery path uses, so a real body word
+        is never suppressed.
+        """
+        if not text:
+            return False
+        if isinstance(text, (list, tuple)):
+            return all(self._subclass_slug_is_dimension(t) for t in text if t)
+        probe = str(text)
+        if self._SUBCLASS_CC_BAND_RE.search(probe):
+            return True
+        # A GVW band only counts as a dimension when there is no body word left
+        # once the scaffolding is stripped — "1_GCCV_3W" carries digits but is a
+        # body slug, while "2_UPTO_3.5T" reduces to pure weight tokens.
+        if not self._gvw_slug_or_empty(probe):
+            return False
+        residue = self._normalize_subclass_slug(probe) or ""
+        return not self._normalize_list_field_quiet(residue)
+
+    def _normalize_list_field_quiet(self, text) -> Optional[List[str]]:
+        """`_normalize_list_field` without the unknown-value warning side effect."""
+        mark = len(self.warnings)
+        try:
+            return self._normalize_list_field(
+                text, VEHICLE_SUB_CLASS_MAPPINGS, "vehicle_sub_class"
+            )
+        finally:
+            del self.warnings[mark:]
 
     def _gvw_slug_or_empty(self, header: Optional[str]) -> str:
         """Return the verbatim label if it encodes a GVW range (tonnage / kg /
@@ -3280,7 +3757,7 @@ class RawToCICSTransformer:
                 continue
             start = 0 if rs is None else rs
             end = 999999 if re_ is None else re_
-            self.warnings.append(
+            self.notices.append(
                 f"GVW recovered from sub-class slug '{cand}' -> ({start}, {end})"
             )
             return start, end
@@ -3311,10 +3788,10 @@ class RawToCICSTransformer:
         presence, so non-PCCV rows are never touched. Returns None on miss."""
         probe = self._segment_probe(entry_conditions, entry).replace(" ", "")
         if "pccv>6" in probe or "pccv>=6" in probe:
-            self.warnings.append("Seating recovered from PCCV>6 token -> (6, 99)")
+            self.notices.append("Seating recovered from PCCV>6 token -> (6, 99)")
             return 6, 99
         if "pccv<6" in probe:
-            self.warnings.append("Seating recovered from PCCV<6 token -> (0, 5)")
+            self.notices.append("Seating recovered from PCCV<6 token -> (0, 5)")
             return 0, 5
         return None
 
@@ -3336,12 +3813,12 @@ class RawToCICSTransformer:
         lt = re.search(r"(?:^|[_\s])lt[_\s]*(\d+)\s*cc", probe)
         if lt:
             n = int(lt.group(1))
-            self.warnings.append(f"CC recovered from LT slug -> (0, {n})")
+            self.notices.append(f"CC recovered from LT slug -> (0, {n})")
             return 0, n
         gt = re.search(r"(?:^|[_\s])gt[_\s]*(\d+)\s*cc", probe)
         if gt:
             n = int(gt.group(1))
-            self.warnings.append(f"CC recovered from GT slug -> ({n}, 99999)")
+            self.notices.append(f"CC recovered from GT slug -> ({n}, 99999)")
             return n, 99999
         return None
 

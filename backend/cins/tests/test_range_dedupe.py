@@ -934,6 +934,13 @@ class BoundaryNormalizationTests(TestCase):
         self.assertEqual(rules[1].conditions.cc_start_range, 1001)
         self.assertEqual(rules[2].conditions.cc_start_range, 1501)
         self.assertEqual(rules[0].conditions.cc_start_range, 0)
+        # Each bump is logged as an informational NOTICE, never a warning — a CV
+        # document emits hundreds and they buried the real failures.
+        self.assertEqual(len(self.t.notices), 2, self.t.notices)
+        self.assertTrue(
+            all("Boundary bump" in n for n in self.t.notices), self.t.notices
+        )
+        self.assertEqual(self.t.warnings, [])
 
     def test_counter_example_not_bumped(self):
         # Genuine gap ladder: no band ends at 1000 or 1600, so neither start is
@@ -955,6 +962,10 @@ class BoundaryNormalizationTests(TestCase):
         self.assertEqual(rules[0].conditions.cc_start_range, 0)
         self.assertEqual(rules[0].conditions.cc_end_range, 1000)
         self.assertEqual(rules[1].conditions.cc_start_range, 1001)
+        self.assertTrue(
+            any("floor-promotion" in n for n in self.t.notices), self.t.notices
+        )
+        self.assertEqual(self.t.warnings, [])
 
     def test_lone_point_range_not_widened(self):
         # (1000,1000) with no sibling starting at 1000 stays a point rate.
