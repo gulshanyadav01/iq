@@ -89,20 +89,31 @@
       (`_boundary_keys_compatible`); the overlap checker still needs the analogous
       fix. Out of scope for Change B; recorded so it does not drift.
 
-- [ ] **UP-East / UP-West collapse to one `uttar-pradesh` slug** — the only
-      residual Private Car ambiguity after the Chola April fixes (12 conflicting
-      condition keys, all uttar-pradesh).
-      **Priority:** P2
-      **Context:** Chola PC grids carry TWO uttar-pradesh columns (`UP- East > …`
-      and the main `UP > …`) at different rates — genuine RTO sub-zones. Change D
-      made the parser take the state segment verbatim (so `UP- East` no longer
-      surfaces as the bogus token `East`), but both segments then expand to the same
-      `uttar-pradesh` slug via `_expand_state_names`, so the two columns collide on
-      one condition key with two rates. Needs an East/West RTO-zone dimension
-      (`conditions["rto"]` cluster) to disambiguate, or a state-variant slug. The
-      state-column-alignment validator correctly does NOT false-positive here (both
-      columns are uttar-pradesh's own, so membership passes). Out of scope for the
-      five-defect batch.
+- [ ] **Backfill Chola RTO-zone master beyond MH/TN/UP-East/NCR** — the
+      carrier-scoped zone master (`CarrierRTOZoneMaster`) only covers the
+      Mumbai/Pune/Central MH/Chennai/UP-East/NCR zones present in the source
+      `chola_rto_master_source.xlsx`.
+      **Priority:** P3
+      **Context:** Surfaced during the Chola RTO + product-hierarchy masters
+      change (`ravipiplani/chola-masters-intake`). A Chola grid rule naming a
+      zone outside this set (any other state's UW zone) surfaces the new
+      "Chola zone label not found in master" warning instead of resolving —
+      correctly visible, not silently dropped, but still unresolved. Needs the
+      carrier's full RTO-zone data; extend `chola_rto_zone.csv` (or re-run the
+      upload API against a fuller source workbook — both paths share
+      `chola_parsers.py`) once available.
+
+- [ ] **Lock down `MasterDataUploadViewSet` (the Master Mapper upload) behind
+      authentication** — it is still `permission_classes = [AllowAny]`
+      (`master_data/views/upload.py:37`), so an unauthenticated POST can rewrite
+      the shared master tables (insurer, RTO, subclass, ...).
+      **Priority:** P1
+      **Context:** Surfaced during the carrier-masters review
+      (`ravipiplani/chola-masters-intake`). The NEW carrier-scoped endpoint
+      (`CarrierMasterUploadViewSet`) was set to `IsAuthenticated` on that branch;
+      its older sibling was left as-is to keep the change scoped. Both should end
+      up on the same posture — flip the sibling and confirm nothing internal
+      depends on anonymous upload.
 
 ## Completed
 
@@ -112,3 +123,15 @@
       transform pipeline so the canonical `cics_doc` carries the split and every
       consumer (export, API, validators, rule counts) sees it. Export is now a pure
       renderer. **Completed:** branch `ravipiplani/cpa-export-row-split` (2026-06-19).
+
+- [x] **UP-East / UP-West collapse to one `uttar-pradesh` slug.** Closed via
+      Chola RTO-zone expansion: `_expand_rto_codes` / `_expand_state_names` now
+      resolve a UW-zone label (e.g. `UP- East`) to its own RTO codes via the
+      seeded `CarrierRTOZoneMaster`, so the zone-tagged column gets an explicit
+      `conditions.rto` and no longer collides on the bare `uttar-pradesh`
+      condition key with the plain `UP` column. The export complement fill
+      (`commission_document.py::rto_cell`) renders the plain `UP` column as
+      "all UP RTOs minus the zone-tagged column's explicit codes" (UP-East's
+      codes for `UP- East`, NCR's UP14/UP16 for `NCR`) instead of overlapping
+      them, so no `up-west` slug needs to exist. **Completed:** branch
+      `ravipiplani/chola-masters-intake` (2026-08-06).
