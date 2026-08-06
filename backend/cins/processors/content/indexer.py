@@ -52,7 +52,32 @@ logger = logging.getLogger("content_indexer")
 # (`processors/core/codegen_coverage.py`) reconciles emitted rules against
 # rate_cell_count to catch whole-table/segment drops. Docs indexed before 1.5
 # lack these keys; the gate fails open on them.
-INDEXER_VERSION = "1.5"
+#
+# 1.6 — two CSV-shape fixes. (a) `expand_merged_cells` now propagates a merged
+# value to the VISIBLE cells of its range even when the range's top-left cell
+# sits in a hidden row/column; Chola's TW sheet hides AX and BB, the exact
+# top-left cells of the "Hero vs Bajaj" and "Bajaj" group headers, so those
+# makes were dropped from the visible sibling columns. (b) `detect_csv_tables`
+# splits grids laid out side by side in the same rows onto separate column
+# bands. Both change the indexed CSV/markdown, so cached content from earlier
+# versions is not comparable.
+# 1.7 — `_build_compound_headers` no longer suppresses a vertically repeated
+# NUMERIC header cell. When Pass 0C swallows the first data rows into the header
+# band (Chola GCCV: `1_GCCV_3W` + `1_GCCV_3W[Electric]`), their rates ride along
+# as trailing `>` segments; two rows publishing the same rate collapsed to one
+# segment and the electric 3-wheeler was dropped for 18 of 20 state groups.
+# Changes the indexed markdown for any multi-header-row grid, so cached content
+# from earlier versions is not comparable.
+#
+# 1.8 — `effective_header_row_count` pushes DATA rows that Excel/Pass-0C header
+# detection swallowed into the header band back into the data section. Chola's
+# GCCV sheet reported a 5-row header whose last two rows are the real
+# `1_GCCV_3W` / `1_GCCV_3W[Electric]` commission rows; burying them in compound
+# labels left their 64 rate cells reachable only by a bespoke recovery loop in
+# generated Pass-3 code, which one codegen run simply omitted — emitting ZERO
+# goods-3-wheeler rules. Codegen now sees ordinary positional rows. The codegen
+# coverage gate shares the same trimmed band so "expected" counts them too.
+INDEXER_VERSION = "1.8"
 
 
 def _retag_single_commission_table(content_str: str, sheet_name: str) -> str:

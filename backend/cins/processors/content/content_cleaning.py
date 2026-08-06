@@ -174,6 +174,16 @@ def detect_csv_tables(
         reshape_notes = _dedupe_overlapping_table_ranges(
             boundary_records, header_row_count=header_row_count
         )
+        # Row ranges are settled; now split any table that holds two grids side
+        # by side in the same rows (see _split_side_by_side_tables). Runs after
+        # the row reshape so each block inherits the corrected data_ranges.
+        split_notes = _split_side_by_side_tables(
+            boundary_records, original_lines, header_row_count=header_row_count
+        )
+        if split_notes:
+            reshape_notes = (
+                f"{reshape_notes} | {split_notes}" if reshape_notes else split_notes
+            )
 
         tables_list = []
         for record in boundary_records:
@@ -210,7 +220,9 @@ def detect_csv_tables(
         detection_notes = detection.detection_notes
         if reshape_notes:
             detection_notes = (
-                f"{detection_notes} | {reshape_notes}" if detection_notes else reshape_notes
+                f"{detection_notes} | {reshape_notes}"
+                if detection_notes
+                else reshape_notes
             )
 
         return tables_list, {
@@ -220,6 +232,119 @@ def detect_csv_tables(
         }
     except (json.JSONDecodeError, Exception) as e:
         return [], {"error": str(e), "fallback": True}
+
+
+def _split_side_by_side_tables(
+    records: list, original_lines: list, header_row_count: int = 0
+) -> str:
+    """Split one detected table that actually holds two grids laid out side by side.
+
+    RATIONALE (read before changing — this is the load-bearing Pass 0C path).
+
+    Chola's Two-Wheeler sheet puts two independent grids in the SAME rows: a
+    57-column header where columns 2-41 are one grid and columns 42-56 another,
+    each with its own ``State`` and ``Type`` key columns. Pass 0C reports it as a
+    single table, so the second grid's make-group headers — which sit in blank
+    label cells — are read as continuations of the first. Every rule built from
+    them loses ``vehicle_make``, and two different columns collapse onto
+    byte-identical conditions carrying different payouts (54 CRITICAL duplicate
+    findings on doc 733711bd, e.g. scooter/TS/NEW(100-500) at both 5% and 37%).
+
+    Detection is deliberately narrow — a false split would shred a legitimate
+    wide grid:
+
+    * ``table_type == 'commission'`` only, matching the dedupe pass's filter.
+    * The table's own header row must repeat its LEADING KEY SIGNATURE. We take
+      the first two key labels (here ``State`` / ``Type``) and require the exact
+      same adjacent pair to reappear later in the same row.
+    * At least one column of separation between blocks, so adjacent repeated
+      labels (a legitimately doubled column) never trigger it.
+
+    Row ranges are untouched — only ``start_col`` / ``end_col`` are set, which the
+    existing slicing in ``detect_csv_tables`` already honours. Returns a note
+    string for ``detection_notes`` (empty when nothing split).
+    """
+    import csv as _csv
+    import io as _io
+
+    def _label(cell: str) -> str:
+        """Header cell -> its key label ('State (RTO) > AP' -> 'state').
+
+        First word only: the same key column is spelled differently between
+        blocks in the real sheet ("State (RTO)" in the first, plain "State" in
+        the second), so an exact-string match would never pair them.
+        """
+        head = str(cell or "").split(">")[0].strip().split()
+        return "".join(ch for ch in head[0].lower() if ch.isalnum()) if head else ""
+
+    def _header_rows(record: dict) -> list:
+        ranges = record.get("data_ranges") or [[record["start_row"], record["end_row"]]]
+        first_start = ranges[0][0]
+        # Scan a few rows: the key labels may sit below a title/banner row.
+        span = max(header_row_count, 1) + 2
+        return original_lines[first_start - 1 : first_start - 1 + span]
+
+    notes = []
+    split_records = []
+    next_index = max((r.get("table_index") or 0) for r in records) if records else 0
+
+    for record in records:
+        bands = None
+        if record.get("table_type") == "commission":
+            for line in _header_rows(record):
+                try:
+                    cells = next(_csv.reader(_io.StringIO(line)))
+                except Exception:
+                    continue
+                labels = [_label(c) for c in cells]
+                # Leading key signature: the first two adjacent non-empty labels.
+                anchor = None
+                for i in range(len(labels) - 1):
+                    if labels[i] and labels[i + 1]:
+                        anchor = (i, labels[i], labels[i + 1])
+                        break
+                if anchor is None:
+                    continue
+                first_i, key_a, key_b = anchor
+                starts = [
+                    i
+                    for i in range(len(labels) - 1)
+                    if labels[i] == key_a and labels[i + 1] == key_b
+                ]
+                # Require real separation, otherwise a doubled label splits.
+                starts = [
+                    s for j, s in enumerate(starts) if j == 0 or s - starts[j - 1] > 2
+                ]
+                if len(starts) > 1:
+                    bounds = starts[1:]
+                    edges = [first_i] + bounds + [len(cells)]
+                    bands = [
+                        (edges[k] + 1, edges[k + 1]) for k in range(len(edges) - 1)
+                    ]
+                    break
+
+        if not bands:
+            split_records.append(record)
+            continue
+
+        for n, (start_col, end_col) in enumerate(bands):
+            clone = dict(record)
+            clone["data_ranges"] = [list(r) for r in record["data_ranges"]]
+            clone["start_col"] = start_col
+            clone["end_col"] = end_col
+            if n:
+                next_index += 1
+                clone["table_index"] = next_index
+            clone["table_name"] = f"{record['table_name']} (block {n + 1})"
+            split_records.append(clone)
+        notes.append(
+            f"'{record['table_name']}' split into {len(bands)} side-by-side "
+            f"column blocks at {[b[0] for b in bands]}"
+        )
+
+    if notes:
+        records[:] = split_records
+    return "; ".join(notes)
 
 
 def _dedupe_overlapping_table_ranges(records: list, header_row_count: int = 0) -> str:
@@ -353,7 +478,8 @@ def _dedupe_overlapping_table_ranges(records: list, header_row_count: int = 0) -
     # current `end_row` (which Case A may have updated) so the two passes
     # compose cleanly.
     sorted_records = sorted(
-        commission_tables, key=lambda r: (r["start_row"], r["end_row"], r["table_index"])
+        commission_tables,
+        key=lambda r: (r["start_row"], r["end_row"], r["table_index"]),
     )
     for i, current in enumerate(sorted_records):
         for nxt in sorted_records[i + 1 :]:
@@ -376,9 +502,7 @@ def _dedupe_overlapping_table_ranges(records: list, header_row_count: int = 0) -
 
     if not notes:
         return ""
-    return (
-        "Pass 0C de-overlap reshaped commission ranges: " + ", ".join(notes)
-    )
+    return "Pass 0C de-overlap reshaped commission ranges: " + ", ".join(notes)
 
 
 def clean_master_data_content(raw_content: str, service) -> tuple[str, dict]:

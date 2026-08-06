@@ -112,7 +112,13 @@ def count_rate_bearing_rows(csv_content: str, header_row_count: int = 0) -> int:
         rows = list(_csv.reader(_io.StringIO(csv_content)))
     except Exception:
         return 0
-    hrc = max(0, int(header_row_count or 0))
+    # Use the SAME effective header band the markdown build uses. A data row
+    # swallowed into the header band is a rate-bearing row codegen can now see,
+    # so it must be part of "expected" too — otherwise the gate under-counts by
+    # exactly the rows most at risk of being dropped.
+    from cins.processors.content.csv_to_markdown import effective_header_row_count
+
+    hrc = effective_header_row_count(rows, header_row_count)
     data_rows = rows[hrc:]
     count = 0
     for row in data_rows:
