@@ -220,6 +220,7 @@ from commission_intake.serializers import (  # noqa: E402
     CommissionDocumentCreateSerializer,
     CommissionDocumentListSerializer,
     CommissionDocumentSerializer,
+    ExtractRequestSerializer,
     ProcessingModeRequestSerializer,
     RerunPassRequestSerializer,
 )
@@ -412,8 +413,13 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
 
     @extend_schema(
         summary="Re-run extraction",
-        description="Requires document to be indexed. Runs LLM extraction passes.",
+        description=(
+            "Requires document to be indexed. Runs LLM extraction passes. "
+            "Pass force_refresh=true to bypass the CICS output cache and re-run "
+            "the LLM; a gate-passing result replaces the cached output."
+        ),
         tags=["Commission Document"],
+        request=ExtractRequestSerializer,
         responses={200: CommissionDocumentSerializer},
     )
     @action(detail=True, methods=["post"], url_path="extract")
@@ -435,6 +441,9 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                 {"detail": "Document must be indexed before extraction can run."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        request_serializer = ExtractRequestSerializer(data=request.data)
+        request_serializer.is_valid(raise_exception=True)
+        force_refresh = request_serializer.validated_data.get("force_refresh", False)
         instance.status = CommissionDocument.Status.INITIATED
         instance.error = None
         instance.processing_mode = CommissionDocument.ProcessingMode.EXTRACT_ONLY
@@ -450,7 +459,9 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                 "updated_at",
             ]
         )
-        enqueue_processing_chain(str(instance.id), mode="extract_only")
+        enqueue_processing_chain(
+            str(instance.id), mode="extract_only", force_refresh=force_refresh
+        )
         return Response(CommissionDocumentSerializer(instance).data)
 
     @extend_schema(
@@ -905,8 +916,39 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                 return "CAR"
             return None
 
+        # Export complement fill (1A): a UW-zone grid can carry a specific
+        # zone rule ("UP- East" -> explicit rto=[UP28..]) alongside a plain
+        # state rule ("UP" with no rto). Filling the plain rule's RTO cell
+        # from the full state RTO list would then render every UP RTO code,
+        # including the ones the sibling zone rule already claims explicitly
+        # -- e.g. the NCR zone's UP14/UP16 -- producing overlapping cells.
+        # Pre-pass collects, per product bucket, every RTO code any rule in
+        # this document claims via an explicit conditions.rto, so rto_cell
+        # can subtract the sibling-claimed set from a generic state-derived
+        # fill ("UP" renders as UP-minus-East). General mechanism, not
+        # UP-special-cased -- applies to any carrier/zone with the same
+        # explicit-zone-rule + plain-state-rule shape.
+        _claimed_rto_by_bucket: dict = {}
+        for _product in cics_doc.get("products", []):
+            _bucket = _product_bucket(_product.get("product_name", ""))
+            if _bucket is None:
+                continue
+            _claimed = _claimed_rto_by_bucket.setdefault(_bucket, set())
+            for _rule in _product.get("commission_rules", []):
+                _explicit_rto = (_rule.get("conditions") or {}).get("rto")
+                if not _explicit_rto:
+                    continue
+                _vals = (
+                    _explicit_rto
+                    if isinstance(_explicit_rto, list)
+                    else [_explicit_rto]
+                )
+                _claimed.update(str(v) for v in _vals if v)
+
         def rto_cell(conditions, product_name):
-            """RTO column value: explicit rto if present, else state-derived fill."""
+            """RTO column value: explicit rto if present, else state-derived
+            fill minus any RTO codes a sibling rule already claims explicitly
+            (1A)."""
             rto = conditions.get("rto")
             if rto:  # present and non-empty -> honor explicit value
                 return cv(rto)
@@ -918,7 +960,10 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                 return cv(rto)
             if not isinstance(states, list):
                 states = [states]
-            return ",".join(_rto_resolver.rtos_for_states(states, bucket))
+            claimed = _claimed_rto_by_bucket.get(bucket)
+            return ",".join(
+                _rto_resolver.rtos_for_states(states, bucket, exclude_codes=claimed)
+            )
 
         row_idx = 2
         for product in cics_doc.get("products", []):
