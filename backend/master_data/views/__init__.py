@@ -1,3 +1,3 @@
-from .upload import MasterDataUploadViewSet
+from .upload import CarrierMasterUploadViewSet, MasterDataUploadViewSet
 
-__all__ = ["MasterDataUploadViewSet"]
+__all__ = ["MasterDataUploadViewSet", "CarrierMasterUploadViewSet"]
