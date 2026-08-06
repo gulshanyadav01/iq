@@ -648,14 +648,16 @@ export function useCommissionIntakeDetail() {
     }
   }
 
-  async function triggerExtract() {
+  // `forceRefresh` bypasses the CICS output cache: the LLM passes re-run even for
+  // unchanged input, and a gate-passing result replaces the pinned one.
+  async function triggerExtract(options: { forceRefresh?: boolean } = {}) {
     actionLoading.value = 'extract'
     actionError.value = null
     try {
       const headers = await getAuthHeaders()
       doc.value = await $fetch<CommissionDocument>(
         `${getBaseUrl()}/api/commission-intake/documents/${route.params.id}/extract/`,
-        { method: 'POST', headers }
+        { method: 'POST', headers, body: { force_refresh: options.forceRefresh === true } }
       )
     } catch (err: unknown) {
       actionError.value = errorDetail(err) || 'Failed to trigger extraction'

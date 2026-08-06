@@ -12,6 +12,7 @@ This transformer handles all deterministic transformations:
 """
 
 import json
+import logging
 import re
 import hashlib
 from collections import OrderedDict
@@ -43,6 +44,8 @@ from cins.schema.cics_model import (
     ChangeReference,
     Validation,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def parse_document_date(content: str) -> Optional[str]:
@@ -523,6 +526,14 @@ class RawToCICSTransformer:
         # Short carrier code (e.g. "Chola") for carrier-scoped transforms.
         # Set per-document in transform(); empty until then.
         self._carrier_code: str = ""
+        # Chola UW-zone -> {"rto": [...], "state": [...]} expansion map. Built
+        # from a scoped CarrierRTOZoneMaster query in transform() when the
+        # carrier is Chola; empty (and inert) for every other carrier or when
+        # master_data is unavailable.
+        self._carrier_zone_map: Dict[str, Dict[str, List[str]]] = {}
+        # Dedup set for the "zone label not found in master" warning — one
+        # warning per distinct unmatched text per document, not per rule.
+        self._zone_warned: Set[str] = set()
 
     def transform(
         self, raw: RawExtraction, document_date: Optional[str] = None
@@ -543,6 +554,7 @@ class RawToCICSTransformer:
         self.warnings = []
         self.errors = []
         self._trace_counter = 0
+        self._zone_warned = set()
 
         # Generate document metadata
         doc_metadata = self._transform_metadata(raw)
@@ -553,6 +565,20 @@ class RawToCICSTransformer:
         self._carrier_code = (
             normalize_carrier(getattr(raw.provider, "name", "") or "") or ""
         )
+
+        # Chola UW-zone -> RTO/state expansion map (scoped query, 4A — not the
+        # eager MasterDataResolver, which reloads every table for every
+        # carrier). Guarded: DB-unavailable / unseeded degrades to an empty
+        # map, i.e. today's behaviour (zone labels simply don't resolve).
+        self._carrier_zone_map = {}
+        if self._carrier_code == "Chola":
+            try:
+                from master_data.services.resolver import carrier_zone_expansions
+
+                self._carrier_zone_map = carrier_zone_expansions("Chola")
+            except Exception as e:
+                logger.warning(f"Chola zone expansion map unavailable: {e}")
+                self._carrier_zone_map = {}
 
         # Transform commission period
         period = self._transform_period(raw, document_date)
@@ -3400,12 +3426,71 @@ class RawToCICSTransformer:
             if re.search(pattern, text, re.IGNORECASE):
                 discovered_names.append(canonical)
 
+        # Chola UW-zone label -> state expansion (scoped query built once in
+        # transform()). Only at _top: recursive calls process master-data
+        # values / exclusion lists, not the rule's own location text, so zone
+        # matching (and its warning) would be noise there. Uses the SAME
+        # normalization as _expand_rto_codes so "UP- East" (hyphen) resolves
+        # a state here exactly like it resolves RTO codes there — an earlier
+        # asymmetry (plain .lower() here vs. the RTO side's hyphen-collapsing
+        # normalizer) silently dropped the state for that zone label.
+        if _top and self._carrier_code == "Chola" and self._carrier_zone_map:
+            normalized_zone_text = self._normalize_zone_label(state_text)
+            matched_zones = self._match_carrier_zones(normalized_zone_text)
+            for zone_slug in matched_zones:
+                discovered_names.extend(
+                    self._carrier_zone_map[zone_slug].get("state", [])
+                )
+            if not matched_zones:
+                self._warn_unmatched_zone(state_text, normalized_zone_text)
+
         if discovered_names:
             return sorted(set(discovered_names))
 
         if _top:
             self.warnings.append(f"Unknown state: {state_text}")
         return None
+
+    @staticmethod
+    def _normalize_zone_label(s: Optional[str]) -> str:
+        """Collapse common abbreviations, hyphens and whitespace so that
+        "CAT 0"/"Category 0"/"category-0"/"cat0" — and "UP EAST"/"UP- East"/
+        "up_east" — all normalize equivalently. Shared by ``_expand_rto_codes``
+        and ``_expand_state_names`` so a Chola zone label matches identically
+        on both paths (an earlier asymmetry here meant the RTO side resolved
+        a hyphenated zone label while the state side silently missed it)."""
+        s = (s or "").upper()
+        s = re.sub(r"\bCATEGORY\b", "CAT", s)
+        s = re.sub(r"\bZONES?\b", "ZONE", s)
+        s = re.sub(r"\bTIERS?\b", "TIER", s)
+        s = re.sub(r"\bCLUSTERS?\b", "CLUSTER", s)
+        s = re.sub(r"\bGROUPS?\b", "GROUP", s)
+        s = re.sub(r"[-_]", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    def _match_carrier_zones(self, normalized_text: str) -> List[str]:
+        """Zone slugs from ``self._carrier_zone_map`` whose label (slug with
+        hyphens replaced by spaces, upper-cased) appears word-boundary
+        anchored in ``normalized_text``."""
+        matched = []
+        for zone_slug in self._carrier_zone_map:
+            label = zone_slug.replace("-", " ").upper()
+            if re.search(rf"\b{re.escape(label)}\b", normalized_text):
+                matched.append(zone_slug)
+        return matched
+
+    def _warn_unmatched_zone(self, raw_text: str, normalized_text: str) -> None:
+        """Chola-only: surface a rule whose location text looks like it names
+        a UW zone (contains the word ZONE, post-normalization) but matched no
+        configured zone. Converts a silent under-fill into a visible signal.
+        Deduped per distinct normalized text per document."""
+        if "ZONE" not in normalized_text:
+            return
+        if normalized_text in self._zone_warned:
+            return
+        self._zone_warned.add(normalized_text)
+        self.warnings.append(f"Chola zone label not found in master: {raw_text!r}")
 
     def _expand_rto_codes(
         self, rto_text: Optional[str], master_data: Optional[List[RawMasterDataEntry]]
@@ -3414,39 +3499,37 @@ class RawToCICSTransformer:
         Expand RTO text to canonical RTO codes.
         Resolves category labels (CAT 0, Zone A, Category 1) via rto_mapping master data entries.
         Accepts both hyphenated (MH-01) and concatenated (MH01) code formats.
+        Chola-gated: also resolves a configured UW-zone label (e.g. "Central
+        MH", "UP- East") to the RTO codes it represents via a scoped
+        ``CarrierRTOZoneMaster`` query built once in ``transform()``.
         """
         if not rto_text:
             return None
 
         code_pattern = r"\b[A-Z]{2}-?\d{1,3}\b"
 
-        def _normalize_label(s: str) -> str:
-            # Collapse common abbreviations and whitespace so that
-            # "CAT 0", "Category 0", "category-0", "cat0" all normalize equivalently.
-            s = s.upper()
-            s = re.sub(r"\bCATEGORY\b", "CAT", s)
-            s = re.sub(r"\bZONES?\b", "ZONE", s)
-            s = re.sub(r"\bTIERS?\b", "TIER", s)
-            s = re.sub(r"\bCLUSTERS?\b", "CLUSTER", s)
-            s = re.sub(r"\bGROUPS?\b", "GROUP", s)
-            s = re.sub(r"[-_]", " ", s)
-            s = re.sub(r"\s+", " ", s).strip()
-            return s
-
         literal_codes = re.findall(code_pattern, rto_text.upper())
         discovered = list(literal_codes)
 
         if master_data:
-            normalized_text = _normalize_label(rto_text)
+            normalized_text = self._normalize_zone_label(rto_text)
             for m in master_data:
                 if m.entry_type != "rto_mapping" or not m.key or not m.values:
                     continue
-                key_norm = _normalize_label(m.key)
+                key_norm = self._normalize_zone_label(m.key)
                 if not key_norm:
                     continue
                 if re.search(rf"\b{re.escape(key_norm)}\b", normalized_text):
                     codes = re.findall(code_pattern, m.values.upper())
                     discovered.extend(codes)
+
+        if self._carrier_code == "Chola" and self._carrier_zone_map:
+            normalized_zone_text = self._normalize_zone_label(rto_text)
+            matched_zones = self._match_carrier_zones(normalized_zone_text)
+            for zone_slug in matched_zones:
+                discovered.extend(self._carrier_zone_map[zone_slug].get("rto", []))
+            if not matched_zones:
+                self._warn_unmatched_zone(rto_text, normalized_zone_text)
 
         if not discovered:
             return None

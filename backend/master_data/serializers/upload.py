@@ -2,8 +2,18 @@ from rest_framework import serializers
 
 from master_data.models import MasterDataUpload
 
+# Only Chola is seeded/parsed today (chola_parsers.py); the field exists so
+# the endpoint is shaped for future carriers without a breaking API change.
+CARRIER_MASTER_TYPE_CHOICES = ("rto_zone", "product_hierarchy")
+
 
 class MasterDataUploadCreateSerializer(serializers.Serializer):
+    file = serializers.FileField(write_only=True)
+
+
+class CarrierMasterUploadCreateSerializer(serializers.Serializer):
+    carrier = serializers.CharField(max_length=32)
+    master_type = serializers.ChoiceField(choices=CARRIER_MASTER_TYPE_CHOICES)
     file = serializers.FileField(write_only=True)
 
 

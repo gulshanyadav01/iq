@@ -17,6 +17,8 @@ from django.db import transaction
 
 from master_data.models import (
     CarrierMaster,
+    CarrierProductHierarchyMaster,
+    CarrierRTOZoneMaster,
     FuelTypeMaster,
     InsurerMaster,
     PlanTypeMaster,
@@ -71,6 +73,24 @@ SHEET_NAMES = {
 # cv_zone). It is NOT a sheet in the Master Mapper workbook.
 RTO_CSV_PATH = Path(__file__).resolve().parents[1] / "data" / "rto_master.csv"
 
+# Chola carrier-scoped masters — also committed CSVs, generated from the
+# source xlsx via chola_parsers.py (see data/chola_*_source.xlsx). Neither is
+# a sheet in the Master Mapper workbook.
+CHOLA_RTO_ZONE_CSV_PATH = (
+    Path(__file__).resolve().parents[1] / "data" / "chola_rto_zone.csv"
+)
+CHOLA_PRODUCT_HIERARCHY_CSV_PATH = (
+    Path(__file__).resolve().parents[1] / "data" / "chola_product_hierarchy.csv"
+)
+
+# ICICI carrier-scoped RTO-grid master — same shape as Chola's RTO-zone CSV
+# (carrier,zone,rto_code), generated from the source xlsx via
+# icici_parsers.py (see data/icici_rto_master_source.xlsx). Not a sheet in
+# the Master Mapper workbook.
+ICICI_RTO_GRID_CSV_PATH = (
+    Path(__file__).resolve().parents[1] / "data" / "icici_rto_grid.csv"
+)
+
 
 class MasterDataLoader:
     def __init__(self) -> None:
@@ -93,6 +113,9 @@ class MasterDataLoader:
         self._load_subclass(workbook)
         self._load_insurer(workbook)
         self._load_rto()
+        self._load_chola_rto_zone()
+        self._load_chola_product_hierarchy()
+        self._load_icici_rto_grid()
         return self.result
 
     def load_path(self, path) -> LoadResult:
@@ -310,6 +333,142 @@ class MasterDataLoader:
                     },
                 )
                 self._track("RTO", created)
+
+    def _load_chola_rto_zone(self, path: Path | None = None) -> None:
+        """Load the Chola RTO-zone master from the committed CSV.
+
+        Tolerant of absence (a missing CSV is a no-op, not an error).
+        """
+        csv_path = path or CHOLA_RTO_ZONE_CSV_PATH
+        if not csv_path.exists():
+            return
+        rows = []
+        with open(csv_path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                rows.append(
+                    (
+                        row.get("carrier", ""),
+                        row.get("zone", ""),
+                        row.get("rto_code", ""),
+                    )
+                )
+        self.upsert_carrier_rto_zone_rows(rows)
+
+    def upsert_carrier_rto_zone_rows(self, rows) -> None:
+        """Idempotent upsert of ``(carrier, zone, rto_code)`` rows.
+
+        Carrier-agnostic — shared by every carrier's RTO-zone CSV-seeding
+        path (``_load_chola_rto_zone``, ``_load_icici_rto_grid``, ...) and
+        the carrier-scoped upload API, so all of them go through one upsert
+        code path. ``state_slug`` is derived from the RTO code's 2-letter
+        prefix; a prefix absent from ``RTO_PREFIX_TO_STATE_SLUG`` is skipped
+        and counted so seeding gaps surface loudly instead of silently
+        dropping the row.
+        """
+        for carrier, zone, rto_code in rows:
+            carrier = self._str(carrier)
+            zone = self._str(zone)
+            code = self._str(rto_code).upper()
+            if not carrier or not zone or not code:
+                self._skip("CarrierRTOZone")
+                continue
+            state_slug = state_slug_for_code(code)
+            if not state_slug:
+                self._skip("CarrierRTOZone")
+                continue
+            _, created = CarrierRTOZoneMaster.objects.update_or_create(
+                carrier=carrier,
+                zone=zone,
+                rto_code=code,
+                defaults={"state_slug": state_slug},
+            )
+            self._track("CarrierRTOZone", created)
+
+    def _load_chola_product_hierarchy(self, path: Path | None = None) -> None:
+        """Load the Chola product-hierarchy master from the committed CSV.
+
+        Tolerant of absence (a missing CSV is a no-op, not an error). Must
+        run after ``_load_subclass`` so ``canonical_subclass`` resolution
+        against the already-seeded ``VehicleSubClassMaster`` sees the full
+        table within the same transaction.
+        """
+        csv_path = path or CHOLA_PRODUCT_HIERARCHY_CSV_PATH
+        if not csv_path.exists():
+            return
+        rows = []
+        with open(csv_path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                rows.append(
+                    (
+                        row.get("carrier", ""),
+                        row.get("product", ""),
+                        row.get("sub_product", ""),
+                        row.get("vehicle_subclass", ""),
+                    )
+                )
+        self.upsert_chola_product_hierarchy_rows(rows)
+
+    def upsert_chola_product_hierarchy_rows(self, rows) -> None:
+        """Idempotent upsert of ``(carrier, product, sub_product, vehicle_subclass)``
+        rows. Shared by the CSV-seeding path and the carrier-scoped upload API.
+
+        ``canonical_subclass`` reuses the existing ``VehicleSubClassMaster``
+        spelling (populated from ``VEHICLE_SUBCLASS_CANONICAL``) via a
+        case-insensitive name match — no new canonicalization table. Falls
+        back to the raw source spelling when no match exists (e.g. Chola's
+        "Kaali Peeli Taxi" / "Moped", which aren't in the shared subclass
+        master).
+        """
+        for carrier, product, sub_product, vehicle_subclass in rows:
+            carrier = self._str(carrier)
+            product = self._str(product)
+            sub_product = self._str(sub_product)
+            subclass = self._str(vehicle_subclass)
+            if not carrier or not product or not subclass:
+                self._skip("CarrierProductHierarchy")
+                continue
+            canonical = self._canonical_subclass(product, subclass)
+            _, created = CarrierProductHierarchyMaster.objects.update_or_create(
+                carrier=carrier,
+                product=product,
+                sub_product=sub_product,
+                vehicle_subclass=subclass,
+                defaults={"canonical_subclass": canonical},
+            )
+            self._track("CarrierProductHierarchy", created)
+
+    @staticmethod
+    def _canonical_subclass(product: str, raw_name: str) -> str:
+        match = VehicleSubClassMaster.objects.filter(
+            product=product, subclass_name__iexact=raw_name
+        ).first()
+        return match.canonical_name if match else raw_name
+
+    def _load_icici_rto_grid(self, path: Path | None = None) -> None:
+        """Load the ICICI RTO-grid master from the committed CSV.
+
+        Same shape and upsert path as Chola's RTO-zone master
+        (``carrier,zone,rto_code`` -> ``CarrierRTOZoneMaster``) — ICICI's
+        source maps each RTO_CODE to a single ``GRID MAPPING`` label (a
+        state name, a city/vertical grouping like "HYDERABAD", or a zone
+        like "NCR"/"UP-EAST"), which is exactly the zone side of the same
+        (carrier, zone, rto_code) relationship Chola's zone->RTO expansion
+        uses. Tolerant of absence (a missing CSV is a no-op, not an error).
+        """
+        csv_path = path or ICICI_RTO_GRID_CSV_PATH
+        if not csv_path.exists():
+            return
+        rows = []
+        with open(csv_path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                rows.append(
+                    (
+                        row.get("carrier", ""),
+                        row.get("zone", ""),
+                        row.get("rto_code", ""),
+                    )
+                )
+        self.upsert_carrier_rto_zone_rows(rows)
 
     def _load_insurer(self, wb) -> None:
         sheet = self._get_sheet(wb, "insurer")

@@ -344,3 +344,156 @@ class RunExtractionCacheHitTests(TestCase):
         self.assertEqual(CicsOutputCache.objects.get(cache_key=key).hit_count, 1)
         doc.refresh_from_db()
         self.assertEqual(doc.provider, "FG")
+
+
+class ForceRefreshTests(TestCase):
+    """`force_refresh` is the UI's cache-bypass ("Fresh extract" checkbox).
+
+    A cached row is otherwise served before any LLM work, so without this an
+    operator has no way to re-roll a stale/bad pinned result short of a shell.
+    """
+
+    def _seed(self):
+        from commission_intake.models import IndexedContent
+
+        doc = CommissionDocument.objects.create(
+            original_filename="grid.xlsx",
+            status=CommissionDocument.Status.COMPLETED,
+            llm_provider="gemini",
+        )
+        IndexedContent.objects.create(
+            document=doc,
+            source_type="excel",
+            sheet_contents={"Grid": "| P | Rate |\n| A | 20% |"},
+            sheet_metadata={},
+            content_hash="HASH123",
+            indexer_version="1.5",
+        )
+        key = cics_cache.compute_cache_key(
+            content_hash="HASH123",
+            indexer_version="1.5",
+            prompt_version_hash=cics_cache.compute_prompt_version_hash(),
+            llm_provider="gemini",
+            llm_model="test-model",
+        )
+        CicsOutputCache.objects.create(
+            cache_key=key,
+            content_hash="HASH123",
+            indexer_version="1.5",
+            prompt_version_hash="x",
+            pipeline_version=cics_cache.CICS_PIPELINE_VERSION,
+            cics_doc={"provider": {"provider_id": "FG"}, "products": []},
+            sheet_pass_results=[],
+            provider_id="FG",
+            hit_count=0,
+        )
+        return doc, key
+
+    def test_force_refresh_skips_the_lookup_and_re_runs_the_pipeline(self):
+        from unittest import mock
+        from celery.exceptions import Ignore
+        from commission_intake.tasks import run_extraction
+
+        doc, key = self._seed()
+        svc = mock.Mock()
+        svc.model = "test-model"
+
+        # Reaching Pipeline at all proves the cached row was not served. The task
+        # converts the stubbed failure into Celery's Ignore.
+        with (
+            mock.patch(
+                "cins.processors.llm_services.factory.get_llm_service",
+                return_value=svc,
+            ),
+            mock.patch.object(
+                cics_cache, "lookup", side_effect=AssertionError("cache consulted")
+            ),
+            mock.patch(
+                "cins.processors.core.pipeline.Pipeline",
+                side_effect=RuntimeError("pipeline reached"),
+            ),
+        ):
+            with self.assertRaises(Ignore):
+                run_extraction(str(doc.id), force_refresh=True)
+
+        # The bypass must not be mistaken for a hit.
+        self.assertEqual(CicsOutputCache.objects.get(cache_key=key).hit_count, 0)
+
+    def test_default_still_serves_the_cache(self):
+        from unittest import mock
+        from commission_intake.tasks import run_extraction
+
+        doc, key = self._seed()
+        svc = mock.Mock()
+        svc.model = "test-model"
+
+        with (
+            mock.patch(
+                "cins.processors.llm_services.factory.get_llm_service",
+                return_value=svc,
+            ),
+            mock.patch(
+                "cins.processors.core.pipeline.Pipeline",
+                side_effect=AssertionError("LLM pipeline invoked on a cache HIT"),
+            ),
+        ):
+            run_extraction(str(doc.id))
+
+        self.assertEqual(CicsOutputCache.objects.get(cache_key=key).hit_count, 1)
+
+
+class ExtractApiForceRefreshTests(TestCase):
+    """The flag has to survive the whole request → chain → task hop; a signature
+    that silently drops it would look identical from the UI."""
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from rest_framework.test import APIClient
+        from commission_intake.models import IndexedContent
+
+        self.user = get_user_model().objects.create_user(
+            email="fresh@example.com", password="x"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.doc = CommissionDocument.objects.create(
+            original_filename="grid.xlsx",
+            status=CommissionDocument.Status.COMPLETED,
+        )
+        IndexedContent.objects.create(
+            document=self.doc,
+            source_type="excel",
+            sheet_contents={"Grid": "rows"},
+            sheet_metadata={},
+            indexer_version="1.5",
+        )
+
+    def _post(self, body):
+        from unittest import mock
+        from django.urls import reverse
+        from commission_intake import views as _views  # noqa: F401
+
+        with mock.patch(
+            "commission_intake.views.commission_document.enqueue_processing_chain"
+        ) as enqueue:
+            resp = self.client.post(
+                reverse("commission-documents-extract", args=[self.doc.id]),
+                body,
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 200, getattr(resp, "data", resp))
+        return enqueue.call_args
+
+    def test_flag_is_forwarded(self):
+        self.assertIs(self._post({"force_refresh": True}).kwargs["force_refresh"], True)
+
+    def test_default_is_cache_backed(self):
+        self.assertIs(self._post({}).kwargs["force_refresh"], False)
+
+    def test_chain_threads_the_flag_into_the_task_signature(self):
+        from commission_intake.tasks import build_processing_chain
+
+        sig = build_processing_chain("doc-1", "extract_only", True).tasks[1]
+        self.assertEqual(sig.args, ("doc-1", True))
+        sig_default = build_processing_chain("doc-1", "extract_only").tasks[1]
+        self.assertEqual(sig_default.args, ("doc-1", False))

@@ -210,10 +210,14 @@ def index_document(document_id: str):
 
 
 @shared_task(queue=COMMISSION_INTAKE_QUEUE)
-def run_extraction(document_id: str):
+def run_extraction(document_id: str, force_refresh: bool = False):
     """
     Reconstruct IndexedDocument from DB, run CINS Pipeline extraction,
     and save CICSResult + ExtractionPass rows.
+
+    ``force_refresh`` skips the CICS output-cache lookup so the LLM passes re-run
+    even for a byte-identical input; a gate-passing result then overwrites the
+    cached row for that key (``cics_cache.store`` is an upsert).
     """
     from pathlib import Path
 
@@ -260,7 +264,12 @@ def run_extraction(document_id: str):
         CICSResult.objects.filter(document=doc).delete()
         ValidationResult.objects.filter(document=doc).delete()
 
-        cached = cics_cache.lookup(cache_key)
+        if force_refresh:
+            logger.info(
+                f"CICS output-cache BYPASS for {document_id} (key={cache_key[:12]}…) "
+                f"— forced fresh extraction requested"
+            )
+        cached = None if force_refresh else cics_cache.lookup(cache_key)
         if cached is not None:
             logger.info(
                 f"CICS output-cache HIT for {document_id} (key={cache_key[:12]}…) "
@@ -725,7 +734,9 @@ def _fail_document(document_id: str, error: str) -> None:
         pass
 
 
-def build_processing_chain(document_id: str, mode: str = "full"):
+def build_processing_chain(
+    document_id: str, mode: str = "full", force_refresh: bool = False
+):
     """Build the Celery chain for the given processing mode (not yet applied)."""
     from commission_intake.models import CommissionDocument
 
@@ -739,7 +750,7 @@ def build_processing_chain(document_id: str, mode: str = "full"):
     if mode == "extract_only":
         return chain(
             _set_status.si(document_id, CommissionDocument.Status.EXTRACTING),
-            run_extraction.si(document_id),
+            run_extraction.si(document_id, force_refresh),
             run_validation.si(document_id),
             _set_completed.si(document_id),
         )
@@ -755,9 +766,13 @@ def build_processing_chain(document_id: str, mode: str = "full"):
     )
 
 
-def enqueue_processing_chain(document_id: str, mode: str = "full") -> None:
+def enqueue_processing_chain(
+    document_id: str, mode: str = "full", force_refresh: bool = False
+) -> None:
     """Enqueue a processing chain according to mode (full, index_only, extract_only)."""
-    build_processing_chain(document_id, mode).apply_async(queue=COMMISSION_INTAKE_QUEUE)
+    build_processing_chain(document_id, mode, force_refresh).apply_async(
+        queue=COMMISSION_INTAKE_QUEUE
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -178,6 +178,12 @@ class ProcessingModeRequestSerializer(serializers.Serializer):
     )
 
 
+class ExtractRequestSerializer(serializers.Serializer):
+    # When true, skip the CICS output-cache lookup and re-run the LLM extraction;
+    # a gate-passing result overwrites the cached row for that key.
+    force_refresh = serializers.BooleanField(required=False, default=False)
+
+
 class RerunPassRequestSerializer(serializers.Serializer):
     pass_number = serializers.ChoiceField(choices=[1, 2, 3])
     sheet_name = serializers.CharField(required=False, default="", allow_blank=True)
