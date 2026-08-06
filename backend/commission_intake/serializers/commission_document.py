@@ -70,6 +70,7 @@ class CICSResultSerializer(serializers.ModelSerializer):
             "cics_doc",
             "raw_extraction",
             "warnings",
+            "notices",
             "errors",
             "duration_seconds",
             "sheet_results",

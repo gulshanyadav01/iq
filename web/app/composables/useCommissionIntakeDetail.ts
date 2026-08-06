@@ -34,6 +34,9 @@ export interface CICSResult {
   id: string
   cics_doc: Record<string, unknown>
   warnings: string[]
+  /** Deliberate normalizations, not problems. Optional: rows written before the
+   *  field was added have no value. */
+  notices?: string[]
   errors: string[]
   duration_seconds: number
   sheet_results: unknown[]
