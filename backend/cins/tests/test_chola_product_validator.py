@@ -158,6 +158,70 @@ class InvalidComboFindingTests(TestCase):
         self.assertEqual(result.warnings, [])
 
 
+class MandatorySubClassTests(TestCase):
+    """vehicle_sub_class is mandatory on every Chola rule — a rule without one
+    is a HIGH error (fails validation, blocks the CICS output-cache pin)."""
+
+    def test_missing_subclass_is_a_high_error(self):
+        v = _ValidatorWithSeededHierarchy(_HIERARCHY)
+        path = _write_doc(
+            _doc("Chola", [_product("commercial-gcv", "GCV", [_rule(None)])])
+        )
+        result = v.validate(path)
+        self.assertEqual(len(result.errors), 1)
+        self.assertTrue(result.has_high)
+        self.assertIn("mandatory", result.errors[0].message)
+
+    def test_absent_conditions_object_also_flagged(self):
+        v = _ValidatorWithSeededHierarchy(_HIERARCHY)
+        path = _write_doc(_doc("Chola", [_product("car", "Private Car", [{}])]))
+        result = v.validate(path)
+        self.assertEqual(len(result.errors), 1)
+
+    def test_one_finding_per_segment_listing_the_rule_ids(self):
+        v = _ValidatorWithSeededHierarchy(_HIERARCHY)
+        rules = [dict(_rule(None), rule_id=f"R{i}") for i in range(3)]
+        path = _write_doc(_doc("Chola", [_product("commercial-gcv", "GCV", rules)]))
+        result = v.validate(path)
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn("3 rule(s)", result.errors[0].message)
+        self.assertIn("R0", result.errors[0].message)
+
+    def test_populated_subclass_produces_no_error(self):
+        v = _ValidatorWithSeededHierarchy(_HIERARCHY)
+        path = _write_doc(
+            _doc("Chola", [_product("commercial-gcv", "GCV", [_rule(["truck"])])])
+        )
+        result = v.validate(path)
+        self.assertEqual(result.errors, [])
+
+    def test_flagged_even_when_master_lacks_coverage_for_the_segment(self):
+        # Mandatory-ness has no exemptions — unlike the *validity* check, it
+        # does not require the master to cover this (product, sub_product).
+        v = _ValidatorWithSeededHierarchy(_HIERARCHY)
+        path = _write_doc(
+            _doc("Chola", [_product("commercial-gcv", "NOT-A-SEGMENT", [_rule(None)])])
+        )
+        result = v.validate(path)
+        self.assertEqual(len(result.errors), 1)
+
+    def test_non_chola_missing_subclass_not_flagged(self):
+        v = _ValidatorWithSeededHierarchy(_HIERARCHY)
+        path = _write_doc(
+            _doc("Bajaj", [_product("commercial-gcv", "GCV", [_rule(None)])])
+        )
+        result = v.validate(path)
+        self.assertEqual(result.errors, [])
+
+    def test_unseeded_master_still_fails_open(self):
+        v = _ValidatorWithSeededHierarchy([])
+        path = _write_doc(
+            _doc("Chola", [_product("commercial-gcv", "GCV", [_rule(None)])])
+        )
+        result = v.validate(path)
+        self.assertEqual(result.errors, [])
+
+
 class NonCholaUntouchedTests(TestCase):
     def test_non_chola_provider_produces_no_findings(self):
         v = _ValidatorWithSeededHierarchy(_HIERARCHY)

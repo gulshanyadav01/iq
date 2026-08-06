@@ -2,7 +2,12 @@
 Chola Product Hierarchy Validator
 
 Validates each Chola rule's ``(product, sub_product, vehicle_sub_class)``
-combination against the seeded ``CarrierProductHierarchyMaster`` (3A).
+combination against the seeded ``CarrierProductHierarchyMaster`` (3A), and
+enforces that ``vehicle_sub_class`` is PRESENT on every Chola rule — for this
+carrier it is the axis deals are keyed on, so a rule without one is a HIGH
+error (fails validation, blocks the CICS output-cache pin) rather than a
+silently-green omission. The transformer backfills what it can derive from the
+product/segment label first; only genuinely underivable rules reach here.
 Validation-only: it does not touch extraction, and it reuses the existing
 ``VEHICLE_SUB_CLASS_MAPPINGS`` spelling normalization (2A) rather than
 building a second canonicalization scheme — the master's raw
@@ -12,10 +17,12 @@ identical slug space and a master row whose spelling the transformer could
 never match (e.g. a source typo the dict has no key for) simply drops out of
 the valid set instead of producing a mismatched comparison.
 
-Gated to Chola documents (``provider.provider_id == "Chola"``) and to
-products the master actually covers — a product bucket absent from the
-master (e.g. no rows for it) is skipped rather than flagged, since that is
-missing coverage, not a validity violation.
+Gated to Chola documents (``provider.provider_id == "Chola"``). The *validity*
+check is additionally gated to products the master actually covers — a product
+bucket absent from the master (e.g. no rows for it) is skipped rather than
+flagged, since that is missing coverage, not a validity violation. The
+*mandatory-presence* check is not: it needs no master coverage to know that an
+empty ``vehicle_sub_class`` is wrong.
 
 The master's raw ``vehicle_subclass`` text needs the SAME regex
 substring/word-boundary matching the transformer runs (``_normalize_list_field``),
@@ -128,14 +135,57 @@ class CholaProductHierarchyValidator:
         if provider.get("provider_id") != "Chola":
             return self._result([])
 
-        findings: Dict[Tuple[str, str, Optional[str]], ValidationIssue] = {}
+        findings: Dict[Tuple[str, str, Optional[str], str], ValidationIssue] = {}
         for product in doc.get("products", []):
             bucket = _bucket_for(product.get("product_subproduct"))
-            if bucket is None or bucket not in self._covered_products:
-                continue
+            if bucket is None:
+                continue  # unclassifiable subproduct — nothing to say about it
 
             sub_category = (product.get("sub_category") or "").strip()
             sub_product = sub_category if bucket == "CV" else ""
+            seg = f"{bucket}/{sub_product}" if sub_product else bucket
+
+            # Mandatory-ness first: it is checked BEFORE the coverage and
+            # sub-product guards below, because a rule with no sub-class at all
+            # is a defect regardless of whether the master can vouch for this
+            # exact (product, sub_product) combination. The validity checks
+            # that follow are what need master coverage; this one does not.
+            missing = [
+                rule.get("rule_id") or "<no rule_id>"
+                for rule in product.get("commission_rules", [])
+                if not (rule.get("conditions") or {}).get("vehicle_sub_class")
+            ]
+            if missing:
+                key = (bucket, sub_product, None, "missing")
+                if key not in findings:
+                    shown = ", ".join(missing[:5])
+                    more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
+                    valid = sorted(
+                        self._valid_subclasses.get((bucket, sub_product), set())
+                    )
+                    findings[key] = ValidationIssue(
+                        severity=Severity.HIGH,
+                        message=(
+                            f"Chola product hierarchy: vehicle_sub_class is "
+                            f"mandatory but missing on {len(missing)} rule(s) "
+                            f"for {seg}: {shown}{more}"
+                        ),
+                        field_path=(
+                            "products[].commission_rules[].conditions.vehicle_sub_class"
+                        ),
+                        category="Chola Product Hierarchy",
+                        suggestion=(
+                            f"Valid vehicle_sub_class for {seg}: {valid}"
+                            if valid
+                            else (
+                                "Populate vehicle_sub_class from the grid's "
+                                "SUBCLASS label for this segment"
+                            )
+                        ),
+                    )
+
+            if bucket not in self._covered_products:
+                continue  # master says nothing about this bucket — no validity check
 
             valid_sub_products = self._valid_sub_products.get(bucket, set())
             if (
@@ -143,7 +193,7 @@ class CholaProductHierarchyValidator:
                 and valid_sub_products
                 and sub_product not in valid_sub_products
             ):
-                key = (bucket, sub_product, None)
+                key = (bucket, sub_product, None, "sub_product")
                 if key not in findings:
                     findings[key] = ValidationIssue(
                         severity=Severity.MEDIUM,
@@ -171,9 +221,8 @@ class CholaProductHierarchyValidator:
                     subclasses = [subclasses]
                 for sc in subclasses:
                     if sc and sc not in valid_subclasses:
-                        key = (bucket, sub_product, sc)
+                        key = (bucket, sub_product, sc, "invalid")
                         if key not in findings:
-                            seg = f"{bucket}/{sub_product}" if sub_product else bucket
                             findings[key] = ValidationIssue(
                                 severity=Severity.MEDIUM,
                                 message=(
