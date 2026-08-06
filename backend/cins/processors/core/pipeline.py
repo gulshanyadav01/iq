@@ -487,6 +487,20 @@ def _run_validators(output_path: Path, indexed_doc=None):
     except ImportError:
         logger.warning("Validators not available; skipping validation")
         return None, None
+
+    if schema_result is not None:
+        try:
+            from cins.validators.chola_product_hierarchy_validator import (
+                CholaProductHierarchyValidator,
+            )
+
+            chola_result = CholaProductHierarchyValidator().validate(str(output_path))
+            schema_result.errors.extend(chola_result.errors)
+            schema_result.warnings.extend(chola_result.warnings)
+            schema_result.info.extend(chola_result.info)
+        except Exception as e:  # never let this validator break the pipeline
+            logger.warning(f"Chola product hierarchy validator failed: {e}")
+
     extractable = None
     if indexed_doc is not None and schema_result is not None:
         # Derived once for both validators — the filter walks every sheet and
