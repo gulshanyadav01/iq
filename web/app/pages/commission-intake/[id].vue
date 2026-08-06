@@ -109,20 +109,32 @@
               />
               Re-index
             </button>
-            <button
-              v-if="doc.indexed_content"
-              :disabled="actionLoading !== null"
-              title="Re-run LLM extraction on indexed content"
-              class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-primary-200 dark:border-primary-800 text-primary-700 dark:text-primary-300 bg-primary-50/50 dark:bg-primary-900/20 hover:bg-primary-100 dark:hover:bg-primary-900/40 transition disabled:opacity-50 disabled:cursor-not-allowed"
-              @click="triggerExtract"
-            >
-              <UIcon
-                name="i-lucide-sparkles"
-                class="w-3.5 h-3.5"
-                :class="{ 'animate-spin': actionLoading === 'extract' }"
-              />
-              Extract
-            </button>
+            <!-- Split button: Extract serves the cached result; the menu forces a fresh LLM run. -->
+            <div v-if="doc.indexed_content" class="flex items-center ml-1">
+              <button
+                :disabled="actionLoading !== null"
+                title="Re-run LLM extraction on indexed content (serves the cached result if the input is unchanged)"
+                class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-l-lg text-xs font-medium border border-primary-200 dark:border-primary-800 text-primary-700 dark:text-primary-300 bg-primary-50/50 dark:bg-primary-900/20 hover:bg-primary-100 dark:hover:bg-primary-900/40 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                @click="triggerExtract()"
+              >
+                <UIcon
+                  name="i-lucide-sparkles"
+                  class="w-3.5 h-3.5"
+                  :class="{ 'animate-spin': actionLoading === 'extract' }"
+                />
+                Extract
+              </button>
+              <UDropdownMenu :items="extractMenuItems" :content="{ align: 'end' }">
+                <button
+                  :disabled="actionLoading !== null"
+                  title="More extraction options"
+                  aria-label="More extraction options"
+                  class="flex items-center px-1.5 py-1.5 rounded-r-lg border border-l-0 border-primary-200 dark:border-primary-800 text-primary-700 dark:text-primary-300 bg-primary-50/50 dark:bg-primary-900/20 hover:bg-primary-100 dark:hover:bg-primary-900/40 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <UIcon name="i-lucide-chevron-down" class="w-3.5 h-3.5" />
+                </button>
+              </UDropdownMenu>
+            </div>
           </template>
           <button
             :disabled="refreshing"
@@ -874,6 +886,20 @@ const {
   triggerIndex, triggerExtract, triggerRerunPass, triggerTransform, triggerValidate,
   triggerMarkValidated, triggerMarkInvalidated,
 } = useCommissionIntakeDetail()
+
+// Extract split-button menu. A plain Extract click is cache-backed; this is the
+// deliberate, more expensive path — it bypasses the pinned result and re-rolls
+// the LLM passes, so it lives behind the caret rather than in the toolbar.
+const extractMenuItems = computed(() => [
+  [
+    {
+      label: 'Fresh extract (bypass cache)',
+      icon: 'i-lucide-refresh-ccw-dot',
+      disabled: actionLoading.value !== null,
+      onSelect: () => triggerExtract({ forceRefresh: true }),
+    },
+  ],
+])
 
 // "View sheets" on the coverage notice.
 //
