@@ -43,6 +43,9 @@ class CicsOutputCache(TimeStampedUUIDModel):
     # Replayable payload — everything needed to rebuild the UI without an LLM call.
     cics_doc = models.JSONField()
     warnings = models.JSONField(default=list)
+    # Mirrors CICSResult.notices — a cache hit must replay the same split, or the
+    # UI counts differ between a fresh run and a cached one.
+    notices = models.JSONField(default=list)
     errors = models.JSONField(default=list)
     duration_seconds = models.FloatField(default=0)
     sheet_results = models.JSONField(default=list)

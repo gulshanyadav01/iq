@@ -258,15 +258,29 @@ class ExcelToCSVConverter:
         visible_rows_set = set(visible_rows)
         visible_cols_set = set(visible_cols)
 
-        # Create O(1) lookup for merged ranges
-        # Skip ranges whose top-left cell is hidden — don't leak hidden values into visible cells
+        # Create O(1) lookup for merged ranges.
+        #
+        # Propagate the value to the VISIBLE cells of each range, regardless of
+        # whether the range's top-left cell is itself visible. A merged group
+        # header routinely starts in a hidden column while its siblings stay
+        # visible: Chola's TW sheet hides AX and BB, which are exactly the
+        # top-left cells of `AX4:AZ4 -> "Hero vs Bajaj"` and `BB4:BE4 -> "Bajaj"`.
+        # Skipping the whole range dropped the make from the visible AY/AZ/BC/BD/BE
+        # columns, so their rules carried no vehicle_make and two different
+        # SCOOTER columns collapsed onto byte-identical conditions with different
+        # payouts (54 CRITICAL duplicate findings on doc 733711bd).
+        #
+        # A range that is entirely hidden still contributes nothing — no visible
+        # cell exists to write to — so genuinely hidden scratch content cannot
+        # leak in.
         merged_lookup = {}
         for mr in merged_ranges:
-            top_row, top_col = mr.start
-            if top_row not in visible_rows_set or top_col not in visible_cols_set:
-                continue
             for r in range(mr.start[0], mr.end[0] + 1):
+                if r not in visible_rows_set:
+                    continue
                 for c in range(mr.start[1], mr.end[1] + 1):
+                    if c not in visible_cols_set:
+                        continue
                     merged_lookup[(r, c)] = mr.value
 
         for row in visible_rows:

@@ -1336,6 +1336,7 @@ def extract_multi_pass(
                     "pass3_products_and_rules": empty_rules.model_dump(),
                     "raw_extraction": raw_extraction.model_dump(exclude_none=True),
                     "transform_warnings": transform_warnings,
+                    "transform_notices": list(transformer.notices),
                     "transform_errors": transform_errors,
                     "no_change": True,
                 }
@@ -1483,6 +1484,7 @@ def extract_multi_pass(
                 "pass3_products_and_rules": rules_extraction.model_dump(),
                 "raw_extraction": raw_extraction.model_dump(exclude_none=True),
                 "transform_warnings": transform_warnings,
+                "transform_notices": list(transformer.notices),
                 "transform_errors": transform_errors,
             }
 

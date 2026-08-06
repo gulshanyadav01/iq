@@ -253,14 +253,22 @@ for table_name, ttype, lines in tables:
     # Do not hardcode column indices from memory — derive them by reading the headers.
     # col_index is the LITERAL parse_md_row split index (blank spacers included).
     # Enumerate the header row directly; NEVER filter/compact before indexing, or a
-    # rate is read from a neighbouring state's column. Take the state text as
-    # everything before the LAST ">" verbatim ("UP- East > ACT" -> "UP- East").
+    # rate is read from a neighbouring state's column.
+    #
+    # Split a ">" header from the LEFT and take the FIRST TWO segments. A header may
+    # be 2 segments ("UP- East > ACT") or carry trailing rate columns
+    # ("AP/TS > ACT > 0.325"). rsplit(">", 1) is WRONG on the longer form — it yields
+    # state "AP/TS > ACT" and coverage "0.325", destroying the coverage dimension.
     #
     #   for i, h in enumerate(parse_md_row(header_line)):   # RIGHT
     #       if ">" in h:
-    #           state = h.rsplit(">", 1)[0].strip()          # verbatim, not split()[-1]
-    #           coverage = h.rsplit(">", 1)[1].strip()
+    #           parts = [p.strip() for p in h.split(">")]
+    #           state = parts[0]                            # verbatim, not split()[-1]
+    #           coverage = parts[1]                         # parts[2:] are rate columns
     #           col_map.append((state, coverage, i))
+    #
+    # coverage_type_text must NEVER be numeric. If it parses as a number you split
+    # the wrong way — re-split from the left.
 
     col_map = []  # fill from header rows
 

@@ -64,7 +64,10 @@ def _env_int(name: str, default: int) -> int:
 # Bump on ANY change to the deterministic post-codegen pipeline (transformer,
 # schema, gating validators, sandbox executor). This invalidates every cached
 # output so a fixed transformer is never served a stale pre-fix result.
-CICS_PIPELINE_VERSION = "1.0.0"
+# 1.0.1 — Chola vehicle_sub_class made mandatory (transformer backfill +
+#         HIGH validator finding), and CRITICAL/HIGH validator issues now
+#         block the cache write.
+CICS_PIPELINE_VERSION = "1.0.3"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"
@@ -146,17 +149,40 @@ def _pass3_requires_review(sheet_pass_results) -> bool:
     return False
 
 
+def _has_blocking_validation_issue(validation_issues) -> bool:
+    """True when any validator issue is CRITICAL or HIGH.
+
+    ``PipelineResult.errors`` holds pipeline *exceptions*, not validator
+    findings — validator output lands in ``validation_issues``. Without this
+    check a HIGH finding (missing mandatory Chola vehicle_sub_class, a dropped
+    coverage row, a state-column misalignment) would still be pinned into the
+    cache and every rerun would replay the same wrong answer.
+    """
+    for issue in validation_issues or []:
+        severity = (
+            issue.get("severity")
+            if isinstance(issue, dict)
+            else getattr(issue, "severity", None)
+        )
+        name = getattr(severity, "value", severity)
+        if isinstance(name, str) and name.upper() in ("CRITICAL", "HIGH"):
+            return True
+    return False
+
+
 def should_cache(result) -> bool:
     """Only cache a clean, gate-passing result.
 
-    Blocks the write when the pipeline reported errors, or any Pass-3 flagged
-    requires_review (completeness gate shortfall / validation). A conservative
-    write policy is the whole point: a false miss just re-runs the LLM; a false
-    write pins a wrong answer.
+    Blocks the write when the pipeline reported errors, a validator raised a
+    CRITICAL/HIGH issue, or any Pass-3 flagged requires_review (completeness
+    gate shortfall / validation). A conservative write policy is the whole
+    point: a false miss just re-runs the LLM; a false write pins a wrong answer.
     """
     if getattr(result, "errors", None):
         return False
     if not getattr(result, "cics_doc", None):
+        return False
+    if _has_blocking_validation_issue(getattr(result, "validation_issues", None)):
         return False
     if _pass3_requires_review(getattr(result, "sheet_pass_results", []) or []):
         return False
@@ -321,6 +347,7 @@ def store(
             "llm_model": llm_model or "",
             "cics_doc": result.cics_doc,
             "warnings": getattr(result, "warnings", []) or [],
+            "notices": getattr(result, "notices", []) or [],
             "errors": getattr(result, "errors", []) or [],
             "duration_seconds": getattr(result, "duration", 0.0) or 0.0,
             "sheet_results": getattr(result, "sheet_results", []) or [],

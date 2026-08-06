@@ -406,6 +406,7 @@ def run_extraction(document_id: str, force_refresh: bool = False):
                     "cics_doc": result.cics_doc,
                     "raw_extraction": None,  # populated via ExtractionPass rows
                     "warnings": result.warnings,
+                    "notices": result.notices,
                     "errors": result.errors,
                     "duration_seconds": result.duration,
                     "sheet_results": result.sheet_results,
@@ -447,7 +448,7 @@ def run_extraction(document_id: str, force_refresh: bool = False):
                     reason = (
                         "regression vs prior good run"
                         if regression.is_regression
-                        else "errors or requires_review"
+                        else "errors, validation errors or requires_review"
                     )
                     logger.info(
                         f"CICS output-cache SKIP for {document_id} "
@@ -479,6 +480,36 @@ def _build_content_files(indexed: "IndexedContent") -> dict:
     if indexed.sheet_contents:
         content_files["sheets"] = list(indexed.sheet_contents.keys())
     return content_files
+
+
+def _rebuild_indexed_document(doc, indexed, base_dir):
+    """Reconstruct an IndexedDocument from DB rows (no disk reads).
+
+    The coverage validators need the source grid to compare emitted rules
+    against, and they only get it from an IndexedDocument. `run_extraction`
+    builds one inline for the Pipeline; `run_validation` needs the same thing to
+    run the full validator set. `base_dir` only has to be a real path — nothing
+    is read from it.
+    """
+    from cins.processors.content.indexer import IndexedDocument
+
+    sheet_metadata = indexed.sheet_metadata or {}
+    return IndexedDocument(
+        document_id=doc.original_filename,
+        provider=doc.provider or "unknown",
+        source_file=base_dir / doc.original_filename,
+        source_type=indexed.source_type,
+        indexed_dir=base_dir,
+        metadata={
+            "content_files": _build_content_files(indexed),
+            "table_splits": sheet_metadata.get("table_splits", {}),
+            "source_metadata": sheet_metadata.get("source_metadata", {}),
+            "sheet_classifications": sheet_metadata.get("classifications", {}),
+        },
+        _primary_content=indexed.primary_content or None,
+        _sheet_contents=indexed.sheet_contents or None,
+        _email_context=indexed.email_context or None,
+    )
 
 
 def _purge_extraction_artifacts(doc) -> None:
@@ -581,6 +612,7 @@ def _repopulate_from_cache(doc, cached) -> None:
             "cics_doc": cached.cics_doc,
             "raw_extraction": None,
             "warnings": cached.warnings or [],
+            "notices": cached.notices or [],
             "errors": cached.errors or [],
             "duration_seconds": cached.duration_seconds or 0.0,
             "sheet_results": cached.sheet_results or [],
@@ -603,15 +635,17 @@ def _repopulate_from_cache(doc, cached) -> None:
 @shared_task(queue=COMMISSION_INTAKE_QUEUE)
 def run_validation(document_id: str):
     """
-    Load CICSResult from DB, run schema + overlap validators,
-    and save ValidationResult.
+    Load CICSResult from DB, run the full validator set, and save
+    ValidationResult.
     """
     import json
     import tempfile
+    from pathlib import Path
 
     from commission_intake.models import (
         CommissionDocument,
         CICSResult,
+        IndexedContent,
         ValidationResult,
     )
 
@@ -626,14 +660,35 @@ def run_validation(document_id: str):
             tmp_path = tmp.name
             json.dump(cics_result.cics_doc, tmp, ensure_ascii=False)
 
-        try:
-            from cins.validators.schema_validator import SchemaValidator
-            from cins.validators.rule_overlap_checker import RuleOverlapChecker
+        # Reuse the pipeline's validator fan-out rather than re-listing the
+        # validators here. Running only SchemaValidator + RuleOverlapChecker
+        # meant the Chola product-hierarchy, row-coverage, coverage-integrity
+        # and state-column-alignment validators never reached the persisted
+        # ValidationResult — their findings existed only inside the pipeline
+        # run, so the UI reported has_high=False on a document carrying three
+        # HIGH mandatory-vehicle_sub_class findings across 2079 rules.
+        from cins.processors.core.pipeline import _run_validators
 
-            schema_result = SchemaValidator().validate(tmp_path)
-            overlap_result = RuleOverlapChecker().check(tmp_path)
+        base_dir = Path(tempfile.mkdtemp())
+        try:
+            indexed_doc = None
+            try:
+                indexed = IndexedContent.objects.get(document=doc)
+                indexed_doc = _rebuild_indexed_document(doc, indexed, base_dir)
+            except IndexedContent.DoesNotExist:
+                # No index row (e.g. a hand-built CICS): the coverage validators
+                # simply sit out; schema/overlap/Chola still run.
+                pass
+            except Exception as e:
+                logger.warning(f"Could not rebuild IndexedDocument for validation: {e}")
+
+            schema_result, overlap_result = _run_validators(tmp_path, indexed_doc)
         finally:
             os.unlink(tmp_path)
+            shutil.rmtree(base_dir, ignore_errors=True)
+
+        if schema_result is None or overlap_result is None:
+            raise RuntimeError("Validators unavailable")
 
         def _issue_to_dict(issue):
             return {
@@ -1028,6 +1083,7 @@ def rerun_transform(document_id: str):
     from cins.schema.raw_extraction import RawExtraction
     from cins.processors.core.raw_to_cics_transformer import RawToCICSTransformer
     from cins.processors.core.cpa_split import materialize_cpa_split
+    from cins.processors.core.rule_priority import normalize_rule_priorities
 
     try:
         doc = CommissionDocument.objects.get(id=document_id)
@@ -1082,6 +1138,9 @@ def rerun_transform(document_id: str):
         # so re-transform must too or the rebuilt document silently loses the
         # CPA dimension (every rule collapses to cpa=None, halving CV counts).
         cics_json = materialize_cpa_split(cics_json)
+        # Rule fan-out and cpa split clone the parent's priority; renumber once
+        # the rule list is final (pipeline.py does the same after transform).
+        cics_json = normalize_rule_priorities(cics_json)
 
         CICSResult.objects.update_or_create(
             document=doc,
@@ -1089,6 +1148,7 @@ def rerun_transform(document_id: str):
                 "cics_doc": cics_json,
                 "raw_extraction": None,
                 "warnings": transform_warnings or [],
+                "notices": list(transformer.notices),
                 "errors": transform_errors or [],
                 "duration_seconds": 0.0,
                 "sheet_results": [],

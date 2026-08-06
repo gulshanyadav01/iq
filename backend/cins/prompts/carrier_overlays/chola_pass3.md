@@ -4,6 +4,20 @@ These rules apply ONLY to this document because its provider is **Chola**. They 
 injected into the Pass-3 codegen prompt at runtime based on the resolved provider; do not
 generalize them to other carriers.
 
+### Chola — `vehicle_sub_class` is MANDATORY on every rule
+
+Every rule you emit MUST set `conditions["vehicle_sub_class"]`. It is the axis Chola deals
+are keyed on, and a rule without one fails validation.
+
+- When the grid's SUBCLASS label is a body word (`SCOOTER`, `TRUCK`, `1_GCCV_3W`), copy it
+  per the rules below.
+- When the SUBCLASS label is a **cc / weight / seating band** rather than a body word (the
+  Private Car and Two-Wheeler grids), the band goes to `cc` / `gvw` / `seating_capacity` as
+  usual — but you must STILL emit the segment's own body word as `vehicle_sub_class`
+  (`private car` for the Private Car grids, `taxi` for the Taxi grids, and the TW grid's
+  own body word for two-wheelers).
+- Never leave it unset because "the row didn't say" — the segment header always does.
+
 ### Chola — Private Car fuel-type suffix
 
 When `product_name` resolves to `Private Car`, the SUBCLASS / CC labels in Chola's
@@ -114,9 +128,21 @@ enumerating the header row with `parse_md_row` and using the raw split index `i`
 markdown preserves blank spacer cells, so `i` is the true column of the data cell below.
 Filtering blank headers or compacting the list before indexing shifts every column after
 a spacer by one, so a state reads a _neighbouring_ state's rate (the progressive
-non-uniform drift observed on the Apr grid: JH read GJ's column, CG read JH's, …). Take
-the state as everything before the **last** `>` unchanged — `"UP- East > ACT"` is state
-`"UP- East"`, coverage `"ACT"` (NOT `"East"`).
+non-uniform drift observed on the Apr grid: JH read GJ's column, CG read JH's, …).
+
+**Splitting a `>` header — split from the LEFT, never `rsplit`.** A header cell is
+`<state> > <coverage>` and may carry trailing rate columns:
+`"UP- East > ACT"` (2 segments) but also `"AP/TS > ACT > 0.325"` (3) and
+`"AP/TS > ACT > 0.325 > 0.375"` (4) on the commercial-vehicle grids. So always split on
+every `>` and take the **first two** segments: `parts[0]` is the state verbatim
+(`"UP- East"`, NOT `"East"`), `parts[1]` is the coverage (`"ACT"`), and `parts[2:]` are
+rate columns to be handled by the table's own value logic — never a coverage.
+`rsplit(">", 1)` is WRONG: on a 3-segment CV header it yields state `"AP/TS > ACT"` and
+coverage `"0.325"`, which silently destroys the comprehensive-vs-liability dimension on
+every CV rule.
+
+**`coverage_type_text` must never be numeric.** If what you are about to assign parses as
+a number, you split the wrong way — re-split from the left.
 
 Generated-code shape (Package table):
 
@@ -126,8 +152,10 @@ cells = parse_md_row(header_line)
 col_map = []
 for i, h in enumerate(cells):                       # i is the literal column index
     if ">" in h:                                    # a "<state> > <ACT|PACK>" header
-        state = h.rsplit(">", 1)[0].strip()         # verbatim; NOT h.split()[-1]
-        coverage = h.rsplit(">", 1)[1].strip()      # "ACT" or "PACK"
+        parts = [p.strip() for p in h.split(">")]   # split LEFT; never rsplit
+        state = parts[0]                            # verbatim; NOT h.split()[-1]
+        coverage = parts[1]                         # "ACT" or "PACK"; parts[2:] are rates
+        assert not coverage.replace(".", "").isdigit(), h   # numeric = wrong split
         col_map.append((state, coverage, i))
 # Self-check: one col_map entry per ">"-bearing header cell. If this fails you
 # compacted the header row and the indices are shifted.
@@ -239,73 +267,37 @@ The ACT row is the ONLY source of Two Wheeler third-party rules. A TW `third-par
 value equals the Package rate for the same make×band is a duplication bug (see the single-value
 cell rule above), not a real Liability rate.
 
-### Chola — Commercial Vehicle GCCV 3-Wheeler row merged into the header
+### Chola — Commercial Vehicle GCCV 3-Wheeler row (`1_GCCV_3W`)
 
-In Chola's commercial GCCV grids (table names like "GCCV Commission", "PCCV < 6",
-"PCCV > 6"), the **first data row — the goods 3-wheeler, `1_GCCV_3W`** — was merged by the
-source into the column-header row. Its commission values are NOT a separate data row; they
-are appended as a trailing value segment inside each state×coverage **header** cell:
+The goods 3-wheeler rows — `1_GCCV_3W` and its electric twin `1_GCCV_3W[Electric]` — are
+**ordinary positional data rows**. Parse them with the normal `col_map`, exactly like the
+weight bands below.
 
-```
-SUBCLASS > 1_GCCV_3W > 1_GCCV_3W[Electric] | ... | AP/TS > ACT > 0.325 | AP/TS > PACK > 0.375 | TN > ACT | TN > PACK > 0.275 | MH/GA > PACK > 0.47 > 0.45 | GJ > PACK > 0.5 | ...
-```
+Historical note, so you do not go looking for a special case: the source merged these two
+rows into the column-header block, and the indexer used to hand you their rates as trailing
+`>` segments inside each state×coverage header cell (`AP/TS > ACT > 0.325 > 0.325`).
+The indexer now detects a swallowed data row and pushes it back into the data section, so
+**every header cell is plain `<STATE> > <ACT|PACK>` again**. Do NOT write a bespoke loop
+that harvests `parts[2:]` from header cells — there is nothing there to harvest, and doing
+so misattributes rates. Build `col_map` from `parts[0]` (state) and `parts[1]` (coverage)
+and ignore any further segments.
 
-So each header cell is `<STATE> > <ACT|PACK> [> <value>] [> <electric_value>]`. The first two
-`>` segments are the state group and the coverage sub-column you ALREADY use to build the
-`col_map` (keep doing that for the positional weight-band rows below). The **third (and
-optional fourth) segment is the swallowed `1_GCCV_3W` commission row** and must be recovered
-into 3-wheeler rules — otherwise goods 3-wheelers get no rates at all.
+For the `1_GCCV_3W` rows themselves:
 
-After building `col_map`, for EACH `(state, coverage, col)` whose header cell has a trailing
-value, emit a 3-wheeler rule:
-
-- split the header cell on `>`; `parts[0]` = state, `parts[1]` = coverage (`ACT`/`PACK`),
-  `parts[2:]` = the 3W value(s). Skip the cell if there is no `parts[2]` or it is blank.
 - `conditions["number_of_wheels"] = "3W"`. Do NOT set `conditions["gvw"]` — the goods
-  3-wheeler is all-GVW (never weight-graded).
-- `coverage_type_text` = the coverage token verbatim (`ACT` → third-party, `PACK` →
-  comprehensive; the transformer maps these).
-- `product_name = "Commercial Vehicle"`.
-- `state_text` = the state group (`AP/TS`, `MH/GA`, `GJ`, …) verbatim — the transformer
-  expands the slash-grouped codes.
-- **Fuel split — align each trailing value to its SUBCLASS-label segment.** Split the merged
-  SUBCLASS header cell on `>` to get the subclass segments (`["1_GCCV_3W", "1_GCCV_3W[Electric]"]`). The i-th trailing value `parts[2 + i]` belongs to the i-th
-  subclass segment — copy that segment **verbatim** into `conditions["vehicle_sub_class"]`:
-  - one trailing value (`> v`) → ONE rule, `conditions["vehicle_sub_class"] = "1_GCCV_3W"`,
-    all fuel types (leave `fuel_type` unset), `commission_value = to_pct(v)`.
-  - two trailing values (`> v_base > v_elec`) → emit TWO rules:
-    - base: `conditions["vehicle_sub_class"] = "1_GCCV_3W"`,
-      `conditions["fuel_type"] = "Petrol, Diesel, CNG, LPG"`, value `v_base`.
-    - electric: `conditions["vehicle_sub_class"] = "1_GCCV_3W[Electric]"`,
-      `conditions["fuel_type"] = "Electric"`, value `v_elec`.
+  3-wheeler is all-GVW (never weight-graded), and `parse_gvw_range("1_GCCV_3W")` is empty.
+- Keep the sub-class label verbatim in `conditions["vehicle_sub_class"]`.
+- `[Electric]` is handled like every other CV `[Electric]` sibling: strip it from the label
+  before sub-class extraction and set `conditions["fuel_type"] = "Electric"`. **The
+  `[Electric]` suffix on the sub-class is MANDATORY, not optional decoration** — it is the
+  marker the transformer's deterministic `[Electric]` backstop reads to recover
+  `fuel_type` if this codegen ever omits the field, so the electric 3W deal is never
+  silently collapsed into its base twin. Emit BOTH the suffix AND `fuel_type` — do not
+  rely on either alone.
+- The electric row must reach the SAME state coverage as its base twin. Its rates are equal
+  to the base row's for most states; equal rates are real data, never a duplicate to drop.
 - Attach the same CPA `conditional_deduction` qualifying clause you attach to every other CV
   rule (see "Chola — CPA deduction footnote"); 3-wheeler without-CPA is deducted too.
-- Skip `0` / `0%` / empty trailing values.
-
-The `[Electric]` token in the merged SUBCLASS label (`1_GCCV_3W > 1_GCCV_3W[Electric]`) is
-the reason a cell can carry two trailing values — it is NOT a state or coverage column.
-**The `[Electric]` suffix on the electric row's `vehicle_sub_class` is MANDATORY, not
-optional decoration**: it is the marker the transformer's deterministic `[Electric]` backstop
-reads to recover `fuel_type="Electric"` if this codegen ever omits the `fuel_type` field, so
-the electric 3W deal is never silently collapsed into its base twin. Emit BOTH the `[Electric]`
-sub-class suffix AND `fuel_type="Electric"` on the electric row — do not rely on either alone.
-
-**CRITICAL codegen shape — do NOT append trailing to every data row.** The trailing
-`parts[2:]` of each HEADER cell belongs to the ONE merged `1_GCCV_3W` row, not to the
-positional weight-band data rows below. Emit the 3-wheeler rules in a SEPARATE loop over the
-header's `col_map` (once per state×coverage, and once MORE per state×coverage that carries an
-electric 4th segment), each with `conditions["number_of_wheels"]="3W"`, NO gvw, and
-`vehicle_sub_class` set to the matching SUBCLASS segment (`"1_GCCV_3W"` for the base value,
-`"1_GCCV_3W[Electric]"` for the electric value). Then run
-the normal per-data-row loop using ONLY `row[col_idx]` (never `vals.extend(trailing)`) — mixing
-the header's 3W values into every weight-band row misattributes rates and inflates the rule
-count several-fold.
-
-**Only recover the merged 3W header for the GCCV table** (`product_type == "GCV"`). Every
-table reuses the same copy-pasted header template, so the trailing `1_GCCV_3W` values also
-appear in the `PCCV < 6` / `PCCV > 6` / `MSV` headers — but there they are stale duplicates,
-NOT real data. Skip the trailing-value 3W emission for any non-GCCV table (otherwise goods
-3-wheelers leak into Buses / MISC-D as `number_of_wheels=3W` rules with no sub-class).
 
 Passenger 3-wheelers — the `1_3W_AUTO` / `1_3W_AUTO[Electric]` rows under "PCCV < 6" — appear
 as PROPER positional data rows (not merged into the header). Parse them with the normal

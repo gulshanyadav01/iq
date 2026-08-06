@@ -22,13 +22,21 @@ from commission_intake.models import (
 )
 
 
-def _result(cics_doc=None, errors=None, sheet_pass_results=None):
+def _result(
+    cics_doc=None,
+    errors=None,
+    sheet_pass_results=None,
+    validation_issues=None,
+    notices=None,
+):
     return SimpleNamespace(
         cics_doc=cics_doc
         if cics_doc is not None
         else {"provider": {"provider_id": "FG"}},
         warnings=[],
+        notices=notices or [],
         errors=errors or [],
+        validation_issues=validation_issues or [],
         duration=1.5,
         sheet_results=[{"sheet": "Grid", "status": "success"}],
         sheet_pass_results=sheet_pass_results
@@ -104,6 +112,43 @@ class ShouldCacheTests(TestCase):
         spr = [{"pass_number": 3, "result": {}, "status": "failed"}]
         self.assertFalse(cics_cache.should_cache(_result(sheet_pass_results=spr)))
 
+    def test_high_validation_issue_not_cached(self):
+        # PipelineResult.errors holds pipeline exceptions, not validator
+        # findings — a HIGH validator issue (e.g. a Chola rule with no
+        # mandatory vehicle_sub_class) must block the pin on its own.
+        from cins.validators.schema_validator import Severity, ValidationIssue
+
+        issue = ValidationIssue(
+            severity=Severity.HIGH,
+            message="vehicle_sub_class is mandatory but missing",
+            field_path="products[].commission_rules[]",
+            category="Chola Product Hierarchy",
+        )
+        self.assertFalse(cics_cache.should_cache(_result(validation_issues=[issue])))
+
+    def test_critical_validation_issue_dict_shaped_not_cached(self):
+        self.assertFalse(
+            cics_cache.should_cache(
+                _result(validation_issues=[{"severity": "CRITICAL", "message": "x"}])
+            )
+        )
+
+    def test_medium_validation_issue_still_cached(self):
+        from cins.validators.schema_validator import Severity, ValidationIssue
+
+        issue = ValidationIssue(
+            severity=Severity.MEDIUM,
+            message="warning only",
+            field_path="products[]",
+            category="Chola Product Hierarchy",
+        )
+        self.assertTrue(cics_cache.should_cache(_result(validation_issues=[issue])))
+
+    def test_result_without_validation_issues_attribute_still_cached(self):
+        result = _result()
+        del result.validation_issues
+        self.assertTrue(cics_cache.should_cache(result))
+
 
 class StoreLookupRepopulateTests(TestCase):
     def setUp(self):
@@ -128,6 +173,44 @@ class StoreLookupRepopulateTests(TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row.pipeline_version, cics_cache.CICS_PIPELINE_VERSION)
         self.assertEqual(row.provider_id, "FG")
+
+    def test_notices_survive_store_and_repopulate(self):
+        # A cache hit must replay the warning/notice split, or the UI banner
+        # differs between a fresh run and a cached one.
+        from commission_intake.tasks import _repopulate_from_cache
+
+        cics_cache.store(
+            cache_key="k3",
+            content_hash="abc",
+            indexer_version="1.5",
+            prompt_version_hash="phash",
+            llm_provider="gemini",
+            llm_model="gemini-2.5-pro",
+            result=_result(notices=["Boundary bump cc_start_range 1000 -> 1001"]),
+            provider_id="FG",
+        )
+        row = cics_cache.lookup("k3")
+        self.assertEqual(row.notices, ["Boundary bump cc_start_range 1000 -> 1001"])
+
+        _repopulate_from_cache(self.doc, row)
+        cics = CICSResult.objects.get(document=self.doc)
+        self.assertEqual(cics.notices, ["Boundary bump cc_start_range 1000 -> 1001"])
+        self.assertEqual(cics.warnings, [])
+
+    def test_repopulate_tolerates_pre_migration_row_without_notices(self):
+        from commission_intake.tasks import _repopulate_from_cache
+
+        cached = CicsOutputCache.objects.create(
+            cache_key="k4",
+            content_hash="abc",
+            indexer_version="1.5",
+            prompt_version_hash="phash",
+            pipeline_version=cics_cache.CICS_PIPELINE_VERSION,
+            cics_doc={"provider": {"provider_id": "FG"}},
+            provider_id="FG",
+        )
+        _repopulate_from_cache(self.doc, cached)
+        self.assertEqual(CICSResult.objects.get(document=self.doc).notices, [])
 
     def test_repopulate_rebuilds_rows_without_llm(self):
         from commission_intake.tasks import _repopulate_from_cache

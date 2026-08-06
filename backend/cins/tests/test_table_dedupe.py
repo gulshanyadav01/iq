@@ -16,6 +16,7 @@ from unittest import TestCase
 
 from cins.processors.content.content_cleaning import (
     _dedupe_overlapping_table_ranges,
+    _split_side_by_side_tables,
 )
 
 
@@ -128,7 +129,7 @@ class PlainOverlapClipTests(TestCase):
 
     def test_clip_end_row_to_next_start_minus_one(self):
         records = [
-            _rec(1, "GCCV", 4, 50),       # over-extended past next table
+            _rec(1, "GCCV", 4, 50),  # over-extended past next table
             _rec(2, "PCCV", 30, 60),
         ]
 
@@ -189,3 +190,101 @@ class CombinedShapeTests(TestCase):
         self.assertEqual(records[1]["data_ranges"], [[4, 6], [12, 16]])
         self.assertEqual(records[2]["data_ranges"], [[4, 6], [17, 21]])
         self.assertEqual(records[3]["data_ranges"], [[22, 35]])
+
+
+class SideBySideTableSplitTests(TestCase):
+    """`_split_side_by_side_tables`: one detected table holding two grids that
+    sit in the SAME rows but different column bands.
+
+    Chola's Two-Wheeler sheet is 57 columns wide: columns 2-41 are one grid and
+    42-56 another, each with its own State/Type key columns. Pass 0C reports one
+    table, so the second grid's make-group headers (blank label cells) read as
+    continuations of the first — every rule from them loses vehicle_make, and
+    distinct columns collapse onto identical conditions with different payouts
+    (54 CRITICAL duplicates on doc 733711bd).
+    """
+
+    def _lines(self, header: str, rows: int = 3) -> list:
+        return [header] + [",".join(["x"] * 60) for _ in range(rows)]
+
+    def test_repeated_key_signature_splits_into_two_blocks(self):
+        header = (
+            ",,State (RTO) > AP,Type > NEW,Hero OEM > 150cc > 0.425,"
+            "Hero OEM > SCOOTER > 0.425,,"
+            "State > AP,Type > NEW,All Electric Make > 7 KW Bike > 0.17"
+        )
+        records = [_rec(1, "Commission Grid", 1, 4)]
+
+        note = _split_side_by_side_tables(records, self._lines(header))
+
+        self.assertIn("side-by-side", note)
+        self.assertEqual(len(records), 2)
+        self.assertEqual((records[0]["start_col"], records[0]["end_col"]), (3, 7))
+        self.assertEqual(records[1]["start_col"], 8)
+        self.assertEqual(records[0]["table_name"], "Commission Grid (block 1)")
+        self.assertEqual(records[1]["table_name"], "Commission Grid (block 2)")
+
+    def test_block_indices_stay_unique(self):
+        header = ",State,Type,A,,,State,Type,B"
+        records = [_rec(1, "G1", 1, 4), _rec(7, "G2", 5, 8, table_type="notes")]
+
+        _split_side_by_side_tables(records, self._lines(header))
+
+        indices = [r["table_index"] for r in records]
+        self.assertEqual(len(indices), len(set(indices)), indices)
+
+    def test_row_ranges_are_untouched(self):
+        header = ",State,Type,A,,,State,Type,B"
+        records = [_rec(1, "G", 4, 20)]
+        records[0]["data_ranges"] = [[4, 6], [12, 20]]
+
+        _split_side_by_side_tables(records, ["", "", "", header] + ["x"] * 20)
+
+        for rec in records:
+            self.assertEqual(rec["data_ranges"], [[4, 6], [12, 20]])
+
+    def test_single_grid_is_not_split(self):
+        header = ",State,Type,Hero OEM > 150cc,Hero OEM > SCOOTER"
+        records = [_rec(1, "G", 1, 4)]
+
+        note = _split_side_by_side_tables(records, self._lines(header))
+
+        self.assertEqual(note, "")
+        self.assertEqual(len(records), 1)
+        self.assertIsNone(records[0]["start_col"])
+
+    def test_adjacent_repeat_does_not_split(self):
+        # A legitimately doubled label pair must not be read as a new block.
+        header = ",State,Type,State,Type,A,B"
+        records = [_rec(1, "G", 1, 4)]
+
+        note = _split_side_by_side_tables(records, self._lines(header))
+
+        self.assertEqual(note, "")
+        self.assertEqual(len(records), 1)
+
+    def test_non_commission_tables_are_never_split(self):
+        header = ",State,Type,A,,,State,Type,B"
+        for ttype in ("master", "notes"):
+            with self.subTest(table_type=ttype):
+                records = [_rec(1, "T", 1, 4, table_type=ttype)]
+                note = _split_side_by_side_tables(records, self._lines(header))
+                self.assertEqual(note, "")
+                self.assertEqual(len(records), 1)
+
+    def test_three_blocks_split_cleanly(self):
+        header = ",State,Type,A,,,State,Type,B,,,State,Type,C"
+        records = [_rec(1, "G", 1, 4)]
+
+        _split_side_by_side_tables(records, self._lines(header))
+
+        self.assertEqual(len(records), 3)
+        starts = [r["start_col"] for r in records]
+        self.assertEqual(starts, sorted(starts))
+        self.assertEqual(len(set(starts)), 3)
+
+    def test_malformed_header_is_left_alone(self):
+        records = [_rec(1, "G", 1, 4)]
+        note = _split_side_by_side_tables(records, ['"unterminated,,,'])
+        self.assertEqual(note, "")
+        self.assertEqual(len(records), 1)
