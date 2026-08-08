@@ -19,23 +19,21 @@ class PolicyExtractionRequest(TimeStampedUUIDModel):
         FAILED = "failed", "Failed"
 
     status = models.CharField(
-        max_length=20,
-        choices=Status.choices,
-        default=Status.INITIATED,
-        db_index=True
+        max_length=20, choices=Status.choices, default=Status.INITIATED, db_index=True
     )
     policy_extraction_id = models.CharField(
         max_length=32,
         unique=True,
         default=_generate_policy_extraction_id,
         editable=False,
-        db_index=True
+        db_index=True,
     )
     original_filename = models.CharField(max_length=255)
     source_url = models.URLField(null=True, blank=True)
     metadata = models.JSONField(null=True, blank=True)
     result = models.JSONField(null=True, blank=True)
     error = models.TextField(null=True, blank=True)
+    callback_response = models.JSONField(null=True, blank=True)
 
     class Meta:
         ordering = ["-created_at"]
