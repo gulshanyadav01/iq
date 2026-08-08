@@ -13,6 +13,11 @@ logger = logging.getLogger(__name__)
 
 POLICY_EXTRACT_QUEUE = "policy_extract"
 
+# Cap the callback body we persist. The callback receiver is a trust boundary, so
+# an oversized (or hostile/MITM'd) response must not bloat the row or freeze the
+# operator's browser when the body is rendered in the UI.
+_MAX_CALLBACK_BODY_CHARS = 64 * 1024
+
 
 def _fire_callback(callback_url: str, req, event_type: str) -> None:
     """POST extraction event to callback URL. Failures are logged but don't block task completion."""
@@ -24,6 +29,8 @@ def _fire_callback(callback_url: str, req, event_type: str) -> None:
         entity_payload["result"] = {
             "extracted_fields": entity_payload["result"].get("extracted_fields")
         }
+    # Don't echo a prior callback response back to the receiver
+    entity_payload.pop("callback_response", None)
     payload = {
         "id": req.policy_extraction_id,
         "event_type": event_type,
@@ -31,11 +38,42 @@ def _fire_callback(callback_url: str, req, event_type: str) -> None:
         "entity_payload": entity_payload,
         "event_created_at": datetime.now(timezone.utc).isoformat(),
     }
+
+    callback_response = {
+        "status_code": None,
+        "body": None,
+        "ok": False,
+        "error": None,
+        "received_at": None,
+    }
     try:
         resp = requests.post(callback_url, json=payload, timeout=30)
+        callback_response["status_code"] = resp.status_code
+        text = resp.text or ""
+        if len(text) > _MAX_CALLBACK_BODY_CHARS:
+            callback_response["body"] = text[:_MAX_CALLBACK_BODY_CHARS] + "…[truncated]"
+            callback_response["body_truncated"] = True
+        else:
+            try:
+                # parse_constant neutralizes NaN/Infinity, which Postgres jsonb rejects.
+                callback_response["body"] = resp.json(
+                    parse_constant=lambda _const: None
+                )
+            except ValueError:
+                callback_response["body"] = text
         resp.raise_for_status()
+        callback_response["ok"] = True
     except Exception as exc:
+        callback_response["error"] = str(exc)
         logger.warning("Callback to %s failed: %s", callback_url, exc)
+
+    # Stamp when the attempt concluded (after the response returned / failed).
+    callback_response["received_at"] = datetime.now(timezone.utc).isoformat()
+    try:
+        req.callback_response = callback_response
+        req.save(update_fields=["callback_response", "updated_at"])
+    except Exception as exc:
+        logger.warning("Failed to persist callback response for %s: %s", req.pk, exc)
 
 
 @shared_task(bind=True, max_retries=3, queue=POLICY_EXTRACT_QUEUE)
@@ -81,8 +119,9 @@ def _run_parser(extraction_request_id: str):
                 tmp.write(resp.content)
 
             # Save downloaded file to MinIO and update source_url
-            import uuid
-            storage_key = f"policy_extractions/originals/{req.id}/{req.original_filename}"
+            storage_key = (
+                f"policy_extractions/originals/{req.id}/{req.original_filename}"
+            )
             with open(tmp_path, "rb") as f:
                 default_storage.save(storage_key, f)
             req.source_url = storage_key
@@ -94,8 +133,7 @@ def _run_parser(extraction_request_id: str):
         try:
             # Run parser — saves .md and _raw.json into intermediate_dir
             parser = MineruGeminiParser(
-                api_key=os.getenv("GOOGLE_API_KEY"),
-                intermediate_dir=intermediate_dir
+                api_key=os.getenv("GOOGLE_API_KEY"), intermediate_dir=intermediate_dir
             )
             result = parser.parse_pdf(tmp_path, save_intermediate=True)
 
@@ -103,7 +141,9 @@ def _run_parser(extraction_request_id: str):
             intermediate_paths = {}
             for fname in os.listdir(intermediate_dir):
                 local_path = os.path.join(intermediate_dir, fname)
-                storage_key = f"policy_extractions/intermediates/{extraction_request_id}/{fname}"
+                storage_key = (
+                    f"policy_extractions/intermediates/{extraction_request_id}/{fname}"
+                )
                 with open(local_path, "rb") as f:
                     default_storage.save(storage_key, f)
                 intermediate_paths[fname] = storage_key
@@ -129,7 +169,7 @@ def _run_parser(extraction_request_id: str):
             req.error = str(exc)
             req.save(update_fields=["status", "error", "updated_at"])
 
-            callback_url = getattr(settings, 'POLICY_EXTRACT_CALLBACK_URL', '')
+            callback_url = getattr(settings, "POLICY_EXTRACT_CALLBACK_URL", "")
             if callback_url:
                 _fire_callback(callback_url, req, "policy_extract.failed")
         except Exception:
@@ -147,7 +187,7 @@ def _set_completed_status(self, extraction_request_id: str):
         req.status = PolicyExtractionRequest.Status.COMPLETED
         req.save(update_fields=["status", "updated_at"])
 
-        callback_url = getattr(settings, 'POLICY_EXTRACT_CALLBACK_URL', '')
+        callback_url = getattr(settings, "POLICY_EXTRACT_CALLBACK_URL", "")
         if callback_url:
             _fire_callback(callback_url, req, "policy_extract.completed")
 

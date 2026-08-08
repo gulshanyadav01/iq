@@ -41,8 +41,9 @@ class PolicyExtractionRequestLinkCreateSerializer(serializers.Serializer):
     ipAddress = serializers.CharField(required=False, allow_null=True)
 
     def create(self, validated_data):
-        metadata = {k: v for k, v in validated_data.items()
-                    if k not in ("policy_identifier",)}
+        metadata = {
+            k: v for k, v in validated_data.items() if k not in ("policy_identifier",)
+        }
         return PolicyExtractionRequest.objects.create(
             original_filename=validated_data["policy_identifier"],
             status=PolicyExtractionRequest.Status.INITIATED,
@@ -62,6 +63,7 @@ class PolicyExtractionRequestSerializer(serializers.ModelSerializer):
             "metadata",
             "result",
             "error",
+            "callback_response",
             "created_at",
             "updated_at",
         ]
@@ -73,19 +75,24 @@ class PolicyExtractionRequestSerializer(serializers.ModelSerializer):
             "source_url",
             "result",
             "error",
+            "callback_response",
             "created_at",
             "updated_at",
         ]
 
 
 class PolicyExtractResultSerializer(serializers.Serializer):
-    extracted_fields = serializers.DictField(help_text="Structured fields extracted from the policy document.")
+    extracted_fields = serializers.DictField(
+        help_text="Structured fields extracted from the policy document."
+    )
 
 
 class PolicyExtractCallbackEntitySerializer(serializers.Serializer):
     id = serializers.UUIDField()
     policy_extraction_id = serializers.CharField()
-    status = serializers.ChoiceField(choices=["initiated", "processing", "completed", "failed"])
+    status = serializers.ChoiceField(
+        choices=["initiated", "processing", "completed", "failed"]
+    )
     original_filename = serializers.CharField()
     source_url = serializers.CharField(allow_null=True)
     metadata = serializers.DictField(allow_null=True)
@@ -96,7 +103,9 @@ class PolicyExtractCallbackEntitySerializer(serializers.Serializer):
 
 
 class PolicyExtractCallbackSerializer(serializers.Serializer):
-    id = serializers.CharField(help_text="policy_extraction_id of the request (e.g. pext_...).")
+    id = serializers.CharField(
+        help_text="policy_extraction_id of the request (e.g. pext_...)."
+    )
     event_type = serializers.ChoiceField(
         choices=["policy_extract.completed", "policy_extract.failed"],
         help_text="Type of event that triggered this callback.",
