@@ -21,6 +21,7 @@ from cins.processors.core.cpa_split import (
     derive_applied_on,
     drop_mirrored_third_party,
     materialize_cpa_split,
+    _mirror_signature,
 )
 
 
@@ -319,3 +320,52 @@ class MirrorDedupTests(TestCase):
             if r["conditions"]["policy_type"] == ["third-party"]
         ]
         self.assertEqual(len(tp), 0)
+
+
+class MirrorSignatureNcbTests(TestCase):
+    """The NCB band is part of a rule's grid slot.
+
+    `_mirror_signature` feeds `drop_mirrored_third_party`, which DELETES rules.
+    Before `ncb_start_range`/`ncb_end_range` joined `_MIRROR_DIM_KEYS`, a base
+    tier and its ">25%" twin — identical in every other dimension, which is the
+    whole point of an NCB ladder — collapsed onto one signature. Measured on a
+    real Chola document: 101 signature groups masked more than one distinct NCB
+    band. That let a third-party rule mirror a comprehensive rule it does not
+    duplicate, on a path whose only action is deletion.
+    """
+
+    def test_ncb_tiers_have_distinct_signatures(self):
+        base = _cov_rule("c1", "comprehensive", 42.5)
+        base["conditions"].update(ncb=False, ncb_start_range=0, ncb_end_range=24)
+        marked = _cov_rule("c2", "comprehensive", 42.5)
+        marked["conditions"].update(ncb=True, ncb_start_range=25, ncb_end_range=100)
+        # Same dims, same payout — the band is the ONLY difference.
+        self.assertNotEqual(_mirror_signature(base), _mirror_signature(marked))
+
+    def test_third_party_not_dropped_against_ncb_tiered_comprehensive(self):
+        # The ACT rate is statutory: it carries no NCB dimension and its value
+        # coincides with the comprehensive tier's. Without the band in the
+        # signature this TP rule mirrors, and the whole TP set is deleted.
+        comp = _cov_rule("c1", "comprehensive", 42.5)
+        comp["conditions"].update(ncb=True, ncb_start_range=25, ncb_end_range=100)
+        tp = _cov_rule("t1", "third-party", 42.5)
+        doc = _cov_doc([comp, tp], product_name="Private Car")
+        drop_mirrored_third_party(doc)
+        kept = [
+            r
+            for r in doc["products"][0]["commission_rules"]
+            if r["conditions"]["policy_type"] == ["third-party"]
+        ]
+        self.assertEqual(len(kept), 1, "genuine third-party rate was deleted")
+
+    def test_band_absent_on_both_sides_still_dedupes(self):
+        # Regression guard for the fix itself: documents with no NCB dimension
+        # at all must keep the pre-existing fabricated-TP cleanup behaviour.
+        doc = _cov_doc(
+            [
+                _cov_rule("c1", "comprehensive", 42.5),
+                _cov_rule("t1", "third-party", 42.5),
+            ]
+        )
+        drop_mirrored_third_party(doc)
+        self.assertEqual(len(doc["products"][0]["commission_rules"]), 1)
