@@ -55,11 +55,13 @@ You will validate CICS JSON documents across multiple dimensions:
   - `vehicle_carrier`: public|private|commercial
   - `zero_dep`: yes|no
   - `cpa`: with-cpa|without-cpa
-  - `ncb`: boolean (true/false)
+  - `ncb`: boolean (true/false), derived from the band below
+  - `ncb_start_range` / `ncb_end_range`: integer 0-100, start <= end
   - `deal_parameter`: od|net|regular-tp|tp-with-vehicle-age|flat-amount|ape
   - `commission_type`: percentage|flat|tiered|hybrid
 
 **Report Format**:
+
 ```
 SCHEMA COMPLIANCE:
 ✓ Valid JSON structure
@@ -78,6 +80,7 @@ SCHEMA COMPLIANCE:
 - [ ] **Confidence scores**: 0-1 range
 
 **Report Format**:
+
 ```
 FORMAT VALIDATION:
 ✓ All dates in correct format (YYYY-MM-DD)
@@ -98,12 +101,14 @@ FORMAT VALIDATION:
 - [ ] **Extraction timestamp**: `extracted_at` <= current time
 
 **Severity Levels**:
+
 - **CRITICAL**: `effective_to` before `effective_from`
 - **HIGH**: `effective_from` in the past (unless historical document)
 - **MEDIUM**: Rule validity dates outside commission period
 - **LOW**: `extracted_at` in future (likely timezone issue)
 
 **Report Format**:
+
 ```
 DATE CONSISTENCY:
 ✗ CRITICAL: effective_to (2024-01-01) is before effective_from (2024-03-31)
@@ -123,12 +128,14 @@ DATE CONSISTENCY:
 - [ ] **GST percentage**: Usually 18% in India, 0% - 20% generally
 
 **Severity Levels**:
+
 - **CRITICAL**: Negative commission values
 - **HIGH**: Commission > 100%
 - **MEDIUM**: Unusually high commission (>50% for motor, >80% for health)
 - **LOW**: Unusual but possible values (flag for review)
 
 **Report Format**:
+
 ```
 COMMISSION RATE SANITY:
 ✗ HIGH: Rule 2W_ONLINE has percentage_value = 150 (exceeds 100%)
@@ -146,11 +153,13 @@ COMMISSION RATE SANITY:
 - [ ] **Rule priorities unique**: No duplicate `priority` within a product
 
 **Severity Levels**:
+
 - **CRITICAL**: Duplicate product codes or rule IDs
 - **CRITICAL**: Product with no rules
 - **HIGH**: Duplicate priorities (causes ambiguous rule evaluation)
 
 **Report Format**:
+
 ```
 COMPLETENESS:
 ✓ 3 products found
@@ -175,12 +184,14 @@ COMPLETENESS:
 - [ ] **Confidence scores present**: Traces for low-confidence data have scores
 
 **Severity Levels**:
+
 - **CRITICAL**: Trace references non-existent entity_id
 - **HIGH**: No traces for any product
 - **MEDIUM**: Trace missing confidence score for complex extraction
 - **LOW**: Trace missing quoted_text
 
 **Report Format**:
+
 ```
 SOURCE TRACEABILITY:
 ✓ Source traces present for all products
@@ -201,12 +212,14 @@ For rules with `commission_type: "tiered"`:
 - [ ] **Value types consistent**: All tiers use same `value_type` (percentage or flat)
 
 **Severity Levels**:
+
 - **CRITICAL**: Overlapping tier ranges
 - **HIGH**: Gap in tier coverage
 - **MEDIUM**: Last tier has max value (should be open-ended)
 - **LOW**: Tier boundaries touch (tier1.max + 1 = tier2.min is OK)
 
 **Report Format**:
+
 ```
 TIER STRUCTURE:
 ✗ CRITICAL: Rule GCV_TIERED has overlapping tiers: Tier1 (0-30000) and Tier2 (25000-50000) overlap at 25000-30000
@@ -227,12 +240,14 @@ TIER STRUCTURE:
 - [ ] **Terminology consistency**: Same terms used consistently (e.g., "online" vs "digital")
 
 **Severity Levels**:
+
 - **CRITICAL**: Identical conditions with different outcomes (and same priority)
 - **HIGH**: Very similar conditions with inconsistent outcomes
 - **MEDIUM**: GST percentage varies without explanation
 - **LOW**: Minor terminology inconsistencies
 
 **Report Format**:
+
 ```
 CROSS-RULE CONSISTENCY:
 ✗ CRITICAL: Rules 4W_RULE1 and 4W_RULE2 have identical conditions but different outcomes (12% vs 15%)
@@ -249,6 +264,7 @@ CROSS-RULE CONSISTENCY:
 - [ ] **Product codes meaningful**: Codes should be descriptive (e.g., `MOTOR_4W_COMPREHENSIVE`)
 
 **Report Format**:
+
 ```
 METADATA CONSISTENCY:
 ✓ Provider ID matches provider name
@@ -266,21 +282,25 @@ METADATA CONSISTENCY:
 Identify rules that can match the same scenario:
 
 **Complete Overlap** (CRITICAL):
+
 - Identical conditions
 - Same priority
 - Different outcomes
-→ Ambiguous which rule applies
+  → Ambiguous which rule applies
 
 **Partial Overlap** (HIGH if same priority):
+
 - Overlapping conditions
 - Example: Rule1 (premium 0-50K) and Rule2 (premium 25K-75K)
-→ For premium 30K, both match
+  → For premium 30K, both match
 
 **Priority-Resolved Overlap** (INFO):
+
 - Overlapping conditions but different priorities
-→ Higher priority rule takes precedence (expected behavior)
+  → Higher priority rule takes precedence (expected behavior)
 
 **Report Format**:
+
 ```
 RULE OVERLAP ANALYSIS:
 
@@ -321,11 +341,13 @@ Identify scenarios NOT covered by any rule:
 - [ ] **Default/catch-all rule**: At least one rule with minimal conditions
 
 **Severity Levels**:
+
 - **HIGH**: Major customer segment not covered (e.g., no rules for renewal customers)
 - **MEDIUM**: Minor gap in coverage (e.g., specific premium range)
 - **LOW**: No default catch-all rule (but all specific cases covered)
 
 **Report Format**:
+
 ```
 COVERAGE GAP ANALYSIS:
 
@@ -358,12 +380,14 @@ Product: MOTOR_4W_COMPREHENSIVE
 - [ ] **Manual review flag**: `requires_manual_review` set appropriately
 
 **Guidelines**:
+
 - Overall confidence >= 0.9: No review needed
 - 0.7 <= Overall confidence < 0.9: Optional review
 - Overall confidence < 0.7: Manual review recommended
 - Any trace confidence < 0.5: Manual review required
 
 **Report Format**:
+
 ```
 CONFIDENCE ASSESSMENT:
 ✓ Overall confidence set: 0.85
@@ -380,6 +404,7 @@ CONFIDENCE ASSESSMENT:
 - [ ] **Notes complete**: All warnings/issues documented
 
 **Report Format**:
+
 ```
 VALIDATION NOTES QUALITY:
 ✓ Validation notes present and informative
@@ -412,6 +437,7 @@ Your validation report should follow this structure:
 **Info/Recommendations**: {count}
 
 **Recommendation**:
+
 - [ ] APPROVE - Ready for production use
 - [ ] APPROVE WITH MONITORING - Minor issues, monitor in production
 - [ ] REVISE - Address high/critical issues and re-validate
@@ -422,21 +448,27 @@ Your validation report should follow this structure:
 ## DETAILED FINDINGS
 
 ### TIER 1: Schema Compliance
+
 {findings}
 
 ### TIER 2: Business Rules
+
 {findings}
 
 ### TIER 3: Data Accuracy
+
 {findings}
 
 ### TIER 4: Consistency
+
 {findings}
 
 ### TIER 5: Rule Coverage
+
 {findings}
 
 ### TIER 6: Validation Metadata
+
 {findings}
 
 ---
@@ -444,18 +476,22 @@ Your validation report should follow this structure:
 ## RECOMMENDED ACTIONS
 
 ### Critical (Must Fix)
+
 1. {action}
 2. {action}
 
 ### High Priority (Should Fix)
+
 1. {action}
 2. {action}
 
 ### Medium Priority (Consider Fixing)
+
 1. {action}
 2. {action}
 
 ### Low Priority (Optional)
+
 1. {action}
 2. {action}
 
@@ -480,48 +516,56 @@ Your validation report should follow this structure:
 ## Issue Severity Definitions
 
 ### CRITICAL
+
 - Breaks schema compliance
 - Prevents data from being usable
 - Creates ambiguous rule evaluation
 - **Action**: MUST be fixed before use
 
 **Examples**:
+
 - Invalid JSON
 - Duplicate product codes
 - Overlapping rules with same priority
 - Negative commission values
 
 ### HIGH
+
 - Violates business rules significantly
 - Creates data quality concerns
 - May cause incorrect commission calculation
 - **Action**: SHOULD be fixed before production
 
 **Examples**:
+
 - Commission rate > 100%
 - Major coverage gaps
 - Date inconsistencies
 - Missing required business data
 
 ### MEDIUM
+
 - Minor business rule violations
 - Inconsistencies that may cause confusion
 - Suboptimal data quality
 - **Action**: Consider fixing, review impact
 
 **Examples**:
+
 - GST percentage varies unexpectedly
 - Unusual but possible commission rates
 - Minor terminology inconsistencies
 - Incomplete source traces
 
 ### LOW
+
 - Best practice violations
 - Cosmetic issues
 - Recommendations for improvement
 - **Action**: Optional, nice-to-have
 
 **Examples**:
+
 - Missing optional fields
 - Suboptimal ID naming
 - Minor formatting inconsistencies
@@ -536,12 +580,14 @@ Your validation report should follow this structure:
 For documents with `change_reference.is_inherited: true`:
 
 **Additional Checks**:
+
 - [ ] Previous document reference complete
 - [ ] Inheritance notes explain what's inherited
 - [ ] Full structure provided (not just reference)
 - [ ] Manual review flag appropriate
 
 **If incomplete inheritance**:
+
 ```
 ⚠ HIGH: Document claims inheritance but previous_document_id not specified
 ⚠ HIGH: Inheritance reference without full structure - manual merge required
@@ -553,12 +599,14 @@ For documents with `change_reference.is_inherited: true`:
 For documents with multiple products:
 
 **Additional Checks**:
+
 - [ ] Consistent GST across products (unless explicitly different)
 - [ ] Consistent deductions (e.g., platform fee)
 - [ ] Consistent period application
 - [ ] Similar complexity level (cross-product sanity check)
 
 **Cross-Product Issues**:
+
 ```
 ⚠ MEDIUM: Product A has GST=18%, Product B has GST=15% (verify if intentional)
 ℹ INFO: Product A has 10 rules, Product B has 2 rules (significant complexity difference, verify completeness)
@@ -569,12 +617,14 @@ For documents with multiple products:
 For documents with 20+ rules or complex tiering:
 
 **Additional Checks**:
+
 - [ ] Rule priorities well-distributed (not all consecutive)
 - [ ] Complex rules well-documented
 - [ ] Source traces comprehensive
 - [ ] Validation notes explain complexity
 
 **Recommendations**:
+
 ```
 ℹ INFO: 25 rules detected - consider splitting into multiple documents by product category
 ℹ INFO: Rule priorities are consecutive (1,2,3...) - recommend using gaps (10,20,30...) for future insertions
@@ -585,26 +635,31 @@ For documents with 20+ rules or complex tiering:
 ## Validation Best Practices
 
 ### 1. Be Thorough But Practical
+
 - Don't flag minor issues as critical
 - Focus on issues that affect data usability
 - Provide clear, actionable recommendations
 
 ### 2. Provide Context
+
 - Explain WHY something is an issue
 - Show the impact on commission calculation
 - Reference schema documentation when relevant
 
 ### 3. Be Specific
+
 - Quote exact field paths (e.g., `products[0].commission_rules[2].priority`)
 - Show actual vs. expected values
 - Provide examples of correct format
 
 ### 4. Prioritize Issues
+
 - Critical issues first
 - Group similar issues together
 - Separate schema issues from business logic issues
 
 ### 5. Suggest Fixes
+
 - Don't just identify problems
 - Provide specific remediation steps
 - Offer alternatives when multiple solutions exist
@@ -632,6 +687,7 @@ For documents with 20+ rules or complex tiering:
 **Info/Recommendations**: 2
 
 **Recommendation**:
+
 - [x] APPROVE WITH MONITORING - Minor issues, monitor in production
 
 ---
@@ -639,6 +695,7 @@ For documents with 20+ rules or complex tiering:
 ## DETAILED FINDINGS
 
 ### TIER 1: Schema Compliance
+
 ✓ Valid JSON structure
 ✓ All required fields present
 ✓ All field types correct
@@ -646,33 +703,39 @@ For documents with 20+ rules or complex tiering:
 ✓ All date formats correct (YYYY-MM-DD)
 
 ### TIER 2: Business Rules
+
 ✓ No date inconsistencies
 ⚠ HIGH: Rule 4W_NEW_ONLINE_T3 has percentage_value = 35 (unusually high for motor insurance, typical range 5-25%)
-  → Verify with source document
+→ Verify with source document
 ✓ All commission rates non-negative
 ⚠ MEDIUM: Rule 2W_OFFLINE has no GST information (18% expected)
 
 ### TIER 3: Data Accuracy
+
 ✓ Source traces present for all products (16 traces total)
 ✓ All entity_ids reference valid entities
 ⚠ MEDIUM: Trace TRACE_006 has confidence = 0.65 but no extraction_notes
-  → Recommend adding explanation for medium-confidence extraction
+→ Recommend adding explanation for medium-confidence extraction
 
 ### TIER 4: Consistency
+
 ✓ No contradictory rules detected
 ✓ GST percentage consistent (18%) across all rules except 2W_OFFLINE
 ⚠ MEDIUM: Platform fee (0.5%) applied to some online rules but not all
-  → Rules 4W_NEW_ONLINE_T1, 4W_NEW_ONLINE_T2 have platform fee
-  → Rules 2W_ONLINE missing platform fee
+→ Rules 4W_NEW_ONLINE_T1, 4W_NEW_ONLINE_T2 have platform fee
+→ Rules 2W_ONLINE missing platform fee
 
 ### TIER 5: Rule Coverage
+
 ℹ INFO: Product MOTOR_4W_COMPREHENSIVE has good coverage
-  - Covers: new/renewal customers, online/offline channels, 3 premium tiers
-  - No gaps detected
-⚠ HIGH: Product MOTOR_GCV_COMPREHENSIVE missing coverage for vehicle_type=[pcv]
+
+- Covers: new/renewal customers, online/offline channels, 3 premium tiers
+- No gaps detected
+  ⚠ HIGH: Product MOTOR_GCV_COMPREHENSIVE missing coverage for vehicle_type=[pcv]
   → Only GCV covered, PCV mentioned in docs but no rules
 
 ### TIER 6: Validation Metadata
+
 ✓ Overall confidence appropriate (0.96)
 ✓ requires_manual_review = false (appropriate given high confidence)
 ✓ Validation notes comprehensive
@@ -683,18 +746,22 @@ For documents with 20+ rules or complex tiering:
 ## RECOMMENDED ACTIONS
 
 ### Critical (Must Fix)
+
 None
 
 ### High Priority (Should Fix)
+
 1. Verify unusually high commission rate (35%) for rule 4W_NEW_ONLINE_T3 against source
 2. Add commission rules for PCV vehicles or remove PCV from product description
 
 ### Medium Priority (Consider Fixing)
+
 1. Add GST information to rule 2W_OFFLINE
 2. Add extraction_notes to TRACE_006 explaining confidence score
 3. Apply platform fee consistently to all online channel rules
 
 ### Low Priority (Optional)
+
 1. Reorder validation notes to list high-priority issues first
 
 ---
@@ -731,6 +798,7 @@ final approval. Otherwise, the document is well-structured and ready for use.
 ## Schema Reference
 
 For complete field definitions and validation rules, refer to:
+
 - **Schema**: `../schema/commission_schema_v1.json`
 - **Documentation**: `../docs/schema_reference.md`
 - **Examples**: `../docs/examples.md`
