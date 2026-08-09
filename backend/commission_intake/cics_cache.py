@@ -67,7 +67,16 @@ def _env_int(name: str, default: int) -> int:
 # 1.0.1 — Chola vehicle_sub_class made mandatory (transformer backfill +
 #         HIGH validator finding), and CRITICAL/HIGH validator issues now
 #         block the cache write.
-CICS_PIPELINE_VERSION = "1.0.3"
+# 1.1.0 — NCB became a numeric percentage band (ncb_start_range /
+#         ncb_end_range) instead of a boolean hardcoded to the 25% split.
+#         New schema fields, a new label parser, band-aware tier pairing, and
+#         new overlap/validator wiring — every one of those changes the output
+#         for an NCB-bearing document.
+#         NOTE: that release ALSO edited four files under cins/prompts/, which
+#         changes prompt_version_hash and therefore invalidates the cache for
+#         EVERY carrier on its own, independently of this constant. See the
+#         cache-key list in the module docstring above.
+CICS_PIPELINE_VERSION = "1.1.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"
