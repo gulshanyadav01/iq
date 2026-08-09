@@ -16,6 +16,11 @@ class CICSResult(TimeStampedUUIDModel):
     raw_extraction = models.JSONField(null=True, blank=True)
     # Transformation warnings and errors from RawToCICSTransformer
     warnings = models.JSONField(default=list)
+    # Informational audit trail of deliberate normalizations (boundary bumps,
+    # fan-outs, recovered dimensions). Separate from `warnings`, which means
+    # "could not map / lost data" — merging them buried ~180 real failures under
+    # ~870 routine notices on a single CV document.
+    notices = models.JSONField(default=list)
     errors = models.JSONField(default=list)
     duration_seconds = models.FloatField(default=0)
     # Per-sheet breakdown when an Excel workbook is processed sheet-by-sheet

@@ -103,12 +103,14 @@ class DedupeSeatingBoundariesTests(TestCase):
     def test_seating_capacity_shared_boundary(self):
         rules = [
             _make_rule(
-                "R1", 10,
+                "R1",
+                10,
                 seating_capacity_start_range=0,
                 seating_capacity_end_range=18,
             ),
             _make_rule(
-                "R2", 20,
+                "R2",
+                20,
                 seating_capacity_start_range=18,
                 seating_capacity_end_range=36,
             ),
@@ -128,14 +130,18 @@ class DedupeGroupingTests(TestCase):
         # sub-classes — they don't actually collide, so leave both alone.
         rules = [
             _make_rule(
-                "R1", 10,
+                "R1",
+                10,
                 vehicle_sub_class=["tipper"],
-                gvw_start_range=0, gvw_end_range=3500,
+                gvw_start_range=0,
+                gvw_end_range=3500,
             ),
             _make_rule(
-                "R2", 20,
+                "R2",
+                20,
                 vehicle_sub_class=["tanker"],
-                gvw_start_range=3500, gvw_end_range=7500,
+                gvw_start_range=3500,
+                gvw_end_range=7500,
             ),
         ]
         self.transformer._dedupe_range_overlaps(rules)
@@ -145,14 +151,18 @@ class DedupeGroupingTests(TestCase):
     def test_different_policy_type_not_grouped(self):
         rules = [
             _make_rule(
-                "R1", 10,
+                "R1",
+                10,
                 policy_type=["third-party"],
-                gvw_start_range=0, gvw_end_range=3500,
+                gvw_start_range=0,
+                gvw_end_range=3500,
             ),
             _make_rule(
-                "R2", 20,
+                "R2",
+                20,
                 policy_type=["comprehensive"],
-                gvw_start_range=3500, gvw_end_range=7500,
+                gvw_start_range=3500,
+                gvw_end_range=7500,
             ),
         ]
         self.transformer._dedupe_range_overlaps(rules)
@@ -161,16 +171,20 @@ class DedupeGroupingTests(TestCase):
     def test_same_other_conditions_does_group(self):
         rules = [
             _make_rule(
-                "R1", 10,
+                "R1",
+                10,
                 vehicle_sub_class=["tipper"],
                 policy_type=["third-party"],
-                gvw_start_range=0, gvw_end_range=3500,
+                gvw_start_range=0,
+                gvw_end_range=3500,
             ),
             _make_rule(
-                "R2", 20,
+                "R2",
+                20,
                 vehicle_sub_class=["tipper"],
                 policy_type=["third-party"],
-                gvw_start_range=3500, gvw_end_range=7500,
+                gvw_start_range=3500,
+                gvw_end_range=7500,
             ),
         ]
         self.transformer._dedupe_range_overlaps(rules)
@@ -180,18 +194,38 @@ class DedupeGroupingTests(TestCase):
         # Two GVW buckets each replicated across two CC buckets.
         # Each (CC bucket) group should de-overlap GVW independently.
         rules = [
-            _make_rule("R1", 10,
-                       cc_start_range=0, cc_end_range=1000,
-                       gvw_start_range=0, gvw_end_range=3500),
-            _make_rule("R2", 20,
-                       cc_start_range=0, cc_end_range=1000,
-                       gvw_start_range=3500, gvw_end_range=7500),
-            _make_rule("R3", 30,
-                       cc_start_range=1001, cc_end_range=1500,
-                       gvw_start_range=0, gvw_end_range=3500),
-            _make_rule("R4", 40,
-                       cc_start_range=1001, cc_end_range=1500,
-                       gvw_start_range=3500, gvw_end_range=7500),
+            _make_rule(
+                "R1",
+                10,
+                cc_start_range=0,
+                cc_end_range=1000,
+                gvw_start_range=0,
+                gvw_end_range=3500,
+            ),
+            _make_rule(
+                "R2",
+                20,
+                cc_start_range=0,
+                cc_end_range=1000,
+                gvw_start_range=3500,
+                gvw_end_range=7500,
+            ),
+            _make_rule(
+                "R3",
+                30,
+                cc_start_range=1001,
+                cc_end_range=1500,
+                gvw_start_range=0,
+                gvw_end_range=3500,
+            ),
+            _make_rule(
+                "R4",
+                40,
+                cc_start_range=1001,
+                cc_end_range=1500,
+                gvw_start_range=3500,
+                gvw_end_range=7500,
+            ),
         ]
         self.transformer._dedupe_range_overlaps(rules)
         by_id = {r.rule_id: r for r in rules}
@@ -208,17 +242,20 @@ class DedupePoliciesCountBoundariesTests(TestCase):
     def test_policies_count_shared_boundary_bumps_next_start(self):
         rules = [
             _make_rule(
-                "R1", 10,
+                "R1",
+                10,
                 policies_count_start_range=0,
                 policies_count_end_range=30,
             ),
             _make_rule(
-                "R2", 20,
+                "R2",
+                20,
                 policies_count_start_range=30,
                 policies_count_end_range=100,
             ),
             _make_rule(
-                "R3", 30,
+                "R3",
+                30,
                 policies_count_start_range=100,
                 policies_count_end_range=500,
             ),
@@ -312,22 +349,26 @@ class DedupeLadderEdgeSingletonPromotionTests(TestCase):
         # emits singleton for UPTO 30 as (30,30) it should still promote.
         rules = [
             _make_rule(
-                "R1", 10,
+                "R1",
+                10,
                 policies_count_start_range=30,
                 policies_count_end_range=30,
             ),
             _make_rule(
-                "R2", 20,
+                "R2",
+                20,
                 policies_count_start_range=30,
                 policies_count_end_range=100,
             ),
             _make_rule(
-                "R3", 30,
+                "R3",
+                30,
                 policies_count_start_range=500,
                 policies_count_end_range=500,
             ),
             _make_rule(
-                "R4", 25,
+                "R4",
+                25,
                 policies_count_start_range=100,
                 policies_count_end_range=500,
             ),
@@ -356,22 +397,31 @@ class DedupeNoisyMakeFieldTests(TestCase):
     def test_ladder_with_noisy_vehicle_make_dedupes(self):
         rules = [
             _make_rule(
-                "R1", 10,
-                state=["andhra-pradesh"], policy_type=["third-party"],
+                "R1",
+                10,
+                state=["andhra-pradesh"],
+                policy_type=["third-party"],
                 vehicle_make=["All Other Make/Models"],
-                gvw_start_range=0, gvw_end_range=3500,
+                gvw_start_range=0,
+                gvw_end_range=3500,
             ),
             _make_rule(
-                "R2", 20,
-                state=["andhra-pradesh"], policy_type=["third-party"],
+                "R2",
+                20,
+                state=["andhra-pradesh"],
+                policy_type=["third-party"],
                 vehicle_make=None,
-                gvw_start_range=3500, gvw_end_range=7500,
+                gvw_start_range=3500,
+                gvw_end_range=7500,
             ),
             _make_rule(
-                "R3", 30,
-                state=["andhra-pradesh"], policy_type=["third-party"],
+                "R3",
+                30,
+                state=["andhra-pradesh"],
+                policy_type=["third-party"],
                 vehicle_make=["2_UPTO_3.5T[Electric]"],
-                gvw_start_range=7500, gvw_end_range=12000,
+                gvw_start_range=7500,
+                gvw_end_range=12000,
             ),
         ]
         self.transformer._dedupe_range_overlaps(rules)
@@ -383,16 +433,22 @@ class DedupeNoisyMakeFieldTests(TestCase):
     def test_ladder_with_noisy_vehicle_model_dedupes(self):
         rules = [
             _make_rule(
-                "R1", 10,
-                state=["karnataka"], policy_type=["comprehensive"],
+                "R1",
+                10,
+                state=["karnataka"],
+                policy_type=["comprehensive"],
                 vehicle_model=["All Other Models"],
-                cc_start_range=0, cc_end_range=1000,
+                cc_start_range=0,
+                cc_end_range=1000,
             ),
             _make_rule(
-                "R2", 20,
-                state=["karnataka"], policy_type=["comprehensive"],
+                "R2",
+                20,
+                state=["karnataka"],
+                policy_type=["comprehensive"],
                 vehicle_model=None,
-                cc_start_range=1000, cc_end_range=1500,
+                cc_start_range=1000,
+                cc_end_range=1500,
             ),
         ]
         self.transformer._dedupe_range_overlaps(rules)
@@ -415,19 +471,28 @@ class DedupeSentinelSkipTests(TestCase):
         rules = [
             # Sentinel "no GVW filter" — must not push the real rule.
             _make_rule(
-                "R0", 5,
-                state=["andhra-pradesh"], policy_type=["third-party"],
-                gvw_start_range=0, gvw_end_range=0,
+                "R0",
+                5,
+                state=["andhra-pradesh"],
+                policy_type=["third-party"],
+                gvw_start_range=0,
+                gvw_end_range=0,
             ),
             _make_rule(
-                "R1", 10,
-                state=["andhra-pradesh"], policy_type=["third-party"],
-                gvw_start_range=0, gvw_end_range=3500,
+                "R1",
+                10,
+                state=["andhra-pradesh"],
+                policy_type=["third-party"],
+                gvw_start_range=0,
+                gvw_end_range=3500,
             ),
             _make_rule(
-                "R2", 20,
-                state=["andhra-pradesh"], policy_type=["third-party"],
-                gvw_start_range=3500, gvw_end_range=7500,
+                "R2",
+                20,
+                state=["andhra-pradesh"],
+                policy_type=["third-party"],
+                gvw_start_range=3500,
+                gvw_end_range=7500,
             ),
         ]
         self.transformer._dedupe_range_overlaps(rules)
@@ -443,19 +508,28 @@ class DedupeSentinelSkipTests(TestCase):
     def test_cc_sentinel_does_not_shift_real_range(self):
         rules = [
             _make_rule(
-                "R0", 5,
-                state=["karnataka"], policy_type=["comprehensive"],
-                cc_start_range=0, cc_end_range=99999,
+                "R0",
+                5,
+                state=["karnataka"],
+                policy_type=["comprehensive"],
+                cc_start_range=0,
+                cc_end_range=99999,
             ),
             _make_rule(
-                "R1", 10,
-                state=["karnataka"], policy_type=["comprehensive"],
-                cc_start_range=0, cc_end_range=1000,
+                "R1",
+                10,
+                state=["karnataka"],
+                policy_type=["comprehensive"],
+                cc_start_range=0,
+                cc_end_range=1000,
             ),
             _make_rule(
-                "R2", 20,
-                state=["karnataka"], policy_type=["comprehensive"],
-                cc_start_range=1000, cc_end_range=1500,
+                "R2",
+                20,
+                state=["karnataka"],
+                policy_type=["comprehensive"],
+                cc_start_range=1000,
+                cc_end_range=1500,
             ),
         ]
         self.transformer._dedupe_range_overlaps(rules)
@@ -468,19 +542,22 @@ class DedupeSentinelSkipTests(TestCase):
     def test_seating_sentinel_does_not_shift_real_range(self):
         rules = [
             _make_rule(
-                "R0", 5,
+                "R0",
+                5,
                 state=["tamil-nadu"],
                 seating_capacity_start_range=0,
                 seating_capacity_end_range=99,
             ),
             _make_rule(
-                "R1", 10,
+                "R1",
+                10,
                 state=["tamil-nadu"],
                 seating_capacity_start_range=0,
                 seating_capacity_end_range=18,
             ),
             _make_rule(
-                "R2", 20,
+                "R2",
+                20,
                 state=["tamil-nadu"],
                 seating_capacity_start_range=18,
                 seating_capacity_end_range=36,
@@ -508,29 +585,50 @@ class CollapseDuplicateRulesTests(TestCase):
 
     def _mk_outcome(self, pct: float = 10.0):
         from cins.schema.cics_model import CommissionOutcome
+
         return CommissionOutcome(commission_type="percentage", percentage_value=pct)
 
     def _rule(self, rule_id: str, priority: int, outcome, **cond):
         return CommissionRule(
-            rule_id=rule_id, priority=priority,
-            conditions=RuleConditions(**cond), outcome=outcome,
+            rule_id=rule_id,
+            priority=priority,
+            conditions=RuleConditions(**cond),
+            outcome=outcome,
         )
 
     def test_collapses_same_conditions_same_outcome_different_make(self):
         out = self._mk_outcome(45.0)
         rules = [
-            self._rule("R1", 10, out,
-                       state=["andhra-pradesh"], policy_type=["comprehensive"],
-                       vehicle_make=["Suzuki"],
-                       cc_start_range=150, cc_end_range=350),
-            self._rule("R2", 20, out,
-                       state=["andhra-pradesh"], policy_type=["comprehensive"],
-                       vehicle_make=["Honda"],
-                       cc_start_range=150, cc_end_range=350),
-            self._rule("R3", 30, out,
-                       state=["andhra-pradesh"], policy_type=["comprehensive"],
-                       vehicle_make=["Others"],
-                       cc_start_range=150, cc_end_range=350),
+            self._rule(
+                "R1",
+                10,
+                out,
+                state=["andhra-pradesh"],
+                policy_type=["comprehensive"],
+                vehicle_make=["Suzuki"],
+                cc_start_range=150,
+                cc_end_range=350,
+            ),
+            self._rule(
+                "R2",
+                20,
+                out,
+                state=["andhra-pradesh"],
+                policy_type=["comprehensive"],
+                vehicle_make=["Honda"],
+                cc_start_range=150,
+                cc_end_range=350,
+            ),
+            self._rule(
+                "R3",
+                30,
+                out,
+                state=["andhra-pradesh"],
+                policy_type=["comprehensive"],
+                vehicle_make=["Others"],
+                cc_start_range=150,
+                cc_end_range=350,
+            ),
         ]
         collapsed = self.transformer._collapse_duplicate_rules(rules)
         self.assertEqual(len(collapsed), 1)
@@ -539,12 +637,24 @@ class CollapseDuplicateRulesTests(TestCase):
     def test_preserves_when_outcome_differs(self):
         # Different outcomes = genuinely different rules; do NOT collapse.
         rules = [
-            self._rule("R1", 10, self._mk_outcome(45.0),
-                       state=["andhra-pradesh"], vehicle_make=["Suzuki"],
-                       cc_start_range=150, cc_end_range=350),
-            self._rule("R2", 20, self._mk_outcome(50.0),
-                       state=["andhra-pradesh"], vehicle_make=["Honda"],
-                       cc_start_range=150, cc_end_range=350),
+            self._rule(
+                "R1",
+                10,
+                self._mk_outcome(45.0),
+                state=["andhra-pradesh"],
+                vehicle_make=["Suzuki"],
+                cc_start_range=150,
+                cc_end_range=350,
+            ),
+            self._rule(
+                "R2",
+                20,
+                self._mk_outcome(50.0),
+                state=["andhra-pradesh"],
+                vehicle_make=["Honda"],
+                cc_start_range=150,
+                cc_end_range=350,
+            ),
         ]
         collapsed = self.transformer._collapse_duplicate_rules(rules)
         self.assertEqual(len(collapsed), 2)
@@ -552,12 +662,24 @@ class CollapseDuplicateRulesTests(TestCase):
     def test_preserves_when_non_make_condition_differs(self):
         out = self._mk_outcome(45.0)
         rules = [
-            self._rule("R1", 10, out,
-                       state=["andhra-pradesh"], policy_type=["comprehensive"],
-                       cc_start_range=150, cc_end_range=350),
-            self._rule("R2", 20, out,
-                       state=["andhra-pradesh"], policy_type=["third-party"],
-                       cc_start_range=150, cc_end_range=350),
+            self._rule(
+                "R1",
+                10,
+                out,
+                state=["andhra-pradesh"],
+                policy_type=["comprehensive"],
+                cc_start_range=150,
+                cc_end_range=350,
+            ),
+            self._rule(
+                "R2",
+                20,
+                out,
+                state=["andhra-pradesh"],
+                policy_type=["third-party"],
+                cc_start_range=150,
+                cc_end_range=350,
+            ),
         ]
         collapsed = self.transformer._collapse_duplicate_rules(rules)
         self.assertEqual(len(collapsed), 2)
@@ -565,12 +687,30 @@ class CollapseDuplicateRulesTests(TestCase):
     def test_keeps_highest_priority_lowest_number(self):
         out = self._mk_outcome(45.0)
         rules = [
-            self._rule("R1", 30, out, vehicle_make=["Honda"],
-                       cc_start_range=150, cc_end_range=350),
-            self._rule("R2", 10, out, vehicle_make=["Suzuki"],
-                       cc_start_range=150, cc_end_range=350),
-            self._rule("R3", 20, out, vehicle_make=["Others"],
-                       cc_start_range=150, cc_end_range=350),
+            self._rule(
+                "R1",
+                30,
+                out,
+                vehicle_make=["Honda"],
+                cc_start_range=150,
+                cc_end_range=350,
+            ),
+            self._rule(
+                "R2",
+                10,
+                out,
+                vehicle_make=["Suzuki"],
+                cc_start_range=150,
+                cc_end_range=350,
+            ),
+            self._rule(
+                "R3",
+                20,
+                out,
+                vehicle_make=["Others"],
+                cc_start_range=150,
+                cc_end_range=350,
+            ),
         ]
         collapsed = self.transformer._collapse_duplicate_rules(rules)
         self.assertEqual(len(collapsed), 1)
@@ -580,10 +720,22 @@ class CollapseDuplicateRulesTests(TestCase):
         # state ['a','b'] should collapse with ['b','a'] when other fields match.
         out = self._mk_outcome(10.0)
         rules = [
-            self._rule("R1", 10, out, state=["andhra-pradesh", "telangana"],
-                       cc_start_range=0, cc_end_range=1000),
-            self._rule("R2", 20, out, state=["telangana", "andhra-pradesh"],
-                       cc_start_range=0, cc_end_range=1000),
+            self._rule(
+                "R1",
+                10,
+                out,
+                state=["andhra-pradesh", "telangana"],
+                cc_start_range=0,
+                cc_end_range=1000,
+            ),
+            self._rule(
+                "R2",
+                20,
+                out,
+                state=["telangana", "andhra-pradesh"],
+                cc_start_range=0,
+                cc_end_range=1000,
+            ),
         ]
         collapsed = self.transformer._collapse_duplicate_rules(rules)
         self.assertEqual(len(collapsed), 1)
@@ -594,26 +746,46 @@ class CollapseDuplicateRulesTests(TestCase):
         # cleanly to (31,100).
         out = self._mk_outcome(10.0)
         rules = [
-            self._rule("R1", 10, out,
-                       state=["andhra-pradesh"], vehicle_sub_class=["scooter"],
-                       vehicle_make=["Others"],
-                       policies_count_start_range=0, policies_count_end_range=30),
-            self._rule("R2", 20, out,
-                       state=["andhra-pradesh"], vehicle_sub_class=["scooter"],
-                       vehicle_make=["Suzuki"],
-                       policies_count_start_range=30, policies_count_end_range=100),
-            self._rule("R3", 30, out,
-                       state=["andhra-pradesh"], vehicle_sub_class=["scooter"],
-                       vehicle_make=["Others"],
-                       policies_count_start_range=30, policies_count_end_range=100),
+            self._rule(
+                "R1",
+                10,
+                out,
+                state=["andhra-pradesh"],
+                vehicle_sub_class=["scooter"],
+                vehicle_make=["Others"],
+                policies_count_start_range=0,
+                policies_count_end_range=30,
+            ),
+            self._rule(
+                "R2",
+                20,
+                out,
+                state=["andhra-pradesh"],
+                vehicle_sub_class=["scooter"],
+                vehicle_make=["Suzuki"],
+                policies_count_start_range=30,
+                policies_count_end_range=100,
+            ),
+            self._rule(
+                "R3",
+                30,
+                out,
+                state=["andhra-pradesh"],
+                vehicle_sub_class=["scooter"],
+                vehicle_make=["Others"],
+                policies_count_start_range=30,
+                policies_count_end_range=100,
+            ),
         ]
         collapsed = self.transformer._collapse_duplicate_rules(rules)
         self.assertEqual(len(collapsed), 2)
         self.transformer._dedupe_range_overlaps(collapsed)
         # Remaining (30, 100) should be cleanly bumped to (31, 100).
         ladder = sorted(
-            (r.conditions.policies_count_start_range,
-             r.conditions.policies_count_end_range)
+            (
+                r.conditions.policies_count_start_range,
+                r.conditions.policies_count_end_range,
+            )
             for r in collapsed
         )
         self.assertEqual(ladder, [(0, 30), (31, 100)])
@@ -681,16 +853,33 @@ class GVWSlugDetectionTests(TestCase):
         self.t = RawToCICSTransformer()
 
     def test_weight_slugs_detected(self):
-        for slug in ("2_UPTO_3.5T", "3_3.5T_TO_7.5T", "10_ABOVE_47T",
-                     "UPTO 3.5T", "3500-7500 KG", "GVW < 2000"):
-            self.assertTrue(self.t._gvw_slug_or_empty(slug),
-                            f"{slug!r} should be GVW-shaped")
+        for slug in (
+            "2_UPTO_3.5T",
+            "3_3.5T_TO_7.5T",
+            "10_ABOVE_47T",
+            "UPTO 3.5T",
+            "3500-7500 KG",
+            "GVW < 2000",
+        ):
+            self.assertTrue(
+                self.t._gvw_slug_or_empty(slug), f"{slug!r} should be GVW-shaped"
+            )
 
     def test_non_gvw_rejected(self):
-        for slug in ("3 WHEELER", "16 SEATER", "350cc", "150-350cc",
-                     "GCCV", "SCOOTER", "7 KW", None, ""):
-            self.assertEqual(self.t._gvw_slug_or_empty(slug), "",
-                             f"{slug!r} must not be read as GVW")
+        for slug in (
+            "3 WHEELER",
+            "16 SEATER",
+            "350cc",
+            "150-350cc",
+            "GCCV",
+            "SCOOTER",
+            "7 KW",
+            None,
+            "",
+        ):
+            self.assertEqual(
+                self.t._gvw_slug_or_empty(slug), "", f"{slug!r} must not be read as GVW"
+            )
 
 
 class GVWRecoveryTests(TestCase):
@@ -745,6 +934,13 @@ class BoundaryNormalizationTests(TestCase):
         self.assertEqual(rules[1].conditions.cc_start_range, 1001)
         self.assertEqual(rules[2].conditions.cc_start_range, 1501)
         self.assertEqual(rules[0].conditions.cc_start_range, 0)
+        # Each bump is logged as an informational NOTICE, never a warning — a CV
+        # document emits hundreds and they buried the real failures.
+        self.assertEqual(len(self.t.notices), 2, self.t.notices)
+        self.assertTrue(
+            all("Boundary bump" in n for n in self.t.notices), self.t.notices
+        )
+        self.assertEqual(self.t.warnings, [])
 
     def test_counter_example_not_bumped(self):
         # Genuine gap ladder: no band ends at 1000 or 1600, so neither start is
@@ -766,6 +962,10 @@ class BoundaryNormalizationTests(TestCase):
         self.assertEqual(rules[0].conditions.cc_start_range, 0)
         self.assertEqual(rules[0].conditions.cc_end_range, 1000)
         self.assertEqual(rules[1].conditions.cc_start_range, 1001)
+        self.assertTrue(
+            any("floor-promotion" in n for n in self.t.notices), self.t.notices
+        )
+        self.assertEqual(self.t.warnings, [])
 
     def test_lone_point_range_not_widened(self):
         # (1000,1000) with no sibling starting at 1000 stays a point rate.
@@ -776,3 +976,110 @@ class BoundaryNormalizationTests(TestCase):
         self.t._normalize_boundary_overlaps(rules)
         self.assertEqual(rules[0].conditions.cc_start_range, 1000)
         self.assertEqual(rules[0].conditions.cc_end_range, 1000)
+
+    # --- Change B: wildcard-compatible cross-group evidence (defect 8) ---
+
+    def test_fuelless_band_bumped_on_fueltagged_evidence(self):
+        # Reproduces defect 8: a fuel-less 40000-43000 band forms its own group
+        # (fuel_type is in the boundary key). The lower rung ending at 40000
+        # lives only in the fuel-tagged ladder. A None fuel slot is a wildcard,
+        # so the fuel-less band must collect that rung as evidence and bump to
+        # 40001. Fails before the wildcard fix.
+        rules = [
+            _make_rule(
+                "F1", 10, state=["a"], gvw_start_range=40000, gvw_end_range=43000
+            ),
+            _make_rule(
+                "F2", 20, state=["b"], gvw_start_range=40000, gvw_end_range=43000
+            ),
+            _make_rule(
+                "P1", 30, fuel_type=["petrol"], gvw_start_range=0, gvw_end_range=40000
+            ),
+            _make_rule(
+                "P2",
+                40,
+                fuel_type=["petrol"],
+                gvw_start_range=40001,
+                gvw_end_range=43000,
+            ),
+        ]
+        self.t._normalize_boundary_overlaps(rules)
+        by_id = {r.rule_id: r for r in rules}
+        self.assertEqual(by_id["F1"].conditions.gvw_start_range, 40001)
+        self.assertEqual(by_id["F2"].conditions.gvw_start_range, 40001)
+        # Fuel-tagged rungs are untouched (application stays scoped per group).
+        self.assertEqual(by_id["P1"].conditions.gvw_start_range, 0)
+        self.assertEqual(by_id["P2"].conditions.gvw_start_range, 40001)
+
+    def test_disjoint_petrol_electric_not_cross_bumped(self):
+        # ['petrol'] and ['electric'] have an empty intersection, so an electric
+        # band's start must NOT bump just because a petrol band ends there.
+        rules = [
+            _make_rule(
+                "E1",
+                10,
+                state=["a"],
+                fuel_type=["electric"],
+                cc_start_range=1000,
+                cc_end_range=1500,
+            ),
+            _make_rule(
+                "E2",
+                20,
+                state=["b"],
+                fuel_type=["electric"],
+                cc_start_range=1000,
+                cc_end_range=1500,
+            ),
+            _make_rule(
+                "P1", 30, fuel_type=["petrol"], cc_start_range=0, cc_end_range=1000
+            ),
+        ]
+        self.t._normalize_boundary_overlaps(rules)
+        by_id = {r.rule_id: r for r in rules}
+        self.assertEqual(by_id["E1"].conditions.cc_start_range, 1000)
+        self.assertEqual(by_id["E2"].conditions.cc_start_range, 1000)
+
+    def test_disjoint_policy_type_not_cross_bumped(self):
+        # Boundary-pass analogue of the dedupe-pass policy_type test: a comp
+        # ladder must not bump on a tp ladder's edge (disjoint list slot).
+        rules = [
+            _make_rule(
+                "C1",
+                10,
+                state=["a"],
+                policy_type=["comprehensive"],
+                cc_start_range=1000,
+                cc_end_range=1500,
+            ),
+            _make_rule(
+                "C2",
+                20,
+                state=["b"],
+                policy_type=["comprehensive"],
+                cc_start_range=1000,
+                cc_end_range=1500,
+            ),
+            _make_rule(
+                "T1", 30, policy_type=["tp"], cc_start_range=0, cc_end_range=1000
+            ),
+        ]
+        self.t._normalize_boundary_overlaps(rules)
+        by_id = {r.rule_id: r for r in rules}
+        self.assertEqual(by_id["C1"].conditions.cc_start_range, 1000)
+        self.assertEqual(by_id["C2"].conditions.cc_start_range, 1000)
+
+    def test_fuelless_floor_promotion_on_fueltagged_sibling(self):
+        # A fuel-less (1000,1000) point promotes to (0,1000) on a fuel-tagged
+        # sibling that starts a wider band at 1000.
+        rules = [
+            _make_rule("F1", 10, state=["a"], cc_start_range=1000, cc_end_range=1000),
+            _make_rule("F2", 20, state=["b"], cc_start_range=1000, cc_end_range=1000),
+            _make_rule(
+                "P1", 30, fuel_type=["petrol"], cc_start_range=1000, cc_end_range=1500
+            ),
+        ]
+        self.t._normalize_boundary_overlaps(rules)
+        by_id = {r.rule_id: r for r in rules}
+        self.assertEqual(by_id["F1"].conditions.cc_start_range, 0)
+        self.assertEqual(by_id["F2"].conditions.cc_start_range, 0)

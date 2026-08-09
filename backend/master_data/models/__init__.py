@@ -1,3 +1,4 @@
+from .carrier_scoped import CarrierProductHierarchyMaster, CarrierRTOZoneMaster
 from .insurer import InsurerMaster
 from .lookups import (
     CarrierMaster,
@@ -20,4 +21,6 @@ __all__ = [
     "CarrierMaster",
     "RTOMaster",
     "MasterDataUpload",
+    "CarrierRTOZoneMaster",
+    "CarrierProductHierarchyMaster",
 ]

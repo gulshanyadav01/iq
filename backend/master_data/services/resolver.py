@@ -13,6 +13,8 @@ from typing import Optional
 
 from master_data.models import (
     CarrierMaster,
+    CarrierProductHierarchyMaster,
+    CarrierRTOZoneMaster,
     FuelTypeMaster,
     InsurerMaster,
     PlanTypeMaster,
@@ -34,6 +36,9 @@ class Resolution:
     id: Optional[int]
     canonical: str
     matched: bool
+    # Set when a value resolved but a lower-priority signal disagreed with the
+    # winner (see resolve_product_id_multi). Callers should flag do_verification.
+    conflict: bool = False
 
     @property
     def id_str(self) -> str:
@@ -42,12 +47,20 @@ class Resolution:
 
 # Product Id (186/187/188) → Subclass-master product code (Car/TW/CV).
 PRODUCT_ID_TO_CODE = {186: "Car", 187: "TW", 188: "CV"}
+# Inverse: subclass-master product code (Car/TW/CV) → Product Id.
+CODE_TO_PRODUCT_ID = {code: pid for pid, code in PRODUCT_ID_TO_CODE.items()}
+
+# Carrier only confirms Commercial Vehicle (188). "PRIVATE" is ambiguous
+# (Car vs TW), so it contributes no product signal (decision D3:A).
+CARRIER_PRODUCT_FALLBACK = {"public": 188, "commercial": 188}
 
 # Fallback for VehicleClass enum values that the parser produces but that
 # aren't present as rows in the Vehicle Master sheet.
 VEHICLE_CLASS_FALLBACK = {
     "gcv": (188, "CV"),
     "pcv": (188, "CV"),
+    "cv": (188, "CV"),
+    "commercial vehicle": (188, "CV"),
     "bus": (188, "CV"),
     "misc d": (188, "CV"),
     "miscd": (188, "CV"),
@@ -82,10 +95,17 @@ class MasterDataResolver:
             _normalize(r.name): (r.carrier_id, r.name)
             for r in CarrierMaster.objects.all()
         }
-        self._vehicle_class = {
-            _normalize(r.name): (r.vehicle_class_id, r.name)
-            for r in VehicleClassMaster.objects.all()
-        }
+        # Keyed by normalized name, plus a reverse map by numeric class id so the
+        # VehicleClass can be derived from a resolved subclass's vehicle_class_id.
+        self._vehicle_class = {}
+        self._vehicle_class_by_id: dict[int, tuple[int, str]] = {}
+        for r in VehicleClassMaster.objects.all():
+            self._vehicle_class[_normalize(r.name)] = (r.vehicle_class_id, r.name)
+            try:
+                cid = int(r.vehicle_class_id)  # skips the string "Blank"
+            except (TypeError, ValueError):
+                continue
+            self._vehicle_class_by_id[cid] = (cid, r.name)
         self._vehicle = {
             _normalize(r.vehicle_type): (r.vehicle_id, r.vehicle_type)
             for r in VehicleMaster.objects.all()
@@ -102,9 +122,28 @@ class MasterDataResolver:
             self._insurer_by_product.setdefault(r.product_id, []).append(r)
             self._insurer_norm.setdefault(r.product_id, {})[r.name_normalized] = r
         # Subclass: list per product code (CV/TW/Car).
+        # Also build an inverted index (normalized subclass text -> {product_id})
+        # so a subclass name can *infer* the product. Keyed off the reliable
+        # `product` string column, NOT `product_id`: the Master Mapper sheet
+        # stamps the two Car subclass rows with ProductId 188 (CV) by mistake, so
+        # the integer column would misclassify every private car as commercial.
         self._subclass_by_product: dict[str, list[VehicleSubClassMaster]] = {}
+        self._subclass_product_index: dict[str, set[int]] = {}
+        # (product, pb_vehicle_subclass_id) -> vehicle_class_id, so a resolved
+        # subclass can supply the authoritative VehicleClass (e.g. E Rickshaw -> PCV).
+        self._subclass_class_id: dict[tuple[str, int], int] = {}
         for r in VehicleSubClassMaster.objects.all():
             self._subclass_by_product.setdefault(r.product, []).append(r)
+            if r.vehicle_class_id is not None:
+                self._subclass_class_id[(r.product, int(r.pb_vehicle_subclass_id))] = (
+                    int(r.vehicle_class_id)
+                )
+            pid = CODE_TO_PRODUCT_ID.get(r.product)
+            if pid is None:
+                continue
+            for key in (_normalize(r.subclass_name), _normalize(r.canonical_name)):
+                if key:
+                    self._subclass_product_index.setdefault(key, set()).add(pid)
         # RTO: per state slug, the display value + per-product active flags.
         # Built once so rtos_for_states is a pure in-memory filter.
         self._rto_by_state: dict[str, list[dict]] = {}
@@ -112,6 +151,7 @@ class MasterDataResolver:
             self._rto_by_state.setdefault(r.state_slug, []).append(
                 {
                     "value": r.value,
+                    "code": r.code,
                     "car_zone": r.car_zone,
                     "cv_zone": r.cv_zone,
                     "tw_zone": r.tw_zone,
@@ -132,6 +172,26 @@ class MasterDataResolver:
     def resolve_vehicle_class(self, value: str) -> Resolution:
         return self._exact_lookup(value, self._vehicle_class)
 
+    def resolve_vehicle_class_by_id(self, class_id: Optional[int]) -> Resolution:
+        """Resolve a VehicleClass from its numeric master id (e.g. 2 -> PCV)."""
+        if class_id is None:
+            return Resolution(id=None, canonical="", matched=False)
+        hit = self._vehicle_class_by_id.get(int(class_id))
+        if hit is None:
+            return Resolution(id=None, canonical="", matched=False)
+        cid, name = hit
+        return Resolution(id=cid, canonical=name, matched=True)
+
+    def vehicle_class_id_for_subclass(
+        self, product_code: str, subclass_id: int
+    ) -> Optional[int]:
+        """The master vehicle_class_id for a resolved subclass, or None."""
+        return self._subclass_class_id.get((product_code, int(subclass_id)))
+
+    def product_code_for_id(self, product_id: Optional[int]) -> Optional[str]:
+        """Product Id (186/187/188) -> subclass-master product code (Car/TW/CV)."""
+        return PRODUCT_ID_TO_CODE.get(product_id) if product_id is not None else None
+
     def resolve_product_id(self, vehicle_class_or_product: str) -> Resolution:
         """Map an extracted product/vehicle-class string to a Product Id (186/187/188)."""
         hit = self._exact_lookup(vehicle_class_or_product, self._vehicle)
@@ -144,6 +204,51 @@ class MasterDataResolver:
             pid, _code = fallback
             return Resolution(id=pid, canonical=vehicle_class_or_product, matched=True)
         return Resolution(id=None, canonical="", matched=False)
+
+    def _product_from_subclass(self, text: str) -> Optional[int]:
+        """Infer a Product Id from a subclass name, or None if unknown/ambiguous."""
+        pids = self._subclass_product_index.get(_normalize(text))
+        # Only trust a subclass that maps to exactly one product. Names shared
+        # across products (e.g. "Taxi" -> Car+CV) give no confident signal.
+        return next(iter(pids)) if pids and len(pids) == 1 else None
+
+    def _product_from_carrier(self, text: str) -> Optional[int]:
+        """Carrier confirms CV only; PRIVATE (Car vs TW) yields no signal."""
+        return CARRIER_PRODUCT_FALLBACK.get(_normalize(text))
+
+    def resolve_product_id_multi(
+        self,
+        *,
+        product_text: str = "",
+        vehicle_class_text: str = "",
+        vehicle_subclass_text: str = "",
+        carrier_text: str = "",
+    ) -> Resolution:
+        """Resolve Product Id from four signals in priority order.
+
+        Fall-through: product -> vehicle class -> vehicle subclass -> carrier.
+        The first signal that yields a product wins. If a lower-priority signal
+        disagrees with the winner, the returned Resolution has ``conflict=True``
+        so the caller can flag the row for verification. When no signal resolves,
+        returns an unmatched Resolution (never guesses).
+        """
+        ordered = [
+            self.resolve_product_id(product_text).id,  # 1. product
+            self.resolve_product_id(vehicle_class_text).id,  # 2. vehicle class
+            self._product_from_subclass(vehicle_subclass_text),  # 3. vehicle subclass
+            self._product_from_carrier(carrier_text),  # 4. carrier (CV-only)
+        ]
+        present = [pid for pid in ordered if pid is not None]
+        if not present:
+            return Resolution(id=None, canonical="", matched=False)
+        winner = present[0]
+        conflict = any(pid != winner for pid in present[1:])
+        return Resolution(
+            id=winner,
+            canonical=PRODUCT_ID_TO_CODE.get(winner, ""),
+            matched=True,
+            conflict=conflict,
+        )
 
     def resolve_product_code(self, vehicle_class_or_product: str) -> Optional[str]:
         """Return the Subclass-master product code (Car/TW/CV) for an extracted value."""
@@ -176,7 +281,7 @@ class MasterDataResolver:
 
     # ------------------------------ rto ------------------------------
 
-    def rtos_for_states(self, slugs, product) -> list:
+    def rtos_for_states(self, slugs, product, exclude_codes=None) -> list:
         """Return the product-active RTO display values for the given states.
 
         ``slugs`` is an iterable of canonical state slugs (e.g.
@@ -185,14 +290,21 @@ class MasterDataResolver:
         marks it active for that product). Returns a sorted, de-duplicated list.
         Returns ``[]`` for an unknown product, empty slugs, or states with no
         product-active RTOs — callers treat ``[]`` as "leave the cell empty".
+
+        ``exclude_codes`` (optional) drops RTOs whose ``code`` is in the set —
+        used by the export's state-derived fill to subtract RTOs a sibling
+        rule already claims explicitly (e.g. a Chola "UP" fill excluding the
+        codes an "UP- East" zone rule claims), matched by ``code`` rather than
+        the display ``value`` string since callers hold bare codes.
         """
         zone_attr = _PRODUCT_ZONE_ATTR.get(str(product or "").strip().upper())
         if zone_attr is None or not slugs:
             return []
+        excl = set(exclude_codes or ())
         out: set[str] = set()
         for slug in slugs:
             for rto in self._rto_by_state.get(slug, []):
-                if rto.get(zone_attr) is not None:
+                if rto.get(zone_attr) is not None and rto["code"] not in excl:
                     out.add(rto["value"])
         return sorted(out)
 
@@ -323,3 +435,48 @@ class MasterDataResolver:
             return Resolution(id=1, canonical="Private Car", matched=True)
 
         return Resolution(id=None, canonical="", matched=False)
+
+
+# --------------------------- carrier-scoped masters ---------------------------
+#
+# Deliberately module-level functions, NOT methods on MasterDataResolver: they
+# run a scoped query (filter(carrier=...)) rather than the eager `_reload()`
+# that loads every table for every one of the ~20 carriers. Callers (the
+# Chola-gated transformer path, the product-hierarchy validator) only ever
+# need one carrier's rows, so a broadened `_reload` would be wasted work on
+# every non-Chola document.
+
+
+def carrier_zone_expansions(carrier: str) -> dict[str, dict[str, list[str]]]:
+    """UW-zone slug -> {"rto": [...], "state": [...]} for a carrier.
+
+    Sorted/deduped. A zone spanning multiple states (e.g. Chola's "ncr",
+    which mixes Haryana and Uttar Pradesh RTO codes) naturally aggregates
+    every state its RTO codes belong to.
+    """
+    if not carrier:
+        return {}
+    zones: dict[str, dict[str, set]] = {}
+    rows = CarrierRTOZoneMaster.objects.filter(carrier=carrier).values(
+        "zone", "rto_code", "state_slug"
+    )
+    for row in rows:
+        bucket = zones.setdefault(row["zone"], {"rto": set(), "state": set()})
+        bucket["rto"].add(row["rto_code"])
+        bucket["state"].add(row["state_slug"])
+    return {
+        zone: {"rto": sorted(v["rto"]), "state": sorted(v["state"])}
+        for zone, v in zones.items()
+    }
+
+
+def carrier_product_hierarchy(carrier: str) -> list[dict]:
+    """(product, sub_product, vehicle_subclass, canonical_subclass) rows for
+    a carrier, via a scoped query."""
+    if not carrier:
+        return []
+    return list(
+        CarrierProductHierarchyMaster.objects.filter(carrier=carrier).values(
+            "product", "sub_product", "vehicle_subclass", "canonical_subclass"
+        )
+    )

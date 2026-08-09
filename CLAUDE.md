@@ -14,27 +14,27 @@ Domain: insurance commission intake and policy data extraction.
 
 ## Project Layout
 
-| Path | Purpose |
-| --- | --- |
-| `backend/` | Django project root |
-| `backend/config/` | settings.py, urls.py, celery.py, authentication.py |
-| `backend/accounts/` | User/auth models and views |
-| `backend/core/` | Shared business logic |
+| Path                         | Purpose                                                                     |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `backend/`                   | Django project root                                                         |
+| `backend/config/`            | settings.py, urls.py, celery.py, authentication.py                          |
+| `backend/accounts/`          | User/auth models and views                                                  |
+| `backend/core/`              | Shared business logic                                                       |
 | `backend/commission_intake/` | Commission statement ingestion pipeline (models, tasks, serializers, views) |
-| `backend/policy_extract/` | Policy data extraction app (models, services, tasks) |
-| `backend/cins/` | CINS product field mapping, schema, prompts, processors, validators |
-| `backend/system/` | System-level models and views |
-| `web/` | Nuxt frontend |
-| `web/app/pages/` | Nuxt file-based routes (incl. `commission-intake/`, `policy-extract.vue`) |
-| `web/app/components/` | Vue components |
-| `web/app/composables/` | Vue 3 composables |
-| `web/app/stores/` | Pinia stores |
-| `web/app/api/` | Frontend HTTP client (`http.ts`) |
-| `web/app/middleware/` | Nuxt route middleware |
-| `web/app/layouts/` | Nuxt layouts |
-| `conf/` | Nginx dev/prod configs |
-| `scripts/` | Helper shell scripts |
-| `postgres/` | DB init SQL scripts |
+| `backend/policy_extract/`    | Policy data extraction app (models, services, tasks)                        |
+| `backend/cins/`              | CINS product field mapping, schema, prompts, processors, validators         |
+| `backend/system/`            | System-level models and views                                               |
+| `web/`                       | Nuxt frontend                                                               |
+| `web/app/pages/`             | Nuxt file-based routes (incl. `commission-intake/`, `policy-extract.vue`)   |
+| `web/app/components/`        | Vue components                                                              |
+| `web/app/composables/`       | Vue 3 composables                                                           |
+| `web/app/stores/`            | Pinia stores                                                                |
+| `web/app/api/`               | Frontend HTTP client (`http.ts`)                                            |
+| `web/app/middleware/`        | Nuxt route middleware                                                       |
+| `web/app/layouts/`           | Nuxt layouts                                                                |
+| `conf/`                      | Nginx dev/prod configs                                                      |
+| `scripts/`                   | Helper shell scripts                                                        |
+| `postgres/`                  | DB init SQL scripts                                                         |
 
 ## Dev Workflow
 
@@ -64,17 +64,20 @@ Services in dev:
 
 Copy `.env.example` → `.env` at project root. Key vars:
 
-| Variable | Purpose |
-| --- | --- |
-| `SECRET_KEY` | Django secret key |
-| `WEBHOOK_SECRET_KEY` | Auth webhook HMAC key |
-| `BETTER_AUTH_URL` | Internal URL to auth service |
-| `DB_*` | PostgreSQL connection |
-| `AWS_*` | MinIO/S3 connection |
-| `CELERY_*` | Redis broker/backend config |
-| `NUXT_PUBLIC_*` | Frontend runtime config |
-| `SERVER_NAME` | Nginx server name (prod) |
-| `PROXY_PORT` | Nginx external port (default 8080) |
+| Variable                  | Purpose                                                                                                                             |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `SECRET_KEY`              | Django secret key                                                                                                                   |
+| `WEBHOOK_SECRET_KEY`      | Auth webhook HMAC key                                                                                                               |
+| `BETTER_AUTH_URL`         | Internal URL to auth service                                                                                                        |
+| `DB_*`                    | PostgreSQL connection                                                                                                               |
+| `AWS_*`                   | MinIO/S3 connection                                                                                                                 |
+| `CELERY_*`                | Redis broker/backend config                                                                                                         |
+| `CINS_SKIP_HIDDEN_SHEETS` | Exclude hidden/veryHidden Excel worksheets from commission extraction (default `true`; set `false` to roll back without a redeploy) |
+| `CINS_CODEGEN_GATE` | Codegen completeness gate: reconcile emitted Pass-3 rules against the source grid's rate-bearing rows; a dropped table/segment retries then flags `requires_review` (default `true`; `false` disables). Tunables: `CINS_CODEGEN_COVERAGE_FLOOR_RATIO`, `CINS_CODEGEN_COVERAGE_MIN_EXPECTED` |
+| `CINS_REGRESSION_GUARD` | Cross-run regression guard: a cache-miss re-extraction that lost a product/segment vs the last good run of the same document is warned + not cached (default `true`). Tunables: `CINS_REGRESSION_GUARD_RATIO`, `CINS_REGRESSION_GUARD_MIN_TOTAL` |
+| `NUXT_PUBLIC_*`           | Frontend runtime config                                                                                                             |
+| `SERVER_NAME`             | Nginx server name (prod)                                                                                                            |
+| `PROXY_PORT`              | Nginx external port (default 8080)                                                                                                  |
 
 ## Git Hooks
 

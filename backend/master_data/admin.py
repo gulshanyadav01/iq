@@ -2,6 +2,8 @@ from django.contrib import admin
 
 from master_data.models import (
     CarrierMaster,
+    CarrierProductHierarchyMaster,
+    CarrierRTOZoneMaster,
     FuelTypeMaster,
     InsurerMaster,
     MasterDataUpload,
@@ -85,10 +87,39 @@ class CarrierMasterAdmin(admin.ModelAdmin):
     readonly_fields = READONLY_TIMESTAMPS
 
 
+@admin.register(CarrierRTOZoneMaster)
+class CarrierRTOZoneMasterAdmin(admin.ModelAdmin):
+    list_display = ("carrier", "zone", "rto_code", "state_slug")
+    list_filter = ("carrier", "zone", "state_slug")
+    search_fields = ("zone", "rto_code")
+    readonly_fields = READONLY_TIMESTAMPS
+    ordering = ("carrier", "zone", "rto_code")
+
+
+@admin.register(CarrierProductHierarchyMaster)
+class CarrierProductHierarchyMasterAdmin(admin.ModelAdmin):
+    list_display = (
+        "carrier",
+        "product",
+        "sub_product",
+        "vehicle_subclass",
+        "canonical_subclass",
+    )
+    list_filter = ("carrier", "product", "sub_product")
+    search_fields = ("vehicle_subclass", "canonical_subclass")
+    readonly_fields = READONLY_TIMESTAMPS
+    ordering = ("carrier", "product", "sub_product", "vehicle_subclass")
+
+
 @admin.register(MasterDataUpload)
 class MasterDataUploadAdmin(admin.ModelAdmin):
     list_display = ("id", "uploaded_by", "status", "created_at")
     list_filter = ("status", "created_at")
     search_fields = ("uploaded_by__email", "id")
-    readonly_fields = READONLY_TIMESTAMPS + ("file", "uploaded_by", "summary", "error_message")
+    readonly_fields = READONLY_TIMESTAMPS + (
+        "file",
+        "uploaded_by",
+        "summary",
+        "error_message",
+    )
     ordering = ("-created_at",)

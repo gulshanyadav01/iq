@@ -170,7 +170,7 @@ Some commission tables use 2–4 header rows encoding multiple dimensions (e.g. 
 - Inspect ALL header rows to understand what each column encodes before writing parsing logic.
 - Use `parse_cc_range(header)` on each column header to detect engine CC ranges. If it returns a non-empty string, store it as `conditions["cc"]`. kW (electric power) bands are NOT CC — `parse_cc_range` returns "" for them, so electric vehicles get no `conditions["cc"]` (they carry no CC filter).
 - Use `parse_gvw_range(header)` on commercial-vehicle headers to detect Gross Vehicle Weight ranges (tonne or kg). If it returns a non-empty string, store it verbatim as `conditions["gvw"]` — the transformer converts tonnes to kilograms.
-- **Run `parse_gvw_range` / `parse_cc_range` on the SUBCLASS *row-label* cell too**, not only column headers — commercial grids encode weight/engine bands as sub-class row values (e.g. `GCCV | 2_UPTO_3.5T`). When non-empty, route to `conditions["gvw"]`/`conditions["cc"]` and keep only the residual (non-range) part as the sub-class. Store the sub-class under the canonical key `vehicle_sub_class` (and `vehicle_make`/`vehicle_model`) — the short keys `subclass`/`make`/`model` are dropped by the transformer.
+- **Run `parse_gvw_range` / `parse_cc_range` on the SUBCLASS _row-label_ cell too**, not only column headers — commercial grids encode weight/engine bands as sub-class row values (e.g. `GCCV | 2_UPTO_3.5T`). When non-empty, route to `conditions["gvw"]`/`conditions["cc"]` and keep only the residual (non-range) part as the sub-class. Store the sub-class under the canonical key `vehicle_sub_class` (and `vehicle_make`/`vehicle_model`) — the short keys `subclass`/`make`/`model` are dropped by the transformer.
 - If a header is a brand/make name (no digits, not a CC range), store it as `conditions["vehicle_make"]`.
 - If a header identifies a vehicle sub-class (e.g. "SCOOTER", "BIKE", "BUS"), store it as `conditions["vehicle_sub_class"]`.
 - A single column may encode multiple dimensions (e.g. "7 KW Bike" = an EV power band + a body sub-class). Split and assign each to its canonical key, but note the kW band is NOT cc: assign only the body word ("BIKE" -> `vehicle_sub_class`), set `conditions["fuel_type"]="Electric"`, and leave `cc` unset.
@@ -194,6 +194,24 @@ After splitting tables, for each `[type: commission]` table:
    - Identify which columns correspond to state groups (e.g., `AP/TS`, `TN`, `KA`)
    - Identify sub-columns within each state (e.g., `ACT`, `PACK`, blank spacers)
    - Identify fixed dimension columns at the start (e.g., `PROD`, `SUBCLASS`, `MAKE`, `MODEL`)
+   - **Column indices are LITERAL.** `parse_md_row` preserves every cell, including
+     blank spacers, so the split index of a header cell IS the split index of the data
+     cell below it. Enumerate the header row directly and use `i` as the column index:
+     ```python
+     # RIGHT — literal enumerate, blank spacers keep their slot:
+     for i, h in enumerate(parse_md_row(header_line)):
+         if ">" in h:
+             col_map.append((state_of(h), coverage_of(h), i))
+     # WRONG — filtering/compacting before indexing shifts every column after a
+     # spacer by one, so a rate is read from a NEIGHBOURING state's column:
+     headers = [h for h in parse_md_row(header_line) if h.strip()]   # NO
+     for i, h in enumerate(headers): ...                             # NO
+     ```
+     Never `filter`, `dict.fromkeys`, drop blanks, or otherwise compact the header
+     cells before indexing.
+   - **The state segment is VERBATIM.** A state×coverage header is `<state> > <COVERAGE>`;
+     take everything before the _last_ `>` unchanged as the state text. Do not
+     whitespace-split it. `"UP- East > ACT"` gives state `"UP- East"` (WRONG: `"East"`).
 3. Data rows come after the header rows. For each data row:
    - Read fixed dimension values (product type, subclass, make, model)
    - For each state × sub-column: read the cell value, skip empty or spacer cells
@@ -233,6 +251,24 @@ for table_name, ttype, lines in tables:
     #
     # YOU MUST BUILD THIS MAP from the actual header rows in commission_markdown.
     # Do not hardcode column indices from memory — derive them by reading the headers.
+    # col_index is the LITERAL parse_md_row split index (blank spacers included).
+    # Enumerate the header row directly; NEVER filter/compact before indexing, or a
+    # rate is read from a neighbouring state's column.
+    #
+    # Split a ">" header from the LEFT and take the FIRST TWO segments. A header may
+    # be 2 segments ("UP- East > ACT") or carry trailing rate columns
+    # ("AP/TS > ACT > 0.325"). rsplit(">", 1) is WRONG on the longer form — it yields
+    # state "AP/TS > ACT" and coverage "0.325", destroying the coverage dimension.
+    #
+    #   for i, h in enumerate(parse_md_row(header_line)):   # RIGHT
+    #       if ">" in h:
+    #           parts = [p.strip() for p in h.split(">")]
+    #           state = parts[0]                            # verbatim, not split()[-1]
+    #           coverage = parts[1]                         # parts[2:] are rate columns
+    #           col_map.append((state, coverage, i))
+    #
+    # coverage_type_text must NEVER be numeric. If it parses as a number you split
+    # the wrong way — re-split from the left.
 
     col_map = []  # fill from header rows
 
@@ -349,6 +385,7 @@ Schema per clause: `{clause_type, text, when?, effect?}`.
 Recognized `clause_type` values:
 
 **`applied_on_override`** — phrasing: "For X policy pay-out is on Y Premium"
+
 ```python
 {
     "clause_type": "applied_on_override",
@@ -359,6 +396,7 @@ Recognized `clause_type` values:
 ```
 
 **`conditional_deduction`** — phrasing: "if X then Y% of Z will be deducted"
+
 ```python
 {
     "clause_type": "conditional_deduction",
@@ -376,6 +414,7 @@ Recognized `clause_type` values:
 ```
 
 **`grid_alias`** — phrasing: "X grid is same as Y grid"
+
 ```python
 {
     "clause_type": "grid_alias",
@@ -386,6 +425,7 @@ Recognized `clause_type` values:
 ```
 
 **`mandatory_requirement`** — phrasing: "X is mandatory / X must be collected"
+
 ```python
 {
     "clause_type": "mandatory_requirement",
@@ -396,6 +436,7 @@ Recognized `clause_type` values:
 ```
 
 **`minimum_payout`** — phrasing: "minimum payout of Rs. X"
+
 ```python
 {
     "clause_type": "minimum_payout",

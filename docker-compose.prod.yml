@@ -1,7 +1,7 @@
 services:
   auth:
     image: rhobotsai/auth:latest
-    command: [ "start" ]
+    command: ["start"]
     ports:
       - ${PORT}:${PORT}
     environment:
@@ -29,7 +29,7 @@ services:
       WEBHOOK_EP: ${WEBHOOK_EP:-http://backend:8000/api/auth/webhook/}
     restart: always
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:10000/api/auth/ok" ]
+      test: ["CMD", "curl", "-f", "http://localhost:10000/api/auth/ok"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -42,18 +42,13 @@ services:
     ports:
       - "${API_PORT}:8000"
     volumes: &backend-volumes
-    volumes: &backend-volumes
       - operator-static:/app/static
       # Vertex AI service-account key (read-only); only consulted when
       # GOOGLE_GENAI_USE_VERTEXAI is set. Point GCP_CREDENTIALS_DIR at the host
       # dir holding sa-key.json.
       - ${GCP_CREDENTIALS_DIR:-./.gcp}:/secrets/gcp:ro
-      # Vertex AI service-account key (read-only); only consulted when
-      # GOOGLE_GENAI_USE_VERTEXAI is set. Point GCP_CREDENTIALS_DIR at the host
-      # dir holding sa-key.json.
-      - ${GCP_CREDENTIALS_DIR:-./.gcp}:/secrets/gcp:ro
     environment: &backend-env
-      DEBUG:  ${DEBUG:-false}
+      DEBUG: ${DEBUG:-false}
       APP_ENV: ${APP_ENV:-PROD}
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required in production}
       WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:?WEBHOOK_SECRET_KEY is required in production}
@@ -190,7 +185,15 @@ services:
       - web
     restart: always
     healthcheck:
-      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:80/" ]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--spider",
+          "http://127.0.0.1:80/",
+        ]
       interval: 10s
       timeout: 3s
       retries: 3

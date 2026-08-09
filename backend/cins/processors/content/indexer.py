@@ -20,17 +20,64 @@ from cins.processors.extractors.convert_xlsb import (
     XlsbConversionError,
 )
 from cins.processors.content.csv_to_markdown import csv_to_markdown
+from cins.processors.core.codegen_coverage import count_rate_bearing_rows
 from cins.processors.content.content_cleaning import (
     clean_email_content,
     clean_master_data_content,
     detect_csv_tables,
 )
+from cins.processors.core.sheet_visibility import (
+    VISIBLE_SHEET_STATE,
+    derive_sheet_sets,
+    describe_hidden,
+    is_sheet_visible,
+)
 
 # Setup logging
 logger = logging.getLogger("content_indexer")
 
-# Current indexer version for cache invalidation
-INDEXER_VERSION = "1.3"
+# Current indexer version for cache invalidation.
+#
+# 1.4 — sheet_classifications entries are written for every sheet (not only
+# classified ones) and carry a "visibility" key. This is a *data marker*, not a
+# cache invalidator: the only functional consumer is the on-disk index cache in
+# `_is_cache_valid`, which commission intake never hits (it indexes with
+# force_reindex=True into a temp dir it then deletes). The frontend uses the
+# persisted value to tell rows that carry visibility data from ones that do not.
+# Nothing re-indexes existing rows automatically — they keep 1.3 until re-indexed.
+#
+# 1.5 — each commission table in table_splits carries a deterministic
+# `header_row_count` and `rate_cell_count` (host-counted rate-bearing data rows
+# from the raw CSV slice). The codegen completeness gate
+# (`processors/core/codegen_coverage.py`) reconciles emitted rules against
+# rate_cell_count to catch whole-table/segment drops. Docs indexed before 1.5
+# lack these keys; the gate fails open on them.
+#
+# 1.6 — two CSV-shape fixes. (a) `expand_merged_cells` now propagates a merged
+# value to the VISIBLE cells of its range even when the range's top-left cell
+# sits in a hidden row/column; Chola's TW sheet hides AX and BB, the exact
+# top-left cells of the "Hero vs Bajaj" and "Bajaj" group headers, so those
+# makes were dropped from the visible sibling columns. (b) `detect_csv_tables`
+# splits grids laid out side by side in the same rows onto separate column
+# bands. Both change the indexed CSV/markdown, so cached content from earlier
+# versions is not comparable.
+# 1.7 — `_build_compound_headers` no longer suppresses a vertically repeated
+# NUMERIC header cell. When Pass 0C swallows the first data rows into the header
+# band (Chola GCCV: `1_GCCV_3W` + `1_GCCV_3W[Electric]`), their rates ride along
+# as trailing `>` segments; two rows publishing the same rate collapsed to one
+# segment and the electric 3-wheeler was dropped for 18 of 20 state groups.
+# Changes the indexed markdown for any multi-header-row grid, so cached content
+# from earlier versions is not comparable.
+#
+# 1.8 — `effective_header_row_count` pushes DATA rows that Excel/Pass-0C header
+# detection swallowed into the header band back into the data section. Chola's
+# GCCV sheet reported a 5-row header whose last two rows are the real
+# `1_GCCV_3W` / `1_GCCV_3W[Electric]` commission rows; burying them in compound
+# labels left their 64 rate cells reachable only by a bespoke recovery loop in
+# generated Pass-3 code, which one codegen run simply omitted — emitting ZERO
+# goods-3-wheeler rules. Codegen now sees ordinary positional rows. The codegen
+# coverage gate shares the same trimmed band so "expected" counts them too.
+INDEXER_VERSION = "1.8"
 
 
 def _retag_single_commission_table(content_str: str, sheet_name: str) -> str:
@@ -213,39 +260,39 @@ class IndexedDocument:
         return self.metadata.get("sheet_classifications", {})
 
     def get_commission_sheets(self) -> List[str]:
-        """Get list of sheet names classified as commission_data.
+        """Get list of *visible* sheet names classified as commission_data.
 
         Returns:
             List of sheet names (empty if no classifications or no commission sheets)
         """
-        classifications = self.get_sheet_classifications()
-        return [
-            sheet_name
-            for sheet_name, info in classifications.items()
-            if info.get("sheet_type") == "commission_data"
-        ]
+        return derive_sheet_sets(self.get_sheet_classifications()).commission
 
     def get_master_sheets(self) -> List[str]:
-        """Get list of sheet names classified as master_data.
+        """Get list of *visible* sheet names classified as master_data.
 
-        Returns:
-            List of sheet names (empty if no classifications or no master sheets)
+        Hidden sheets are excluded here rather than only at routing time: this
+        list builds `master_context`, which is appended to the Pass 1 prompt and
+        *is* the Pass 2 prompt. A hidden lookup tab left in here would keep
+        steering extraction of the visible sheets.
         """
-        classifications = self.get_sheet_classifications()
-        return [
-            sheet_name
-            for sheet_name, info in classifications.items()
-            if info.get("sheet_type") == "master_data"
-        ]
+        return derive_sheet_sets(self.get_sheet_classifications()).master
+
+    def get_hidden_sheets(self) -> List[str]:
+        """Get list of sheet names excluded from extraction (hidden tabs)."""
+        return derive_sheet_sets(self.get_sheet_classifications()).hidden
 
 
-def _convert_excel_to_csv(excel_path: str, output_dir: Path, sheet_name: Optional[str] = None) -> Dict:
+def _convert_excel_to_csv(
+    excel_path: str, output_dir: Path, sheet_name: Optional[str] = None
+) -> Dict:
     """
     Convert Excel file (or specific sheet) to CSV using ExcelToCSVConverter.
 
     Returns dict with: sheets, master_sheets, commission_sheets, sheet_contents (backward compat).
     """
-    converter = ExcelToCSVConverter(output_dir=output_dir, fill_empty='', enable_classification=True)
+    converter = ExcelToCSVConverter(
+        output_dir=output_dir, fill_empty="", enable_classification=True
+    )
 
     sheet_contents = {}
     all_sheet_results = []
@@ -254,35 +301,35 @@ def _convert_excel_to_csv(excel_path: str, output_dir: Path, sheet_name: Optiona
 
     if sheet_name:
         result = converter.process_sheet(excel_path, sheet_name, output_dir)
-        csv_path = Path(result['csv_path'])
-        csv_content = csv_path.read_text(encoding='utf-8')
-        metadata_path = Path(result['metadata_path'])
-        metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
+        csv_path = Path(result["csv_path"])
+        csv_content = csv_path.read_text(encoding="utf-8")
+        metadata_path = Path(result["metadata_path"])
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         formatted_content = _format_csv_with_metadata(csv_content, metadata)
         sheet_contents[sheet_name] = formatted_content
-        classification = result.get('classification', {})
-        result['formatted_content'] = formatted_content
+        classification = result.get("classification", {})
+        result["formatted_content"] = formatted_content
         all_sheet_results.append(result)
-        sheet_type = classification.get('sheet_type', 'master_data')
-        if sheet_type == 'commission_data':
+        sheet_type = classification.get("sheet_type", "master_data")
+        if sheet_type == "commission_data":
             commission_sheets.append(result)
         else:
             master_sheets.append(result)
     else:
         results = converter.process_workbook(excel_path, output_dir)
-        for sheet_result in results['sheets']:
-            sn = sheet_result['sheet_name']
-            csv_path = Path(sheet_result['csv_path'])
-            csv_content = csv_path.read_text(encoding='utf-8')
-            metadata_path = Path(sheet_result['metadata_path'])
-            metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
+        for sheet_result in results["sheets"]:
+            sn = sheet_result["sheet_name"]
+            csv_path = Path(sheet_result["csv_path"])
+            csv_content = csv_path.read_text(encoding="utf-8")
+            metadata_path = Path(sheet_result["metadata_path"])
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             formatted_content = _format_csv_with_metadata(csv_content, metadata)
             sheet_contents[sn] = formatted_content
-            classification = sheet_result.get('classification', {})
-            sheet_result['formatted_content'] = formatted_content
+            classification = sheet_result.get("classification", {})
+            sheet_result["formatted_content"] = formatted_content
             all_sheet_results.append(sheet_result)
-            sheet_type = classification.get('sheet_type', 'master_data')
-            if sheet_type == 'commission_data':
+            sheet_type = classification.get("sheet_type", "master_data")
+            if sheet_type == "commission_data":
                 commission_sheets.append(sheet_result)
             else:
                 master_sheets.append(sheet_result)
@@ -297,12 +344,14 @@ def _convert_excel_to_csv(excel_path: str, output_dir: Path, sheet_name: Optiona
 
 def _format_csv_with_metadata(csv_content: str, metadata: Dict) -> str:
     """Format CSV content with metadata context for LLM consumption."""
-    header_row_count = len(metadata.get('formatting', {}).get('detected_header_rows', []))
+    header_row_count = len(
+        metadata.get("formatting", {}).get("detected_header_rows", [])
+    )
     markdown_table = csv_to_markdown(csv_content, header_row_count=header_row_count)
-    sheet_name = metadata.get('sheet_name', 'Unknown')
-    dimensions = metadata.get('dimensions', {})
-    rows = dimensions.get('rows', 0)
-    cols = dimensions.get('cols', 0)
+    sheet_name = metadata.get("sheet_name", "Unknown")
+    dimensions = metadata.get("dimensions", {})
+    rows = dimensions.get("rows", 0)
+    cols = dimensions.get("cols", 0)
     formatted_content = f"## Sheet: {sheet_name}\n"
     formatted_content += f"**Dimensions**: {rows} rows × {cols} columns\n\n"
     formatted_content += markdown_table
@@ -317,7 +366,9 @@ class ContentIndexer:
     in input-indexed/ for fast access during multiple LLM extraction runs.
     """
 
-    def __init__(self, indexed_dir: Path, enable_cleaning: bool = True, llm_provider: str = None):
+    def __init__(
+        self, indexed_dir: Path, enable_cleaning: bool = True, llm_provider: str = None
+    ):
         """
         Initialize content indexer.
 
@@ -369,6 +420,7 @@ class ContentIndexer:
         Returns:
             IndexedDocument with metadata and content paths
         """
+
         def _progress(step: str, detail: str = ""):
             if progress_callback:
                 try:
@@ -410,17 +462,26 @@ class ContentIndexer:
             elif file_ext == ".pdf":
                 metadata = self._index_pdf(file_path, output_dir, _progress)
             elif file_ext in [".xlsx", ".xls", ".xlsm"]:
-                metadata = self._index_excel(file_path, output_dir, excel_mode, progress=_progress)
+                metadata = self._index_excel(
+                    file_path, output_dir, excel_mode, progress=_progress
+                )
             elif file_ext == ".xlsb":
                 # openpyxl can't read .xlsb; convert via LibreOffice first.
                 converted_path = None
                 try:
                     converted_path = convert_xlsb_to_xlsx(file_path)
                     metadata = self._index_excel(
-                        converted_path, output_dir, excel_mode, progress=_progress,
+                        converted_path,
+                        output_dir,
+                        excel_mode,
+                        progress=_progress,
                     )
-                    metadata.setdefault("source_metadata", {})["converted_from"] = "xlsb"
-                    metadata["source_metadata"]["original_filename"] = file_path_obj.name
+                    metadata.setdefault("source_metadata", {})["converted_from"] = (
+                        "xlsb"
+                    )
+                    metadata["source_metadata"]["original_filename"] = (
+                        file_path_obj.name
+                    )
                 except XlsbConversionError as e:
                     raise ValueError(f"Failed to convert .xlsb file: {e}") from e
                 finally:
@@ -584,6 +645,7 @@ class ContentIndexer:
         Extracts email metadata, body, and attachments.
         For Excel attachments, routes to _index_excel() with email context.
         """
+
         def _p(step, detail=""):
             if progress:
                 progress(step, detail)
@@ -698,8 +760,11 @@ class ContentIndexer:
 
                 try:
                     excel_metadata = self._index_excel(
-                        temp_path, output_dir, mode="sheet_by_sheet",
-                        sheet_name_prefix=prefix, progress=progress,
+                        temp_path,
+                        output_dir,
+                        mode="sheet_by_sheet",
+                        sheet_name_prefix=prefix,
+                        progress=progress,
                     )
 
                     all_sheet_files.extend(
@@ -741,8 +806,12 @@ class ContentIndexer:
 
             if all_sheet_files:
                 metadata["content_files"]["sheets"] = all_sheet_files
-                metadata["source_metadata"]["excel_attachments"] = excel_attachment_names
-                metadata["source_metadata"]["excel_attachment"] = excel_attachment_names[0] if excel_attachment_names else None
+                metadata["source_metadata"]["excel_attachments"] = (
+                    excel_attachment_names
+                )
+                metadata["source_metadata"]["excel_attachment"] = (
+                    excel_attachment_names[0] if excel_attachment_names else None
+                )
                 metadata["source_metadata"]["sheet_names"] = all_sheet_names
                 metadata["source_metadata"]["successful_sheets"] = len(all_sheet_files)
                 metadata["source_metadata"]["failed_sheets"] = all_failed_sheets
@@ -786,14 +855,14 @@ class ContentIndexer:
         """
         from cins.processors.extractors.extract_eml import extract_cid_refs_from_body
         from cins.processors.extractors.image_to_markdown import extract_table_markdown
+
         try:
             from cins.processors.extractors.sheet_classifier import SheetClassifier
         except ImportError:
             SheetClassifier = None  # type: ignore
 
         image_attachments = [
-            att for att in email_data.get("attachments", [])
-            if att.get("image_path")
+            att for att in email_data.get("attachments", []) if att.get("image_path")
         ]
         if not image_attachments:
             return
@@ -813,7 +882,8 @@ class ContentIndexer:
         # (b) look like grids. Older quoted images and tiny logos are dropped
         # before any LLM call.
         surviving = [
-            att for att in image_attachments
+            att
+            for att in image_attachments
             if att.get("is_likely_table")
             and att.get("content_id")
             and att["content_id"] in cid_whitelist
@@ -914,8 +984,12 @@ class ContentIndexer:
         return metadata
 
     def _index_excel(
-        self, file_path: str, output_dir: Path, mode: str = "sheet_by_sheet",
-        sheet_name_prefix: str = "", progress=None,
+        self,
+        file_path: str,
+        output_dir: Path,
+        mode: str = "sheet_by_sheet",
+        sheet_name_prefix: str = "",
+        progress=None,
     ) -> dict:
         """
         Index Excel file sheet-by-sheet.
@@ -927,6 +1001,7 @@ class ContentIndexer:
                 when multiple Excel attachments share the same sheet names.
             progress: Optional callable(step, detail) for progress reporting.
         """
+
         def _p(step, detail=""):
             if progress:
                 progress(step, detail)
@@ -958,12 +1033,22 @@ class ContentIndexer:
             for sheet_result in csv_data.get("sheets", []):
                 sheet_name = sheet_result.get("sheet_name")
                 classification = sheet_result.get("classification")
-                prefixed_name = f"{sheet_name_prefix}{sheet_name}" if sheet_name_prefix and sheet_name else sheet_name
+                prefixed_name = (
+                    f"{sheet_name_prefix}{sheet_name}"
+                    if sheet_name_prefix and sheet_name
+                    else sheet_name
+                )
 
-                if sheet_name and classification:
+                # Write an entry for every sheet, classified or not. An
+                # unclassified sheet with no entry has nowhere to hang its
+                # visibility, so a hidden sheet whose classify call threw would
+                # read as visible and get processed.
+                if sheet_name:
                     sheet_classifications[prefixed_name] = {
-                        "sheet_type": classification.get("sheet_type"),
-                        "confidence": classification.get("confidence"),
+                        "sheet_type": (classification or {}).get("sheet_type"),
+                        "confidence": (classification or {}).get("confidence"),
+                        "visibility": sheet_result.get("sheet_state")
+                        or VISIBLE_SHEET_STATE,
                     }
 
                 if sheet_name and sheet_result.get("csv_path"):
@@ -971,15 +1056,30 @@ class ContentIndexer:
 
                 if sheet_name and sheet_result.get("metadata_path"):
                     try:
-                        meta_json = json.loads(Path(sheet_result["metadata_path"]).read_text(encoding="utf-8"))
+                        meta_json = json.loads(
+                            Path(sheet_result["metadata_path"]).read_text(
+                                encoding="utf-8"
+                            )
+                        )
                         sheet_header_row_counts[sheet_name] = len(
-                            meta_json.get("formatting", {}).get("detected_header_rows", [])
+                            meta_json.get("formatting", {}).get(
+                                "detected_header_rows", []
+                            )
                         )
                     except Exception:
                         sheet_header_row_counts[sheet_name] = 0
         except Exception as e:
             logger.error(f"Failed to convert Excel to CSV: {e}")
             raise
+
+        hidden_description = describe_hidden(sheet_classifications)
+        if hidden_description:
+            # Logged at index time *and* at routing time — the two are separated
+            # by a Celery hop, so neither log alone explains a coverage gap.
+            logger.info(
+                "Excluding non-visible sheet(s) from extraction: %s",
+                hidden_description,
+            )
 
         sheet_files = []
         failed_sheets = []
@@ -996,7 +1096,9 @@ class ContentIndexer:
                 )
 
                 safe_name = self._sanitize_filename(
-                    f"{sheet_name_prefix}{sheet_name}" if sheet_name_prefix else sheet_name
+                    f"{sheet_name_prefix}{sheet_name}"
+                    if sheet_name_prefix
+                    else sheet_name
                 )
 
                 if sheet_name not in sheet_contents:
@@ -1007,19 +1109,40 @@ class ContentIndexer:
                 content_str = sheet_contents[sheet_name]
 
                 sheet_type = None
-                prefixed_name = f"{sheet_name_prefix}{sheet_name}" if sheet_name_prefix else sheet_name
+                prefixed_name = (
+                    f"{sheet_name_prefix}{sheet_name}"
+                    if sheet_name_prefix
+                    else sheet_name
+                )
                 if sheet_classifications and prefixed_name in sheet_classifications:
                     sheet_type = sheet_classifications[prefixed_name].get("sheet_type")
                 is_master_data_sheet = sheet_type == "master_data"
                 is_commission_data_sheet = sheet_type == "commission_data"
 
-                if self.enable_cleaning and is_master_data_sheet:
+                # A hidden sheet is still indexed (the UI shows what was skipped,
+                # and "hidden + commission_data" is the signal that the wrong tab
+                # was hidden) but never reaches an extraction pass — so Pass 0B
+                # cleaning and Pass 0C table detection would burn LLM calls
+                # producing artifacts nothing consumes. Classification, which
+                # already ran during CSV conversion, is deliberately kept.
+                is_hidden_sheet = not is_sheet_visible(
+                    sheet_classifications.get(prefixed_name)
+                )
+
+                if (
+                    self.enable_cleaning
+                    and is_master_data_sheet
+                    and not is_hidden_sheet
+                ):
                     service = self._get_llm_service()
                     if service:
                         logger.info(
                             f"  Applying Pass 0B to master data sheet '{sheet_name}'..."
                         )
-                        _p("cleaning_sheet", f"Pass 0B: cleaning master data sheet '{sheet_name}'")
+                        _p(
+                            "cleaning_sheet",
+                            f"Pass 0B: cleaning master data sheet '{sheet_name}'",
+                        )
                         try:
                             cleaned_content, md_cleaning_meta = (
                                 clean_master_data_content(content_str, service)
@@ -1038,13 +1161,20 @@ class ContentIndexer:
                     )
 
                 table_split_info = None
-                if self.enable_cleaning and is_commission_data_sheet:
+                if (
+                    self.enable_cleaning
+                    and is_commission_data_sheet
+                    and not is_hidden_sheet
+                ):
                     service = self._get_llm_service()
                     if service:
                         logger.info(
                             f"  Applying Pass 0C (Table Detection) to commission sheet '{sheet_name}'..."
                         )
-                        _p("detecting_tables", f"Pass 0C: detecting tables in commission sheet '{sheet_name}'")
+                        _p(
+                            "detecting_tables",
+                            f"Pass 0C: detecting tables in commission sheet '{sheet_name}'",
+                        )
                         try:
                             raw_csv_path = sheet_csv_paths.get(sheet_name)
                             raw_csv_content = (
@@ -1067,7 +1197,9 @@ class ContentIndexer:
                                 )
                                 md_path = sheets_dir / f"{safe_name}.md"
                                 md_path.write_text(
-                                    _retag_single_commission_table(content_str, sheet_name),
+                                    _retag_single_commission_table(
+                                        content_str, sheet_name
+                                    ),
                                     encoding="utf-8",
                                 )
                                 sheet_files.append(safe_name)
@@ -1087,7 +1219,9 @@ class ContentIndexer:
                             ):
                                 md_path = sheets_dir / f"{safe_name}.md"
                                 md_path.write_text(
-                                    _retag_single_commission_table(content_str, sheet_name),
+                                    _retag_single_commission_table(
+                                        content_str, sheet_name
+                                    ),
                                     encoding="utf-8",
                                 )
                                 sheet_files.append(safe_name)
@@ -1111,28 +1245,59 @@ class ContentIndexer:
                                 md_parts = []
 
                                 for table_info in tables_list:
-                                    table_type = table_info.get("table_type", "commission")
+                                    table_type = table_info.get(
+                                        "table_type", "commission"
+                                    )
+                                    hrc = sheet_header_row_counts.get(sheet_name, 0)
                                     if table_type == "notes":
-                                        import csv as _csv, io as _io
+                                        import csv as _csv
+                                        import io as _io
+
                                         note_lines = []
-                                        for row in _csv.reader(_io.StringIO(table_info["table_csv_content"])):
+                                        for row in _csv.reader(
+                                            _io.StringIO(
+                                                table_info["table_csv_content"]
+                                            )
+                                        ):
                                             seen = []
                                             for c in row:
                                                 val = c.strip()
-                                                if val and (not seen or val != seen[-1]):
+                                                if val and (
+                                                    not seen or val != seen[-1]
+                                                ):
                                                     seen.append(val)
                                             if seen:
                                                 note_lines.append(" ".join(seen))
-                                        table_md = "\n".join(note_lines) if note_lines else "[Empty notes section]"
+                                        table_md = (
+                                            "\n".join(note_lines)
+                                            if note_lines
+                                            else "[Empty notes section]"
+                                        )
                                     else:
-                                        hrc = sheet_header_row_counts.get(sheet_name, 0)
-                                        table_md = csv_to_markdown(table_info["table_csv_content"], header_row_count=hrc)
+                                        table_md = csv_to_markdown(
+                                            table_info["table_csv_content"],
+                                            header_row_count=hrc,
+                                        )
                                     md_parts.append(
                                         f"## Table {table_info['table_index']}: {table_info['table_name']} [type: {table_type}]\n\n{table_md}"
                                     )
 
                                     if table_info.get("confidence", 1.0) < 0.7:
                                         requires_review = True
+
+                                    # Deterministic shape contract for the codegen
+                                    # completeness gate: count the rate-bearing data
+                                    # rows this commission table CONTAINS while its raw
+                                    # CSV slice is still in hand (it is discarded after
+                                    # markdown build). Only commission tables gate.
+                                    rate_cell_count = (
+                                        count_rate_bearing_rows(
+                                            table_info.get("table_csv_content", ""),
+                                            header_row_count=hrc,
+                                        )
+                                        if table_type == "commission"
+                                        else 0
+                                    )
 
                                     split_tables_meta.append(
                                         {
@@ -1152,6 +1317,8 @@ class ContentIndexer:
                                             ),
                                             "start_row": table_info.get("start_row"),
                                             "end_row": table_info.get("end_row"),
+                                            "header_row_count": hrc,
+                                            "rate_cell_count": rate_cell_count,
                                         }
                                     )
 
@@ -1195,7 +1362,13 @@ class ContentIndexer:
                         md_path.write_text(content_str, encoding="utf-8")
                         sheet_files.append(safe_name)
                 else:
-                    if is_commission_data_sheet:
+                    if is_hidden_sheet:
+                        logger.info(
+                            f"  Sheet '{sheet_name}' is not visible "
+                            f"({sheet_classifications.get(prefixed_name, {}).get('visibility')}); "
+                            f"indexed for reference but skipping Pass 0B/0C"
+                        )
+                    elif is_commission_data_sheet:
                         logger.info(
                             f"  Sheet '{sheet_name}' is commission data but cleaning is disabled, skipping Pass 0C"
                         )
@@ -1238,7 +1411,8 @@ class ContentIndexer:
                     for name in sheet_names
                     if self._sanitize_filename(
                         f"{sheet_name_prefix}{name}" if sheet_name_prefix else name
-                    ) in sheet_files
+                    )
+                    in sheet_files
                 ],
                 "total_sheets": len(sheet_names),
                 "successful_sheets": len(sheet_files),
@@ -1468,6 +1642,7 @@ class ContentIndexer:
         Conservative: if no boundary is found, returns the input unchanged.
         """
         import re
+
         if not html:
             return html
         boundary_patterns = [

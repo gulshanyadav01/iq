@@ -22,7 +22,7 @@ from cins.schema.extraction_passes import (
     ProductWithRules,
     RuleEntry,
 )
-from cins.validators.raw_extraction_validator import RawExtractionValidator
+
 
 def _render_template(text: str) -> str:
     """
@@ -33,11 +33,9 @@ def _render_template(text: str) -> str:
     """
     from cins.prompts import _shared  # local import to avoid Django boot order
 
-    return (
-        text
-        .replace("{codegen_sandbox_rules}", _shared.CODEGEN_SANDBOX_RULES)
-        .replace("{product_taxonomy}", _shared.PRODUCT_TAXONOMY)
-    )
+    return text.replace(
+        "{codegen_sandbox_rules}", _shared.CODEGEN_SANDBOX_RULES
+    ).replace("{product_taxonomy}", _shared.PRODUCT_TAXONOMY)
 
 
 @functools.lru_cache(maxsize=None)
@@ -56,7 +54,9 @@ def _load_carrier_overlay_file(code, pass_id):
     except FileNotFoundError:
         return ""
     except Exception as e:
-        print(f"Warning: Could not load carrier overlay {path.name}: {e}", file=sys.stderr)
+        print(
+            f"Warning: Could not load carrier overlay {path.name}: {e}", file=sys.stderr
+        )
         return ""
 
 
@@ -81,7 +81,9 @@ def get_carrier_overlay(provider_name, pass_id="pass3"):
 def _inject_carrier_overlay(prompt: str, provider_name, pass_id="pass3") -> str:
     """Substitute the `{carrier_overlay}` placeholder in a base prompt with the
     resolved provider's overlay (or '' when there is none)."""
-    return prompt.replace("{carrier_overlay}", get_carrier_overlay(provider_name, pass_id))
+    return prompt.replace(
+        "{carrier_overlay}", get_carrier_overlay(provider_name, pass_id)
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -235,7 +237,6 @@ def _is_truncated_json(raw_json: str, provider: str) -> bool:
     tail = raw_json[-100:].rstrip() if len(raw_json) >= 100 else raw_json.rstrip()
     ends_clean = tail.endswith("}")
     return len(raw_json) >= max_chars * 0.90 or not ends_clean
-
 
 
 def _extract_pass1_metadata(
@@ -543,10 +544,16 @@ def _extract_pass2_via_codegen(
                 f"# Pass 2 code-gen complete: {len(valid_entries)} master data entries",
                 file=sys.stderr,
             )
-            return MasterDataExtraction(
-                master_data=valid_entries,
-                document_structure_notes="; ".join(error_notes) if error_notes else "",
-            ), generated_code, user_prompt
+            return (
+                MasterDataExtraction(
+                    master_data=valid_entries,
+                    document_structure_notes="; ".join(error_notes)
+                    if error_notes
+                    else "",
+                ),
+                generated_code,
+                user_prompt,
+            )
 
         # All entries failed validation — retry
         last_error = (
@@ -563,10 +570,14 @@ def _extract_pass2_via_codegen(
         f"# Pass 2 code-gen: all {MAX_CODEGEN_ATTEMPTS} attempts failed, returning empty extraction",
         file=sys.stderr,
     )
-    return MasterDataExtraction(
-        master_data=[],
-        document_structure_notes=f"Code-gen failed after {MAX_CODEGEN_ATTEMPTS} attempts: {last_error}",
-    ), last_generated_code, user_prompt
+    return (
+        MasterDataExtraction(
+            master_data=[],
+            document_structure_notes=f"Code-gen failed after {MAX_CODEGEN_ATTEMPTS} attempts: {last_error}",
+        ),
+        last_generated_code,
+        user_prompt,
+    )
 
 
 def _format_master_data_as_text(master_data_extraction):
@@ -593,7 +604,6 @@ def _format_master_data_as_text(master_data_extraction):
           • HR-72, HR-55, HR-51, HR-38, HR-26 → NCR_HR
     """
     # Import here to avoid circular dependency
-    from cins.schema.extraction_passes import MasterDataExtraction
 
     if (
         not master_data_extraction.master_data
@@ -668,6 +678,7 @@ def _extract_pass3_via_codegen(
     master_data_extraction,
     output_dir=None,
     filename_prefix="",
+    table_shape=None,
 ):
     """
     Code-generation fallback for Pass 3.
@@ -706,6 +717,7 @@ def _extract_pass3_via_codegen(
         validate_code_ast,
         validate_entries,
     )
+    from cins.processors.core.codegen_coverage import table_coverage_report
 
     MAX_CODEGEN_ATTEMPTS = 3
 
@@ -804,6 +816,16 @@ def _extract_pass3_via_codegen(
     valid_entries = []
     error_notes = []
     code = ""
+    # Set when the deterministic completeness gate still fails on the final attempt:
+    # we keep the partial output but flag the pass loudly instead of shipping a
+    # silent-green empty (the client-visible May1/June whole-segment drop).
+    gate_requires_review = False
+    # Best (largest) valid set seen across attempts. The gate can force extra
+    # retries on a shortfall; if a later attempt then HARD-fails (empty result /
+    # all-invalid), we must fall back to this instead of shipping zero — the gate
+    # exists to prevent a drop, it must never manufacture one.
+    best_entries = []
+    best_code = ""
 
     for attempt in range(1, MAX_CODEGEN_ATTEMPTS + 1):
         print(
@@ -822,13 +844,17 @@ def _extract_pass3_via_codegen(
             error_context = _build_error_context(f"LLM API error: {e}", code, attempt)
             if attempt < MAX_CODEGEN_ATTEMPTS:
                 continue
-            return RulesExtraction(
-                products=[],
-                overall_ambiguities=[
-                    f"Code-gen LLM call failed after {attempt} attempts: {e}"
-                ],
-                overall_requires_review=True,
-            ), code, user_prompt
+            return (
+                RulesExtraction(
+                    products=[],
+                    overall_ambiguities=[
+                        f"Code-gen LLM call failed after {attempt} attempts: {e}"
+                    ],
+                    overall_requires_review=True,
+                ),
+                code,
+                user_prompt,
+            )
 
         code = _strip_fences(raw_code)
         print(f"#   → Generated code: {len(code):,} chars", file=sys.stderr)
@@ -853,13 +879,17 @@ def _extract_pass3_via_codegen(
             error_context = _build_error_context(e, code, attempt)
             if attempt < MAX_CODEGEN_ATTEMPTS:
                 continue
-            return RulesExtraction(
-                products=[],
-                overall_ambiguities=[
-                    f"Code-gen AST validation failed after {attempt} attempts: {e}"
-                ],
-                overall_requires_review=True,
-            ), code, user_prompt
+            return (
+                RulesExtraction(
+                    products=[],
+                    overall_ambiguities=[
+                        f"Code-gen AST validation failed after {attempt} attempts: {e}"
+                    ],
+                    overall_requires_review=True,
+                ),
+                code,
+                user_prompt,
+            )
 
         # Execute — pass the full prompt as commission_markdown so code can read it
         try:
@@ -869,13 +899,17 @@ def _extract_pass3_via_codegen(
             error_context = _build_error_context(e, code, attempt)
             if attempt < MAX_CODEGEN_ATTEMPTS:
                 continue
-            return RulesExtraction(
-                products=[],
-                overall_ambiguities=[
-                    f"Code-gen execution failed after {attempt} attempts: {e}"
-                ],
-                overall_requires_review=True,
-            ), code, user_prompt
+            return (
+                RulesExtraction(
+                    products=[],
+                    overall_ambiguities=[
+                        f"Code-gen execution failed after {attempt} attempts: {e}"
+                    ],
+                    overall_requires_review=True,
+                ),
+                code,
+                user_prompt,
+            )
 
         print(f"#   → Code-gen produced {len(raw_dicts)} raw dicts", file=sys.stderr)
 
@@ -886,13 +920,23 @@ def _extract_pass3_via_codegen(
             error_context = _build_error_context(msg, code, attempt)
             if attempt < MAX_CODEGEN_ATTEMPTS:
                 continue
-            return RulesExtraction(
-                products=[],
-                overall_ambiguities=[
-                    f"Code-gen produced no rules after {attempt} attempts"
-                ],
-                overall_requires_review=True,
-            ), code, user_prompt
+            if best_entries:
+                # A prior attempt produced real rows (gate forced this retry) —
+                # keep them, flagged, rather than shipping an empty result.
+                valid_entries, code = best_entries, best_code
+                gate_requires_review = True
+                break
+            return (
+                RulesExtraction(
+                    products=[],
+                    overall_ambiguities=[
+                        f"Code-gen produced no rules after {attempt} attempts"
+                    ],
+                    overall_requires_review=True,
+                ),
+                code,
+                user_prompt,
+            )
 
         # Pydantic validation
         valid_entries, error_notes = validate_entries(raw_dicts)
@@ -907,6 +951,12 @@ def _extract_pass3_via_codegen(
             if len(error_notes) > 5:
                 print(f"#     ... and {len(error_notes) - 5} more", file=sys.stderr)
 
+        # Remember the largest valid set across attempts, so a gate-forced retry
+        # that later hard-fails can fall back to it instead of shipping zero.
+        if len(valid_entries) > len(best_entries):
+            best_entries = valid_entries
+            best_code = code
+
         # All entries failed validation — retry
         if not valid_entries and error_notes:
             msg = "\n".join(error_notes[:3])
@@ -914,15 +964,66 @@ def _extract_pass3_via_codegen(
             error_context = _build_error_context(msg, code, attempt)
             if attempt < MAX_CODEGEN_ATTEMPTS:
                 continue
-            return RulesExtraction(
-                products=[],
-                overall_ambiguities=error_notes,
-                overall_requires_review=True,
-            ), code, user_prompt
+            if best_entries:
+                # Fall back to a prior attempt's real rows rather than shipping
+                # empty (the gate must not manufacture the drop it guards against).
+                valid_entries, code = best_entries, best_code
+                gate_requires_review = True
+                break
+            return (
+                RulesExtraction(
+                    products=[],
+                    overall_ambiguities=error_notes,
+                    overall_requires_review=True,
+                ),
+                code,
+                user_prompt,
+            )
+
+        # ── Completeness gate ────────────────────────────────────────────────
+        # Reconcile emitted rules against the host-counted rate-bearing rows per
+        # commission table. A dropped table / segment fails the attempt so the
+        # retry channel re-prompts with a deterministic, table-specific gap message.
+        # Fails open when no shape was persisted (legacy docs).
+        coverage = table_coverage_report(
+            table_shape, valid_entries, markdown=commission_data_content
+        )
+        print(
+            f"#   → coverage: expected~{coverage.expected} emitted={coverage.emitted} "
+            f"passed={coverage.passed} ({coverage.reason})",
+            file=sys.stderr,
+        )
+        for note in coverage.advisory:
+            print(f"#     [coverage] {note}", file=sys.stderr)
+        if coverage.failed:
+            print(
+                f"#   ⚠ Completeness gate failed ({coverage.reason}): "
+                f"expected ~{coverage.expected} rate rows, emitted {coverage.emitted} rules",
+                file=sys.stderr,
+            )
+            if attempt < MAX_CODEGEN_ATTEMPTS:
+                error_context = _build_error_context(
+                    coverage.gap_message, code, attempt
+                )
+                continue
+            # Exhausted retries but still incomplete — keep what we have and flag
+            # loudly rather than accept a partial-drop silently.
+            print(
+                "#   ⚠ Completeness gate still failing after all attempts — "
+                "flagging pass requires_review",
+                file=sys.stderr,
+            )
+            gate_requires_review = True
 
         # Partial or full success — use what we have
         print(f"#   ✓ Code-gen succeeded on attempt {attempt}", file=sys.stderr)
         break
+
+    # A gate-forced retry can end on a thinner attempt than an earlier one; ship
+    # the fullest valid set we saw so a later degraded attempt never loses rows.
+    if len(best_entries) > len(valid_entries):
+        valid_entries, code = best_entries, best_code
+        gate_requires_review = True
 
     # ── Assemble RulesExtraction from valid entries ──────────────────────────
     products_map = {}
@@ -970,12 +1071,35 @@ def _extract_pass3_via_codegen(
     for p in products:
         print(f"#   → {p.product_name}: {len(p.rules)} rules", file=sys.stderr)
 
-    return RulesExtraction(
-        products=products,
-        overall_ambiguities=error_notes if error_notes else [],
-        overall_requires_review=bool(error_notes),
-    ), code, user_prompt
+    ambiguities = list(error_notes) if error_notes else []
+    if gate_requires_review:
+        ambiguities.append(
+            "Completeness gate: emitted rules fall short of the source grid's "
+            "rate-bearing rows — a table/segment may have been dropped. Manual review."
+        )
 
+    return (
+        RulesExtraction(
+            products=products,
+            overall_ambiguities=ambiguities,
+            overall_requires_review=bool(error_notes) or gate_requires_review,
+        ),
+        code,
+        user_prompt,
+    )
+
+
+def _commission_grid_present(content) -> bool:
+    """True when the Pass 3 content actually carries a commission rate grid.
+
+    Guards the inherits_from_previous early-exit: a forwarded "we continue last
+    month's grid" cover email may still ship the full month's sheets, and those
+    must be extracted rather than skipped. The ``[type: commission]`` tag is the
+    indexer's own commission-table classification marker, so this fires only on
+    genuine grid content and never on a bare no-change email (which carries no
+    commission table).
+    """
+    return bool(content) and "[type: commission]" in content
 
 
 def extract_multi_pass(
@@ -993,6 +1117,7 @@ def extract_multi_pass(
     on_pass_complete=None,
     on_pass_start=None,
     provider=None,
+    table_shape=None,
     **kwargs,
 ):
     """
@@ -1048,8 +1173,8 @@ def extract_multi_pass(
         service._model = model
 
     print(f"# Model: {service.model}", file=sys.stderr)
-    print(f"# Approach: Multi-pass (3 passes)", file=sys.stderr)
-    print(f"# Note: Each pass receives only relevant content sections", file=sys.stderr)
+    print("# Approach: Multi-pass (3 passes)", file=sys.stderr)
+    print("# Note: Each pass receives only relevant content sections", file=sys.stderr)
 
     # Setup output directory
     out_path = None
@@ -1068,6 +1193,15 @@ def extract_multi_pass(
     )
     pass3_content = (
         commission_data_content if commission_data_content is not None else prompt_text
+    )
+
+    # Deterministic period fallback: the document's own date (email `Date:`
+    # header), parsed from the same content Pass 1 reads. Used only if the
+    # extraction yields no period — beats stamping today's processing date.
+    from cins.processors.core.raw_to_cics_transformer import parse_document_date
+
+    document_date = parse_document_date(pass1_content) or parse_document_date(
+        email_body_content or ""
     )
 
     print(
@@ -1116,8 +1250,26 @@ def extract_multi_pass(
                 f"\n\n---\n\n{pass3_content}"
             )
 
-        # Early exit: if document states rates are unchanged, skip Pass 2 and Pass 3
-        if metadata.inherits_from_previous:
+        # Early exit: if document states rates are unchanged, skip Pass 2 and
+        # Pass 3 — BUT only when there is no commission grid actually attached
+        # to extract. A forwarded "we continue last month's grid" cover email
+        # commonly still ships the full month's sheets (Chola June'26: the email
+        # said "same grid as May 2026" yet the workbook carried complete CV /
+        # Private Car / TW grids). Skipping those on the inheritance flag alone
+        # produced an empty document with no previous_document_id to copy from.
+        # When a real grid is present, honour the data over the cover note and
+        # extract normally. The "[type: commission]" tag is the indexer's own
+        # commission-table classification marker, so this fires only on genuine
+        # grid content, never on a bare no-change email.
+        _grid_attached = _commission_grid_present(pass3_content)
+        if metadata.inherits_from_previous and _grid_attached:
+            print(
+                "# INHERITANCE OVERRIDDEN: Pass 1 reported inherits_from_previous"
+                "=True, but a commission grid is attached — extracting it instead"
+                " of skipping.",
+                file=sys.stderr,
+            )
+        if metadata.inherits_from_previous and not _grid_attached:
             print("=" * 70, file=sys.stderr)
             print(
                 "# NO CHANGE DETECTED: Skipping Pass 2 and Pass 3 (rates unchanged)",
@@ -1169,7 +1321,7 @@ def extract_multi_pass(
 
             transformer = RawToCICSTransformer()
             cics_doc, transform_warnings, transform_errors = transformer.transform(
-                raw_extraction
+                raw_extraction, document_date=document_date
             )
             cics_json = cics_doc.model_dump(exclude_none=False)
             pretty_cics = json.dumps(cics_json, indent=2)
@@ -1184,6 +1336,7 @@ def extract_multi_pass(
                     "pass3_products_and_rules": empty_rules.model_dump(),
                     "raw_extraction": raw_extraction.model_dump(exclude_none=True),
                     "transform_warnings": transform_warnings,
+                    "transform_notices": list(transformer.notices),
                     "transform_errors": transform_errors,
                     "no_change": True,
                 }
@@ -1198,12 +1351,14 @@ def extract_multi_pass(
             on_pass_start(2)
         _pass2_start = time.monotonic()
         _pass2_extraction_method = "codegen"
-        master_data_extraction, _pass2_codegen_code, _pass2_user_prompt = _extract_pass2_via_codegen(
-            pass2_content,
-            service,
-            metadata,
-            output_dir=out_path,
-            filename_prefix=filename_prefix,
+        master_data_extraction, _pass2_codegen_code, _pass2_user_prompt = (
+            _extract_pass2_via_codegen(
+                pass2_content,
+                service,
+                metadata,
+                output_dir=out_path,
+                filename_prefix=filename_prefix,
+            )
         )
         _pass2_duration = time.monotonic() - _pass2_start
 
@@ -1217,11 +1372,16 @@ def extract_multi_pass(
                 json.dump(master_data_extraction.model_dump(), f, indent=2)
 
         if on_pass_complete:
-            on_pass_complete(2, master_data_extraction.model_dump(), _pass2_duration, {
-                "extraction_method": _pass2_extraction_method,
-                "codegen_code": _pass2_codegen_code,
-                "user_prompt": _pass2_user_prompt,
-            })
+            on_pass_complete(
+                2,
+                master_data_extraction.model_dump(),
+                _pass2_duration,
+                {
+                    "extraction_method": _pass2_extraction_method,
+                    "codegen_code": _pass2_codegen_code,
+                    "user_prompt": _pass2_user_prompt,
+                },
+            )
 
         # Pass 3: Products and Rules (commission data sections only)
         # Always use code-gen mode for Pass 3
@@ -1235,13 +1395,16 @@ def extract_multi_pass(
             "# Pass 3: Using code-gen mode (default)",
             file=sys.stderr,
         )
-        rules_extraction, _pass3_codegen_code, _pass3_user_prompt = _extract_pass3_via_codegen(
-            pass3_content,
-            service,
-            metadata,
-            master_data_extraction,
-            output_dir=out_path,
-            filename_prefix=filename_prefix,
+        rules_extraction, _pass3_codegen_code, _pass3_user_prompt = (
+            _extract_pass3_via_codegen(
+                pass3_content,
+                service,
+                metadata,
+                master_data_extraction,
+                output_dir=out_path,
+                filename_prefix=filename_prefix,
+                table_shape=table_shape,
+            )
         )
         _pass3_duration = time.monotonic() - _pass3_start
 
@@ -1255,11 +1418,16 @@ def extract_multi_pass(
                 json.dump(rules_extraction.model_dump(), f, indent=2)
 
         if on_pass_complete:
-            on_pass_complete(3, rules_extraction.model_dump(), _pass3_duration, {
-                "extraction_method": _pass3_extraction_method,
-                "codegen_code": _pass3_codegen_code,
-                "user_prompt": _pass3_user_prompt,
-            })
+            on_pass_complete(
+                3,
+                rules_extraction.model_dump(),
+                _pass3_duration,
+                {
+                    "extraction_method": _pass3_extraction_method,
+                    "codegen_code": _pass3_codegen_code,
+                    "user_prompt": _pass3_user_prompt,
+                },
+            )
 
         # Merge passes into RawExtraction
         print("=" * 70, file=sys.stderr)
@@ -1293,7 +1461,7 @@ def extract_multi_pass(
 
         transformer = RawToCICSTransformer()
         cics_doc, transform_warnings, transform_errors = transformer.transform(
-            raw_extraction
+            raw_extraction, document_date=document_date
         )
 
         if transform_warnings:
@@ -1316,6 +1484,7 @@ def extract_multi_pass(
                 "pass3_products_and_rules": rules_extraction.model_dump(),
                 "raw_extraction": raw_extraction.model_dump(exclude_none=True),
                 "transform_warnings": transform_warnings,
+                "transform_notices": list(transformer.notices),
                 "transform_errors": transform_errors,
             }
 
@@ -1335,26 +1504,26 @@ def extract_multi_pass(
         # Provide helpful context for common errors
         if isinstance(e, json.JSONDecodeError):
             print(
-                f"#   → This indicates malformed JSON output from the LLM",
+                "#   → This indicates malformed JSON output from the LLM",
                 file=sys.stderr,
             )
             print(
-                f"#   → Common causes: repetitive text, incomplete output, token limit exceeded",
+                "#   → Common causes: repetitive text, incomplete output, token limit exceeded",
                 file=sys.stderr,
             )
             print(
-                f"#   → Check the raw output files in the output directory",
+                "#   → Check the raw output files in the output directory",
                 file=sys.stderr,
             )
         elif "API" in error_type or "quota" in error_msg.lower():
             print(
-                f"#   → This is an API-level error (rate limit, quota, connectivity)",
+                "#   → This is an API-level error (rate limit, quota, connectivity)",
                 file=sys.stderr,
             )
         elif "validation" in error_msg.lower() or "pydantic" in error_type.lower():
-            print(f"#   → This indicates schema validation failure", file=sys.stderr)
+            print("#   → This indicates schema validation failure", file=sys.stderr)
             print(
-                f"#   → The LLM output doesn't match the expected Pydantic model",
+                "#   → The LLM output doesn't match the expected Pydantic model",
                 file=sys.stderr,
             )
 

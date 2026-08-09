@@ -1,0 +1,268 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev, master]
+    tags: ["v*"]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (changed files)
+    runs-on: ubuntu-latest
+    # Diff-scoped: lints ONLY files changed in this PR/push, not the whole repo.
+    # The codebase predates linting, so a full-repo gate would be red on arrival;
+    # this enforces the standard on all new/changed code and grandfathers legacy
+    # debt until a file is next touched. The local husky hook is likewise
+    # staged-files-only, so the two stay consistent.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need history to diff against the base
+
+      - name: Resolve diff base
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}" 2>/dev/null || true
+            echo "ref=origin/${{ github.base_ref }}" >> "$GITHUB_OUTPUT"
+          else
+            before="${{ github.event.before }}"
+            if [ -n "$before" ] && [ "$before" != "0000000000000000000000000000000000000000" ] && git cat-file -e "${before}^{commit}" 2>/dev/null; then
+              echo "ref=$before" >> "$GITHUB_OUTPUT"
+            else
+              echo "ref=HEAD~1" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: List changed files
+        id: changed
+        run: |
+          BASE="${{ steps.base.outputs.ref }}"
+          git diff --name-only --diff-filter=ACMR "$BASE"...HEAD > /tmp/changed.txt \
+            || git diff --name-only --diff-filter=ACMR "$BASE" HEAD > /tmp/changed.txt
+          echo "----- changed files -----"; cat /tmp/changed.txt
+          grep -q '^backend/' /tmp/changed.txt && echo "backend=true" >> "$GITHUB_OUTPUT" || echo "backend=false" >> "$GITHUB_OUTPUT"
+          grep -qE '^web/.*\.(vue|ts|js|mjs|cjs)$' /tmp/changed.txt && echo "web=true" >> "$GITHUB_OUTPUT" || echo "web=false" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Backend pre-commit (changed files only)
+        if: steps.changed.outputs.backend == 'true'
+        run: |
+          pip install pre-commit
+          pre-commit run \
+            --config backend/.pre-commit-config.yaml \
+            --from-ref "${{ steps.base.outputs.ref }}" --to-ref HEAD
+
+      # Node/pnpm setup only when web source changed — otherwise setup-node's
+      # `cache: pnpm` post-step hard-fails the job (no pnpm store exists because
+      # the web block below never runs `pnpm install`).
+      - name: Enable pnpm (corepack reads version from package.json)
+        if: steps.changed.outputs.web == 'true'
+        run: corepack enable
+      - uses: actions/setup-node@v4
+        if: steps.changed.outputs.web == 'true'
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Web eslint (changed files only)
+        if: steps.changed.outputs.web == 'true'
+        run: |
+          mapfile -t FILES < <(grep -E '^web/.*\.(vue|ts|js|mjs|cjs)$' /tmp/changed.txt | sed 's#^web/##')
+          echo "Linting ${#FILES[@]} changed web file(s): ${FILES[*]}"
+          pnpm --filter web install --frozen-lockfile=false
+          cd web && pnpm exec eslint "${FILES[@]}"
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: insur_iq
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    # settings.py reads these with NO default; the non-pytest steps
+    # (manage.py check / makemigrations / test) each need them in the job env.
+    env:
+      APP_ENV: DEV
+      DEBUG: "True"
+      SECRET_KEY: ci-test-secret-key
+      WEBHOOK_SECRET_KEY: ci-test-webhook-secret
+      SEND_WELCOME_EMAIL: "False"
+      ALLOWED_HOSTS: "*,"
+      CSRF_TRUSTED_ORIGINS: "http://localhost,"
+      HOST_NAME: http://localhost
+      BETTER_AUTH_URL: http://localhost/auth
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: insur_iq
+      AWS_S3_ENDPOINT_URL: http://localhost:9000
+      AWS_S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
+      AWS_ACCESS_KEY_ID: ci-test
+      AWS_SECRET_ACCESS_KEY: ci-test
+      AWS_STORAGE_BUCKET_NAME: insur-iq
+      AWS_REGION: ap-south-1
+      CELERY_RESULT_BACKEND: django-db
+      CELERY_CACHE_BACKEND: django-cache
+      CELERY_BROKER_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: System deps (psycopg2 is a source build)
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev
+      - name: Install backend deps
+        run: pip install -r backend/requirements.txt
+      - name: Django system checks (boot/smoke gate)
+        working-directory: backend
+        run: |
+          python manage.py check
+          python manage.py makemigrations --check --dry-run
+      - name: Django deploy checks (PROD config)
+        working-directory: backend
+        env:
+          APP_ENV: PROD
+          SECRET_KEY: ci-only-non-default-secret-key
+          WEBHOOK_SECRET_KEY: ci-only-non-default-webhook-secret
+          CORS_ALLOWED_ORIGINS: https://example.com
+        run: python manage.py check --deploy || true # informational; do not gate on warnings
+      - name: Backend tests
+        working-directory: backend
+        run: python manage.py test --verbosity 2
+      - name: Enable pnpm (corepack reads version from package.json)
+        run: corepack enable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+      - name: Web tests
+        run: |
+          pnpm --filter web install --frozen-lockfile=false
+          pnpm --filter web test
+
+  push-ecr:
+    name: Build & push to ECR
+    runs-on: ubuntu-latest
+    # Only on push events (branch pushes to dev/master + tag pushes), never on PRs,
+    # and only after lint/test pass. Skips cleanly on a copy that hasn't configured
+    # AWS yet (no red X).
+    needs: [lint, test]
+    if: github.event_name == 'push' && vars.AWS_REGION != ''
+    permissions:
+      id-token: write # required for keyless OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight — verify required config is set
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ECR_BACKEND_REPO: ${{ vars.ECR_BACKEND_REPO }}
+          ECR_WEB_REPO: ${{ vars.ECR_WEB_REPO }}
+          ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          fail=0
+          [ -n "$AWS_REGION" ]      || { echo "::error::Repo Variable AWS_REGION is unset — gh variable set AWS_REGION --body <region>"; fail=1; }
+          [ -n "$ECR_BACKEND_REPO" ]|| { echo "::error::Repo Variable ECR_BACKEND_REPO is unset — gh variable set ECR_BACKEND_REPO --body <repo>"; fail=1; }
+          [ -n "$ECR_WEB_REPO" ]    || { echo "::error::Repo Variable ECR_WEB_REPO is unset — gh variable set ECR_WEB_REPO --body <repo>"; fail=1; }
+          [ -n "$ROLE_ARN" ]        || { echo "::error::Repo Secret AWS_ROLE_ARN is unset — gh secret set AWS_ROLE_ARN --body <role-arn>. See infra/aws/setup-aws.sh"; fail=1; }
+          exit $fail
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repositories exist
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ECR_BACKEND_REPO: ${{ vars.ECR_BACKEND_REPO }}
+          ECR_WEB_REPO: ${{ vars.ECR_WEB_REPO }}
+        run: |
+          for repo in "$ECR_BACKEND_REPO" "$ECR_WEB_REPO"; do
+            aws ecr describe-repositories --repository-names "$repo" --region "$AWS_REGION" >/dev/null 2>&1 \
+              || aws ecr create-repository \
+                   --repository-name "$repo" \
+                   --region "$AWS_REGION" \
+                   --image-scanning-configuration scanOnPush=true >/dev/null
+          done
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Metadata — backend
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_BACKEND_REPO }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-,enable=${{ github.ref_type == 'branch' }}
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build & push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: true
+          platforms: linux/amd64
+          provenance: true
+          sbom: true
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+
+      - name: Metadata — web
+        id: meta-web
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_WEB_REPO }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-,enable=${{ github.ref_type == 'branch' }}
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build & push web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: web/Dockerfile
+          push: true
+          platforms: linux/amd64
+          provenance: true
+          sbom: true
+          tags: ${{ steps.meta-web.outputs.tags }}
+          labels: ${{ steps.meta-web.outputs.labels }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max

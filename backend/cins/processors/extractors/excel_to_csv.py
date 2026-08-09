@@ -24,12 +24,18 @@ import csv
 import json
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 import re
+
+from cins.processors.core.sheet_visibility import VISIBLE_SHEET_STATE
 
 # Import sheet classifier (optional dependency)
 try:
-    from cins.processors.extractors.sheet_classifier import SheetClassifier, SheetClassification
+    from cins.processors.extractors.sheet_classifier import (
+        SheetClassifier,
+        SheetClassification,
+    )
+
     CLASSIFIER_AVAILABLE = True
 except ImportError:
     CLASSIFIER_AVAILABLE = False
@@ -37,23 +43,24 @@ except ImportError:
 
 
 # Configuration
-DEFAULT_FILL_EMPTY = ''  # Marker for empty cells (empty string for clean CSV output)
+DEFAULT_FILL_EMPTY = ""  # Marker for empty cells (empty string for clean CSV output)
 
 
 @dataclass
 class MergedRange:
     """Represents a merged cell range in Excel."""
+
     start: Tuple[int, int]  # (row, col) - 1-indexed
-    end: Tuple[int, int]    # (row, col) - 1-indexed
-    value: Any              # Value from top-left cell
-    range_str: str          # Excel notation (e.g., "BE3:BF3")
+    end: Tuple[int, int]  # (row, col) - 1-indexed
+    value: Any  # Value from top-left cell
+    range_str: str  # Excel notation (e.g., "BE3:BF3")
 
     @property
     def span(self) -> Dict[str, int]:
         """Calculate row and column span."""
         return {
             "rows": self.end[0] - self.start[0] + 1,
-            "cols": self.end[1] - self.start[1] + 1
+            "cols": self.end[1] - self.start[1] + 1,
         }
 
     def to_dict(self) -> Dict:
@@ -63,16 +70,17 @@ class MergedRange:
             "start": list(self.start),
             "end": list(self.end),
             "value": str(self.value) if self.value is not None else None,
-            "span": self.span
+            "span": self.span,
         }
 
 
 @dataclass
 class SheetMetadata:
     """Essential metadata for one Excel sheet."""
+
     sheet_name: str
     dimensions: Dict[str, int]  # rows, cols, original_rows, original_cols
-    merged_ranges: List[Dict]   # List of MergedRange.to_dict()
+    merged_ranges: List[Dict]  # List of MergedRange.to_dict()
     formatting: Dict[str, Any]  # bold_cells, detected_header_rows
     excluded_content: Dict[str, Any]  # hidden_rows, hidden_columns
     classification: Optional[Dict[str, Any]] = None  # Sheet type classification
@@ -84,7 +92,7 @@ class SheetMetadata:
             "dimensions": self.dimensions,
             "merged_ranges": self.merged_ranges,
             "formatting": self.formatting,
-            "excluded_content": self.excluded_content
+            "excluded_content": self.excluded_content,
         }
         if self.classification is not None:
             base_dict["classification"] = self.classification
@@ -103,7 +111,12 @@ class ExcelToCSVConverter:
     - Maintains exact grid alignment with source Excel
     """
 
-    def __init__(self, output_dir: Optional[Path] = None, fill_empty: str = DEFAULT_FILL_EMPTY, enable_classification: bool = True):
+    def __init__(
+        self,
+        output_dir: Optional[Path] = None,
+        fill_empty: str = DEFAULT_FILL_EMPTY,
+        enable_classification: bool = True,
+    ):
         """
         Initialize converter.
 
@@ -112,7 +125,9 @@ class ExcelToCSVConverter:
             fill_empty: String to use for empty cells (default: 'NA')
             enable_classification: Enable AI-based sheet classification (default: True)
         """
-        self.output_dir = Path(output_dir) if output_dir else Path('./output/csv_converted')
+        self.output_dir = (
+            Path(output_dir) if output_dir else Path("./output/csv_converted")
+        )
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.fill_empty = fill_empty
         self.enable_classification = enable_classification and CLASSIFIER_AVAILABLE
@@ -174,7 +189,9 @@ class ExcelToCSVConverter:
         hidden_cols = set(self.detect_hidden_columns(sheet))
 
         visible_rows = [r for r in range(1, sheet.max_row + 1) if r not in hidden_rows]
-        visible_cols = [c for c in range(1, sheet.max_column + 1) if c not in hidden_cols]
+        visible_cols = [
+            c for c in range(1, sheet.max_column + 1) if c not in hidden_cols
+        ]
 
         return visible_rows, visible_cols
 
@@ -202,12 +219,14 @@ class ExcelToCSVConverter:
             # Excel notation (e.g., "BE3:BF3")
             range_str = str(merged_range)
 
-            merged_ranges.append(MergedRange(
-                start=(start_row, start_col),
-                end=(end_row, end_col),
-                value=top_left_value,
-                range_str=range_str
-            ))
+            merged_ranges.append(
+                MergedRange(
+                    start=(start_row, start_col),
+                    end=(end_row, end_col),
+                    value=top_left_value,
+                    range_str=range_str,
+                )
+            )
 
         return merged_ranges
 
@@ -216,7 +235,7 @@ class ExcelToCSVConverter:
         sheet,
         merged_ranges: List[MergedRange],
         visible_rows: List[int],
-        visible_cols: List[int]
+        visible_cols: List[int],
     ) -> Dict[Tuple[int, int], Any]:
         """
         Build expanded grid where merged cells are filled with source value.
@@ -239,15 +258,29 @@ class ExcelToCSVConverter:
         visible_rows_set = set(visible_rows)
         visible_cols_set = set(visible_cols)
 
-        # Create O(1) lookup for merged ranges
-        # Skip ranges whose top-left cell is hidden — don't leak hidden values into visible cells
+        # Create O(1) lookup for merged ranges.
+        #
+        # Propagate the value to the VISIBLE cells of each range, regardless of
+        # whether the range's top-left cell is itself visible. A merged group
+        # header routinely starts in a hidden column while its siblings stay
+        # visible: Chola's TW sheet hides AX and BB, which are exactly the
+        # top-left cells of `AX4:AZ4 -> "Hero vs Bajaj"` and `BB4:BE4 -> "Bajaj"`.
+        # Skipping the whole range dropped the make from the visible AY/AZ/BC/BD/BE
+        # columns, so their rules carried no vehicle_make and two different
+        # SCOOTER columns collapsed onto byte-identical conditions with different
+        # payouts (54 CRITICAL duplicate findings on doc 733711bd).
+        #
+        # A range that is entirely hidden still contributes nothing — no visible
+        # cell exists to write to — so genuinely hidden scratch content cannot
+        # leak in.
         merged_lookup = {}
         for mr in merged_ranges:
-            top_row, top_col = mr.start
-            if top_row not in visible_rows_set or top_col not in visible_cols_set:
-                continue
             for r in range(mr.start[0], mr.end[0] + 1):
+                if r not in visible_rows_set:
+                    continue
                 for c in range(mr.start[1], mr.end[1] + 1):
+                    if c not in visible_cols_set:
+                        continue
                     merged_lookup[(r, c)] = mr.value
 
         for row in visible_rows:
@@ -266,7 +299,7 @@ class ExcelToCSVConverter:
         expanded_grid: Dict[Tuple[int, int], Any],
         visible_rows: List[int],
         visible_cols: List[int],
-        output_path: Path
+        output_path: Path,
     ) -> None:
         """
         Write expanded grid to CSV file.
@@ -283,7 +316,7 @@ class ExcelToCSVConverter:
             visible_cols: List of visible column indices (1-indexed)
             output_path: Path to output CSV file
         """
-        with open(output_path, 'w', newline='', encoding='utf-8') as f:
+        with open(output_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
 
             for row in visible_rows:
@@ -293,12 +326,12 @@ class ExcelToCSVConverter:
                     value = expanded_grid.get((row, col))
 
                     # Handle empty cells
-                    if value is None or value == '':
+                    if value is None or value == "":
                         row_data.append(self.fill_empty)
                     # Handle newlines (from merged text blocks)
-                    elif isinstance(value, str) and '\n' in value:
+                    elif isinstance(value, str) and "\n" in value:
                         # Replace newlines with single space for clean LLM parsing
-                        cleaned_value = value.replace('\n', ' ').replace('\r', '')
+                        cleaned_value = value.replace("\n", " ").replace("\r", "")
                         row_data.append(cleaned_value)
                     else:
                         row_data.append(str(value))
@@ -306,10 +339,7 @@ class ExcelToCSVConverter:
                 writer.writerow(row_data)
 
     def extract_bold_cells(
-        self,
-        sheet,
-        visible_rows: List[int],
-        visible_cols: List[int]
+        self, sheet, visible_rows: List[int], visible_cols: List[int]
     ) -> List[List[int]]:
         """
         Scan for bold cells (used for header detection).
@@ -333,10 +363,7 @@ class ExcelToCSVConverter:
         return bold_cells
 
     def detect_header_rows(
-        self,
-        sheet,
-        merged_ranges: List[MergedRange],
-        visible_cols: List[int]
+        self, sheet, merged_ranges: List[MergedRange], visible_cols: List[int]
     ) -> List[int]:
         """
         Heuristic header detection using two signals:
@@ -366,7 +393,11 @@ class ExcelToCSVConverter:
 
         # Signal 1: horizontal merged cells in the first 10 rows
         for mr in merged_ranges:
-            if mr.start[0] <= 10 and mr.start[0] == mr.end[0] and mr.end[1] > mr.start[1]:
+            if (
+                mr.start[0] <= 10
+                and mr.start[0] == mr.end[0]
+                and mr.end[1] > mr.start[1]
+            ):
                 header_candidates.add(mr.start[0])
 
         if not header_candidates:
@@ -377,7 +408,7 @@ class ExcelToCSVConverter:
         # Empty rows are skipped (they appear between merged title rows and label rows).
         # Scanning stops when numeric data is found or we've gone 8 rows past the last merge.
         last_merged_header = max(header_candidates)
-        number_re = re.compile(r'^\s*-?\d+(\.\d+)?\s*$')
+        number_re = re.compile(r"^\s*-?\d+(\.\d+)?\s*$")
         row = last_merged_header + 1
         scan_limit = min(last_merged_header + 8, sheet.max_row)
         while row <= scan_limit:
@@ -390,9 +421,7 @@ class ExcelToCSVConverter:
                 # Empty row — skip it, don't stop scanning
                 row += 1
                 continue
-            all_non_numeric = all(
-                not number_re.match(str(v)) for v in values
-            )
+            all_non_numeric = all(not number_re.match(str(v)) for v in values)
             if all_non_numeric:
                 header_candidates.add(row)
                 row += 1
@@ -409,7 +438,7 @@ class ExcelToCSVConverter:
         visible_rows: List[int],
         visible_cols: List[int],
         hidden_rows: List[int],
-        hidden_cols: List[int]
+        hidden_cols: List[int],
     ) -> SheetMetadata:
         """
         Generate essential metadata for sheet.
@@ -439,18 +468,15 @@ class ExcelToCSVConverter:
                 "rows": len(visible_rows),
                 "cols": len(visible_cols),
                 "original_rows": sheet.max_row,
-                "original_cols": sheet.max_column
+                "original_cols": sheet.max_column,
             },
             merged_ranges=[mr.to_dict() for mr in merged_ranges],
-            formatting={
-                "bold_cells": bold_cells,
-                "detected_header_rows": header_rows
-            },
+            formatting={"bold_cells": bold_cells, "detected_header_rows": header_rows},
             excluded_content={
                 "hidden_rows": hidden_rows,
                 "hidden_columns": hidden_cols,
-                "note": "Hidden rows/columns were excluded from CSV"
-            }
+                "note": "Hidden rows/columns were excluded from CSV",
+            },
         )
 
         return metadata
@@ -471,13 +497,13 @@ class ExcelToCSVConverter:
             Sanitized filename
         """
         # Replace spaces with underscores
-        sanitized = name.replace(' ', '_')
+        sanitized = name.replace(" ", "_")
 
         # Remove special characters (keep only alphanumeric, underscore, hyphen, period)
-        sanitized = re.sub(r'[^a-zA-Z0-9_\-.]', '', sanitized)
+        sanitized = re.sub(r"[^a-zA-Z0-9_\-.]", "", sanitized)
 
         # Remove multiple consecutive underscores
-        sanitized = re.sub(r'_+', '_', sanitized)
+        sanitized = re.sub(r"_+", "_", sanitized)
 
         return sanitized
 
@@ -493,21 +519,18 @@ class ExcelToCSVConverter:
             CSV preview as string
         """
         try:
-            with open(csv_path, 'r', encoding='utf-8') as f:
+            with open(csv_path, "r", encoding="utf-8") as f:
                 preview_lines = []
                 for i, line in enumerate(f):
                     if i >= lines:
                         break
                     preview_lines.append(line)
-                return ''.join(preview_lines)
+                return "".join(preview_lines)
         except Exception as e:
             return f"Error reading CSV preview: {str(e)}"
 
     def process_sheet(
-        self,
-        excel_path: str,
-        sheet_name: str,
-        output_dir: Optional[Path] = None
+        self, excel_path: str, sheet_name: str, output_dir: Optional[Path] = None
     ) -> Dict[str, Any]:
         """
         Complete pipeline for processing one sheet.
@@ -540,6 +563,16 @@ class ExcelToCSVConverter:
         wb = openpyxl.load_workbook(excel_path, data_only=True)
         sheet = wb[sheet_name]
 
+        # Tab visibility ('visible' | 'hidden' | 'veryHidden'). Captured here
+        # rather than from a separate workbook open so it survives every call
+        # path into process_sheet, including an explicit sheet_names list.
+        # Downstream (indexer -> sheet_classifications -> routing) uses it to
+        # keep hidden sheets out of extraction; see
+        # cins.processors.core.sheet_visibility.
+        sheet_state = (
+            getattr(sheet, "sheet_state", VISIBLE_SHEET_STATE) or VISIBLE_SHEET_STATE
+        )
+
         # Step 1: Detect hidden content
         hidden_rows = self.detect_hidden_rows(sheet)
         hidden_cols = self.detect_hidden_columns(sheet)
@@ -551,7 +584,9 @@ class ExcelToCSVConverter:
         merged_ranges = self.detect_merged_ranges(sheet)
 
         # Step 4: Expand merged cells
-        expanded_grid = self.expand_merged_cells(sheet, merged_ranges, visible_rows, visible_cols)
+        expanded_grid = self.expand_merged_cells(
+            sheet, merged_ranges, visible_rows, visible_cols
+        )
 
         # Step 5: Generate output filenames
         sanitized_filename = self.sanitize_filename(excel_path.stem)
@@ -566,9 +601,13 @@ class ExcelToCSVConverter:
 
         # Step 7: Generate metadata
         metadata = self.generate_metadata(
-            sheet, sheet_name, merged_ranges,
-            visible_rows, visible_cols,
-            hidden_rows, hidden_cols
+            sheet,
+            sheet_name,
+            merged_ranges,
+            visible_rows,
+            visible_cols,
+            hidden_rows,
+            hidden_cols,
         )
 
         # Step 8: Classify sheet (if enabled)
@@ -579,15 +618,17 @@ class ExcelToCSVConverter:
                 classification = self.classifier.classify_sheet(
                     sheet_name=sheet_name,
                     csv_preview=csv_preview,
-                    metadata=metadata.to_dict()
+                    metadata=metadata.to_dict(),
                 )
                 # Add classification to metadata
                 metadata.classification = classification.to_dict()
             except Exception as e:
-                print(f"Warning: Sheet classification failed for '{sheet_name}': {str(e)}")
+                print(
+                    f"Warning: Sheet classification failed for '{sheet_name}': {str(e)}"
+                )
 
         # Step 9: Write metadata JSON
-        with open(metadata_path, 'w', encoding='utf-8') as f:
+        with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(metadata.to_dict(), f, indent=2, ensure_ascii=False)
 
         wb.close()
@@ -595,13 +636,14 @@ class ExcelToCSVConverter:
         # Return results
         result = {
             "sheet_name": sheet_name,
+            "sheet_state": sheet_state,
             "csv_path": str(csv_path),
             "metadata_path": str(metadata_path),
             "rows": len(visible_rows),
             "cols": len(visible_cols),
             "merged_ranges": len(merged_ranges),
             "hidden_rows": len(hidden_rows),
-            "hidden_cols": len(hidden_cols)
+            "hidden_cols": len(hidden_cols),
         }
 
         # Add classification to result if available
@@ -614,7 +656,7 @@ class ExcelToCSVConverter:
         self,
         excel_path: str,
         output_dir: Optional[Path] = None,
-        sheet_names: Optional[List[str]] = None
+        sheet_names: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Process entire Excel workbook - all sheets or specified sheets.
@@ -646,7 +688,7 @@ class ExcelToCSVConverter:
         results = {
             "input_file": str(excel_path),
             "num_sheets": len(sheet_names),
-            "sheets": []
+            "sheets": [],
         }
 
         for sheet_name in sheet_names:
@@ -679,23 +721,27 @@ def main():
 
     print(f"Processing: {excel_path}")
     print(f"Output directory: {converter.output_dir.absolute()}")
-    print("="*80)
+    print("=" * 80)
 
     results = converter.process_workbook(excel_path)
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"✓ Processing complete: {results['num_sheets']} sheets processed")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
 
-    for i, sheet_result in enumerate(results['sheets'], 1):
+    for i, sheet_result in enumerate(results["sheets"], 1):
         print(f"{i}. Sheet: {sheet_result['sheet_name']}")
-        print(f"   Dimensions: {sheet_result['rows']} rows × {sheet_result['cols']} cols")
+        print(
+            f"   Dimensions: {sheet_result['rows']} rows × {sheet_result['cols']} cols"
+        )
         print(f"   Merged ranges: {sheet_result['merged_ranges']}")
-        print(f"   Hidden content: {sheet_result['hidden_rows']} rows, {sheet_result['hidden_cols']} cols")
+        print(
+            f"   Hidden content: {sheet_result['hidden_rows']} rows, {sheet_result['hidden_cols']} cols"
+        )
         print(f"   CSV: {Path(sheet_result['csv_path']).name}")
         print(f"   Metadata: {Path(sheet_result['metadata_path']).name}")
         print()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

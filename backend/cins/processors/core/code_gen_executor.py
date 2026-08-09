@@ -115,6 +115,27 @@ def extract_notes(tables):
             ))
     return " ".join(parts).strip()
 
+def _strip_bracket_qualifiers(s):
+    \"\"\"
+    Remove [...] qualifier groups (e.g. '[ NCB GT 25%]', '[Electric]') from a
+    header, depth-tracking so nested brackets are handled. No 're' in the
+    sandbox, so this is a manual character scan. Each top-level group collapses
+    to a single space so adjacent tokens do not glue together.
+    \"\"\"
+    out = []
+    depth = 0
+    for ch in s:
+        if ch == "[":
+            if depth == 0:
+                out.append(" ")
+            depth += 1
+        elif ch == "]":
+            if depth > 0:
+                depth -= 1
+        elif depth == 0:
+            out.append(ch)
+    return "".join(out)
+
 def parse_cc_range(header):
     \"\"\"
     Extract a normalised CC (engine-displacement) range string from a header.
@@ -133,10 +154,20 @@ def parse_cc_range(header):
     indiscriminate digit-extraction below mangles tonnage slugs into junk
     CC ranges (e.g. '2_UPTO_3.5T[Electric]' -> '2-3.5' -> cc=(2,4)).
     Symmetric to the CC-rejection guard in parse_gvw_range.
+
+    Bracketed qualifiers ('UPTO 1000 CC[ NCB GT 25%]', '1000CC[Electric]') are
+    stripped first so the trailing '25%]' / 'Electric]' token does not leak into
+    the digit scan and corrupt the range (that suffix produced cc=(1000,25) on
+    82 rules). The strip runs before the GVW/kW/slug guards so
+    '2_UPTO_3.5T[Electric]' still hits the tonnage guard and
+    '2_4W_LT_1500CC[Electric]' still hits the LT-slug branch.
     \"\"\"
     if header is None:
         return ""
     h = header.strip().upper()
+    if not h:
+        return ""
+    h = _strip_bracket_qualifiers(h).strip()
     if not h:
         return ""
     # GVW-shape guards: tonnage (digit + T at word boundary), explicit KG,
@@ -161,12 +192,45 @@ def parse_cc_range(header):
                 return ""
         i += 1
     h = h.replace("CC", " ").strip()
+    # Chola PCCV<6 CC-band sub-class slugs carry a leading ordinal and a wheel
+    # token before the CC number ("2_4W_LT_1500CC", "3_4W_GT_1500CC"). Strip
+    # both ONLY on the underscore-slug form so ordinary CC ranges ("150-350")
+    # are left untouched, then honour the LT / GT qualifier as an explicit
+    # lower-/upper-open band. Without this the indiscriminate digit extraction
+    # below folds the ordinal/wheel digits into the range (e.g. "2-4" garbage).
+    if "_" in h:
+        slug_toks = [t for t in h.split("_") if t.strip()]
+        if slug_toks and slug_toks[0].strip().isdigit():
+            slug_toks = slug_toks[1:]
+        slug_toks = [t for t in slug_toks if t.strip().upper() not in ("3W", "4W")]
+        upper_toks = [t.strip().upper() for t in slug_toks]
+        if "LT" in upper_toks:
+            for t in slug_toks:
+                d = "".join(c for c in t if c.isdigit() or c == ".")
+                if d:
+                    return "0-" + d
+        if "GT" in upper_toks:
+            for t in slug_toks:
+                d = "".join(c for c in t if c.isdigit() or c == ".")
+                if d:
+                    return ">" + d
+        h = " ".join(slug_toks)
     for prefix in (">", ">=", "ABOVE", "GREATER THAN", "MORE THAN"):
         if h.startswith(prefix):
             rest = h[len(prefix):].strip().split()[0] if h[len(prefix):].strip() else ""
             digits = "".join(c for c in rest if c.isdigit() or c == ".")
             if digits:
                 return ">" + digits
+    # Lower-open band: 'UPTO 1000 CC' -> '0-1000'. Symmetric with the LT slug
+    # branch above (both mean "<= N"). '<=' is checked before '<' so the longer
+    # operator wins. Without this branch the digit scan returned a bare '1000',
+    # which the transformer read as the single point 1000cc.
+    for prefix in ("<=", "<", "UP TO", "UPTO", "BELOW", "LESS THAN", "MAX"):
+        if h.startswith(prefix):
+            rest = h[len(prefix):].strip().split()[0] if h[len(prefix):].strip() else ""
+            digits = "".join(c for c in rest if c.isdigit() or c == ".")
+            if digits:
+                return "0-" + digits
     parts = h.replace("_", " ").replace("-", " ").split()
     nums = ["".join(c for c in p if c.isdigit() or c == ".") for p in parts if any(c.isdigit() for c in p)]
     if len(nums) >= 2:
@@ -202,6 +266,11 @@ def parse_gvw_range(header):
     if not h:
         return ""
     hu = h.upper().replace("_", " ")
+    # Neutralise bracketed qualifiers so the CC/KW guard sees a clean 'CC' token
+    # instead of 'CC[' — 'UPTO 1000 CC[ NCB GT 25%]' must be rejected here (it is
+    # a CC label) rather than falling through to the qualifier fallback and
+    # returning as a bogus GVW range in kilograms.
+    hu = _strip_bracket_qualifiers(hu)
     if not any(c.isdigit() for c in hu):
         return ""
     # Reject CC/KW engine-displacement headers — those belong to parse_cc_range.
@@ -436,7 +505,7 @@ def extract_rto_entries(table_name, header, data_rows, applies_to_hint):
 # Add a new regex + clause builder here; keep the schema stable.
 # ---------------------------------------------------------------------------
 
-import re as _re_clause
+import re as _re_clause  # noqa: E402
 
 _RE_APPLIED_ON_PACKAGE = _re_clause.compile(
     r"private\s*car\s*package.*?pay-?out.*?on\s+OD\s*Cover\s*Premium",
@@ -485,20 +554,30 @@ def detect_qualifying_clauses(notes_text, provider=""):
     clauses = []
 
     if _RE_APPLIED_ON_PACKAGE.search(text):
-        clauses.append({
-            "clause_type": "applied_on_override",
-            "text": "Private Car Package pay-out is on OD Cover Premium",
-            "when": {"product_name": "Private Car", "coverage_type_text": "comprehensive"},
-            "effect": {"applied_on": "OD Cover Premium"},
-        })
+        clauses.append(
+            {
+                "clause_type": "applied_on_override",
+                "text": "Private Car Package pay-out is on OD Cover Premium",
+                "when": {
+                    "product_name": "Private Car",
+                    "coverage_type_text": "comprehensive",
+                },
+                "effect": {"applied_on": "OD Cover Premium"},
+            }
+        )
 
     if _RE_APPLIED_ON_LIABILITY.search(text):
-        clauses.append({
-            "clause_type": "applied_on_override",
-            "text": "Private Car Liability pay-out is on TP/PA Premium",
-            "when": {"product_name": "Private Car", "coverage_type_text": "third party"},
-            "effect": {"applied_on": "TP/PA Premium"},
-        })
+        clauses.append(
+            {
+                "clause_type": "applied_on_override",
+                "text": "Private Car Liability pay-out is on TP/PA Premium",
+                "when": {
+                    "product_name": "Private Car",
+                    "coverage_type_text": "third party",
+                },
+                "effect": {"applied_on": "TP/PA Premium"},
+            }
+        )
 
     m = _RE_CPA_DEDUCTION.search(text)
     if m:
@@ -513,69 +592,110 @@ def detect_qualifying_clauses(notes_text, provider=""):
             # regardless, but carrying the right basis keeps the clause honest
             # and lets it attach to CV (Net) rules, not just Private Car (OD).
             basis = "Net Payout" if m.group(2).upper() == "NET" else "OD Pay-out"
-            clauses.append({
-                "clause_type": "conditional_deduction",
-                "text": (
-                    "if CPA is not collected for individual name then "
-                    + pct_str
-                    + "% of " + basis + " will be deducted"
-                ),
-                "when": {
-                    "coverage_type_text": ["comprehensive", "saod", "third party"],
-                    "school_bus_type": "on-individual-name",
-                    "cpa": "without-cpa",
-                },
-                "effect": {
-                    "deduction": {
-                        "value": pct,
-                        "value_type": "percentage",
-                        "applied_on": basis,
-                    }
-                },
-            })
+            clauses.append(
+                {
+                    "clause_type": "conditional_deduction",
+                    "text": (
+                        "if CPA is not collected for individual name then "
+                        + pct_str
+                        + "% of "
+                        + basis
+                        + " will be deducted"
+                    ),
+                    "when": {
+                        "coverage_type_text": ["comprehensive", "saod", "third party"],
+                        "school_bus_type": "on-individual-name",
+                        "cpa": "without-cpa",
+                    },
+                    "effect": {
+                        "deduction": {
+                            "value": pct,
+                            "value_type": "percentage",
+                            "applied_on": basis,
+                        }
+                    },
+                }
+            )
 
     if _RE_CPA_MANDATORY.search(text):
-        clauses.append({
-            "clause_type": "mandatory_requirement",
-            "text": "CPA should be collected for individual Name Mandatorily",
-            "when": {
-                "product_name": "Private Car",
-                "coverage_type_text": ["comprehensive", "saod", "third party"],
-                "school_bus_type": "on-individual-name",
-            },
-            "effect": {"required": ["cpa"]},
-        })
+        clauses.append(
+            {
+                "clause_type": "mandatory_requirement",
+                "text": "CPA should be collected for individual Name Mandatorily",
+                "when": {
+                    "product_name": "Private Car",
+                    "coverage_type_text": ["comprehensive", "saod", "third party"],
+                    "school_bus_type": "on-individual-name",
+                },
+                "effect": {"required": ["cpa"]},
+            }
+        )
 
     if _RE_GRID_ALIAS_EV.search(text):
-        clauses.append({
-            "clause_type": "grid_alias",
-            "text": "Private Car Electric Vehicle or LPG/CNG pay-out grid is same as Private Car Petrol grid",
-            "when": {"product_name": "Private Car", "fuel_type": ["electric", "lpg", "cng"]},
-            "effect": {"inherit_from": {"fuel_type": "petrol"}},
-        })
+        clauses.append(
+            {
+                "clause_type": "grid_alias",
+                "text": "Private Car Electric Vehicle or LPG/CNG pay-out grid is same as Private Car Petrol grid",
+                "when": {
+                    "product_name": "Private Car",
+                    "fuel_type": ["electric", "lpg", "cng"],
+                },
+                "effect": {"inherit_from": {"fuel_type": "petrol"}},
+            }
+        )
 
     return clauses
 
 
 class CodeGenExecutionError(Exception):
     """Raised when the generated code fails to execute."""
+
     pass
 
 
 class CodeGenValidationError(Exception):
     """Raised when the generated code contains dangerous constructs."""
+
     pass
 
 
 # Builtins the generated code is allowed to use
 SAFE_BUILTIN_NAMES = {
-    "range", "len", "list", "dict", "str", "int", "float", "bool",
-    "tuple", "set", "enumerate", "zip", "map", "filter", "sorted",
-    "min", "max", "sum", "abs", "round", "any", "all", "isinstance", "print",
-    "True", "False", "None",
+    "range",
+    "len",
+    "list",
+    "dict",
+    "str",
+    "int",
+    "float",
+    "bool",
+    "tuple",
+    "set",
+    "enumerate",
+    "zip",
+    "map",
+    "filter",
+    "sorted",
+    "min",
+    "max",
+    "sum",
+    "abs",
+    "round",
+    "any",
+    "all",
+    "isinstance",
+    "print",
+    "True",
+    "False",
+    "None",
     # Exception classes needed for try/except in generated helpers (e.g. to_pct)
-    "ValueError", "TypeError", "IndexError", "KeyError", "AttributeError",
-    "StopIteration", "Exception",
+    "ValueError",
+    "TypeError",
+    "IndexError",
+    "KeyError",
+    "AttributeError",
+    "StopIteration",
+    "Exception",
 }
 
 # AST node types that are always forbidden
@@ -583,10 +703,26 @@ _FORBIDDEN_NODE_TYPES = (ast.Import, ast.ImportFrom)
 
 # Function/attribute names that are forbidden
 _FORBIDDEN_NAMES = {
-    "exec", "eval", "compile", "open", "__import__",
-    "getattr", "setattr", "delattr", "globals", "locals", "vars",
-    "breakpoint", "input", "memoryview", "bytearray", "bytes",
-    "classmethod", "staticmethod", "property", "super",
+    "exec",
+    "eval",
+    "compile",
+    "open",
+    "__import__",
+    "getattr",
+    "setattr",
+    "delattr",
+    "globals",
+    "locals",
+    "vars",
+    "breakpoint",
+    "input",
+    "memoryview",
+    "bytearray",
+    "bytes",
+    "classmethod",
+    "staticmethod",
+    "property",
+    "super",
 }
 
 
@@ -683,6 +819,7 @@ def execute_entry_code(
     """
     # Build restricted builtins
     import builtins as _builtins_module
+
     safe_builtins = {}
     for name in SAFE_BUILTIN_NAMES:
         if hasattr(_builtins_module, name):
@@ -734,9 +871,7 @@ def execute_entry_code(
 
     result = safe_globals.get("result")
     if result is None:
-        raise CodeGenExecutionError(
-            "Generated code did not set a 'result' variable"
-        )
+        raise CodeGenExecutionError("Generated code did not set a 'result' variable")
 
     if not isinstance(result, list):
         raise CodeGenExecutionError(

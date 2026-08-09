@@ -5,6 +5,7 @@ pipeline relies on heavily. LibreOffice handles the format end-to-end and
 preserves merges, so we shell out to `soffice --headless` and hand the
 converted .xlsx to the existing pipeline.
 """
+
 import logging
 import os
 import shutil
@@ -82,7 +83,10 @@ def convert_xlsb_to_xlsx(xlsb_path: str | os.PathLike, timeout: int = 120) -> st
         converted = produced[0]
 
     # Move out of the temp dir so we can clean it up, returning a stable path
-    final_path = Path(tempfile.gettempdir()) / f"{converted.stem}_{os.getpid()}_{src.stat().st_size}.xlsx"
+    final_path = (
+        Path(tempfile.gettempdir())
+        / f"{converted.stem}_{os.getpid()}_{src.stat().st_size}.xlsx"
+    )
     shutil.move(str(converted), str(final_path))
     shutil.rmtree(out_dir, ignore_errors=True)
 
@@ -92,4 +96,48 @@ def convert_xlsb_to_xlsx(xlsb_path: str | os.PathLike, timeout: int = 120) -> st
         final_path.name,
         final_path.stat().st_size,
     )
+    _log_converted_sheet_visibility(final_path)
     return str(final_path)
+
+
+def _log_converted_sheet_visibility(xlsx_path: Path) -> None:
+    """Record the tab states LibreOffice produced for a converted .xlsb.
+
+    Hidden-sheet exclusion reads `sheet_state` off the converted .xlsx, and
+    whether LibreOffice carries `sheetState` through this round trip could not
+    be verified up front: it reads .xlsb but cannot write it, so no fixture can
+    be built. Rather than emit a blanket warning on every conversion (permanent
+    log noise that answers nothing), log what was actually observed. A single
+    real .xlsb with a hidden tab settles the question: 'preserved' proves it
+    works, and a workbook the author knows has hidden tabs reported as all
+    visible is the smoking gun.
+
+    Never raises — this is diagnostics, not a gate on the conversion.
+    """
+    try:
+        import openpyxl
+
+        wb = openpyxl.load_workbook(xlsx_path, read_only=True)
+        try:
+            states = {ws.title: ws.sheet_state for ws in wb.worksheets}
+        finally:
+            wb.close()
+    except Exception as e:  # pragma: no cover - diagnostics must never break conversion
+        logger.debug("Could not read sheet visibility from %s: %s", xlsx_path.name, e)
+        return
+
+    non_visible = {n: s for n, s in states.items() if s != "visible"}
+    if non_visible:
+        logger.info(
+            "xlsb conversion preserved sheet visibility for %s: %s",
+            xlsx_path.name,
+            ", ".join(f"{n} ({s})" for n, s in non_visible.items()),
+        )
+    else:
+        logger.info(
+            "xlsb conversion produced %d sheet(s), all reported visible (%s). "
+            "If this workbook is known to have hidden tabs, LibreOffice dropped "
+            "sheetState and those tabs will be extracted.",
+            len(states),
+            xlsx_path.name,
+        )

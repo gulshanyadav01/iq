@@ -1,14 +1,16 @@
 #!/bin/bash
 
 # ============================================================================
-# Multi-Platform Docker Build and Push Script for ECR
+# Docker Build and Push Script for ECR (amd64 default, opt-in multi-arch)
 # ============================================================================
-# Purpose: Build and push Docker images to Amazon ECR with multi-platform support
+# Purpose: Build and push Docker images to Amazon ECR. Builds linux/amd64 by
+#          default; set MULTIARCH=1 to also build linux/arm64.
 # Usage:
-#   ./scripts/build-and-push.sh                      # Build all services
+#   ./scripts/build-and-push.sh                      # Build all services (amd64)
 #   ./scripts/build-and-push.sh backend              # Build specific service
 #   IMAGE_TAG=v1.0.0 ./scripts/build-and-push.sh     # Custom tag
-#   DOCKER_PLATFORMS=linux/amd64 ./scripts/build-and-push.sh  # Single platform
+#   MULTIARCH=1 ./scripts/build-and-push.sh          # Build amd64 + arm64
+#   DOCKER_PLATFORMS=linux/arm64 ./scripts/build-and-push.sh  # Explicit platforms (overrides MULTIARCH)
 #   DRY_RUN=1 ./scripts/build-and-push.sh            # Preview without building
 #   CACHE_TYPE=gha ./scripts/build-and-push.sh       # Use GitHub Actions cache (CI only)
 # ============================================================================
@@ -25,7 +27,16 @@ if [ -f .env.ecr ]; then
 fi
 
 AWS_REGION="${AWS_REGION:-us-east-1}"
-DOCKER_PLATFORMS="${DOCKER_PLATFORMS:-linux/amd64,linux/arm64}"
+
+# Multi-arch opt-in: MULTIARCH=1 → amd64+arm64. Default: amd64 only.
+# An explicit DOCKER_PLATFORMS still wins over both.
+MULTIARCH="${MULTIARCH:-0}"
+if [[ "$MULTIARCH" == "1" ]]; then
+  DEFAULT_PLATFORMS="linux/amd64,linux/arm64"
+else
+  DEFAULT_PLATFORMS="linux/amd64"
+fi
+DOCKER_PLATFORMS="${DOCKER_PLATFORMS:-$DEFAULT_PLATFORMS}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 CACHE_TYPE="${CACHE_TYPE:-registry}"
 DRY_RUN="${DRY_RUN:-0}"

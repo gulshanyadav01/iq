@@ -169,9 +169,13 @@
         </div>
 
         <!-- Failed -->
-        <div v-else-if="selectedRequest?.status === 'failed'" class="p-6">
+        <div v-else-if="selectedRequest?.status === 'failed'" class="p-6 space-y-4">
           <div class="text-red-600 dark:text-red-400 p-4 bg-red-50 dark:bg-red-900/20 rounded text-sm">
             {{ selectedRequest.error || 'Unknown error' }}
+          </div>
+          <div v-if="formattedCallback">
+            <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Callback Response</div>
+            <pre class="text-xs bg-gray-100 dark:bg-gray-800 p-4 rounded whitespace-pre-wrap leading-relaxed">{{ formattedCallback }}</pre>
           </div>
         </div>
 
@@ -235,6 +239,12 @@
           <!-- JSON view -->
           <div v-else-if="activeView === 'json'" class="flex-1 overflow-auto p-6">
             <pre class="text-xs bg-gray-100 dark:bg-gray-800 p-4 rounded whitespace-pre-wrap leading-relaxed">{{ formattedResult }}</pre>
+          </div>
+
+          <!-- Callback Response view -->
+          <div v-else-if="activeView === 'callback'" class="flex-1 overflow-auto p-6">
+            <pre v-if="formattedCallback" class="text-xs bg-gray-100 dark:bg-gray-800 p-4 rounded whitespace-pre-wrap leading-relaxed">{{ formattedCallback }}</pre>
+            <div v-else class="text-xs text-gray-400">No callback response yet</div>
           </div>
         </div>
       </template>
@@ -303,6 +313,7 @@ interface ExtractionRequest {
   metadata: Record<string, unknown> | null
   result: Record<string, unknown> | null
   error: string | null
+  callback_response: Record<string, unknown> | null
   created_at: string
   updated_at: string
 }
@@ -358,11 +369,12 @@ const uploadError = ref('')
 const selectedRequest = ref<ExtractionRequest | null>(null)
 const detailOpen = ref(false)
 
-const views: { id: 'fields' | 'json'; label: string }[] = [
+const views: { id: 'fields' | 'json' | 'callback'; label: string }[] = [
   { id: 'fields', label: 'Extracted Fields' },
   { id: 'json', label: 'JSON' },
+  { id: 'callback', label: 'Callback Response' },
 ]
-const activeView = ref<'fields' | 'json'>('fields')
+const activeView = ref<'fields' | 'json' | 'callback'>('fields')
 
 const fieldFilters = [
   { id: 'all', label: 'All Fields' },
@@ -400,8 +412,13 @@ const filteredFields = computed(() => {
 
 const formattedResult = computed(() => {
   if (!selectedRequest.value?.result) return ''
-  const { intermediate_files, ...displayResult } = selectedRequest.value.result as any
+  const { intermediate_files, ...displayResult } = selectedRequest.value.result as Record<string, unknown>
   return JSON.stringify(displayResult, null, 2)
+})
+
+const formattedCallback = computed(() => {
+  if (!selectedRequest.value?.callback_response) return ''
+  return JSON.stringify(selectedRequest.value.callback_response, null, 2)
 })
 
 async function getAuthHeaders() {
@@ -538,6 +555,8 @@ async function copyContent() {
   let text = ''
   if (activeView.value === 'json') {
     text = formattedResult.value
+  } else if (activeView.value === 'callback') {
+    text = formattedCallback.value
   } else {
     text = filteredFields.value.map(r => `${r.field}\t${r.value ?? ''}`).join('\n')
   }

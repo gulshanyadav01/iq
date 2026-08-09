@@ -14,8 +14,14 @@ import os
 import shutil
 import tempfile
 
+from typing import TYPE_CHECKING
+
 from celery import chain, shared_task
 from celery.exceptions import Ignore
+from django.db import models, transaction
+
+if TYPE_CHECKING:
+    from commission_intake.models import IndexedContent
 
 from cins.processors.llm_services.langfuse_client import (
     set_trace_context,
@@ -86,6 +92,7 @@ def index_document(document_id: str):
         index_dir = tempfile.mkdtemp()
 
         try:
+
             def _on_progress(step: str, detail: str = "") -> None:
                 """Persist each indexing step to the document for real-time polling."""
                 try:
@@ -95,7 +102,9 @@ def index_document(document_id: str):
                 except Exception:
                     pass
 
-            indexer = ContentIndexer(indexed_dir=index_dir, llm_provider=doc.llm_provider)
+            indexer = ContentIndexer(
+                indexed_dir=index_dir, llm_provider=doc.llm_provider
+            )
             indexed_doc = indexer.index_document(
                 file_path=tmp_path,
                 provider=doc.provider or "unknown",
@@ -132,9 +141,7 @@ def index_document(document_id: str):
                 if attachments_dir.exists():
                     for att_file in attachments_dir.iterdir():
                         if att_file.is_file():
-                            storage_key = (
-                                f"commission_intake/attachments/{document_id}/{att_file.name}"
-                            )
+                            storage_key = f"commission_intake/attachments/{document_id}/{att_file.name}"
                             with open(att_file, "rb") as f:
                                 default_storage.save(storage_key, f)
                             attachment_keys.append(storage_key)
@@ -148,7 +155,9 @@ def index_document(document_id: str):
                     sheet_metadata = {
                         "classifications": indexed_doc.get_sheet_classifications(),
                         "table_splits": indexed_doc.get_table_splits(),
-                        "source_metadata": indexed_doc.metadata.get("source_metadata", {}),
+                        "source_metadata": indexed_doc.metadata.get(
+                            "source_metadata", {}
+                        ),
                     }
 
             if source_type == "excel":
@@ -201,10 +210,14 @@ def index_document(document_id: str):
 
 
 @shared_task(queue=COMMISSION_INTAKE_QUEUE)
-def run_extraction(document_id: str):
+def run_extraction(document_id: str, force_refresh: bool = False):
     """
     Reconstruct IndexedDocument from DB, run CINS Pipeline extraction,
     and save CICSResult + ExtractionPass rows.
+
+    ``force_refresh`` skips the CICS output-cache lookup so the LLM passes re-run
+    even for a byte-identical input; a gate-passing result then overwrites the
+    cached row for that key (``cics_cache.store`` is an upsert).
     """
     from pathlib import Path
 
@@ -214,6 +227,7 @@ def run_extraction(document_id: str):
         ExtractionPass,
         CICSResult,
         ValidationResult,
+        CicsOutputCache,
     )
     from cins.processors.content.indexer import IndexedDocument
     from cins.processors.core.pipeline import Pipeline
@@ -223,10 +237,53 @@ def run_extraction(document_id: str):
         doc = CommissionDocument.objects.get(id=document_id)
         indexed = IndexedContent.objects.get(document=doc)
 
+        # ── Output-cache lookup (before any LLM work) ────────────────────────
+        # Same byte-identical input + same prompts/model/pipeline version → serve
+        # the pinned, gate-passing result verbatim instead of re-rolling codegen.
+        from commission_intake import cics_cache
+        from cins.processors.llm_services.factory import get_llm_service
+
+        try:
+            _resolved_model = get_llm_service(
+                provider=doc.llm_provider,
+                **({"model": doc.llm_model} if doc.llm_model else {}),
+            ).model
+        except Exception:
+            _resolved_model = doc.llm_model or ""
+
+        cache_key = cics_cache.compute_cache_key(
+            content_hash=indexed.content_hash,
+            indexer_version=indexed.indexer_version,
+            prompt_version_hash=cics_cache.compute_prompt_version_hash(),
+            llm_provider=doc.llm_provider or "",
+            llm_model=_resolved_model,
+        )
+
         # Clear stale data from any previous extraction run.
         ExtractionPass.objects.filter(document=doc).delete()
         CICSResult.objects.filter(document=doc).delete()
         ValidationResult.objects.filter(document=doc).delete()
+
+        if force_refresh:
+            logger.info(
+                f"CICS output-cache BYPASS for {document_id} (key={cache_key[:12]}…) "
+                f"— forced fresh extraction requested"
+            )
+        cached = None if force_refresh else cics_cache.lookup(cache_key)
+        if cached is not None:
+            logger.info(
+                f"CICS output-cache HIT for {document_id} (key={cache_key[:12]}…) "
+                f"— repopulating without LLM"
+            )
+            # Rebuild the UI rows atomically: the stale-data delete above already
+            # ran, so a partial repopulate must not leave a half-empty document.
+            with transaction.atomic():
+                _repopulate_from_cache(doc, cached)
+            # Atomic increment so concurrent reruns of the same doc don't lose a count.
+            CicsOutputCache.objects.filter(pk=cached.pk).update(
+                hit_count=models.F("hit_count") + 1
+            )
+            return document_id
 
         # Pre-create ExtractionPass rows as PENDING for each sheet × 3 passes the
         # pipeline will actually run. Use the pipeline's own routing helper so
@@ -235,15 +292,32 @@ def run_extraction(document_id: str):
         # and the UI sees an inconsistent pass set.
         if indexed.sheet_contents:
             from cins.processors.core.pipeline import derive_pipeline_routing
+            from cins.processors.core.sheet_visibility import (
+                all_hidden_error,
+                hidden_sheet_names,
+            )
 
             sheet_metadata = indexed.sheet_metadata or {}
             source_meta = sheet_metadata.get("source_metadata", {})
+            classifications = sheet_metadata.get("classifications", {})
             sheets_to_process, attachment_name = derive_pipeline_routing(
                 source_type=indexed.source_type,
-                sheet_classifications=sheet_metadata.get("classifications", {}),
+                sheet_classifications=classifications,
                 sheet_names=list(indexed.sheet_contents.keys()),
                 excel_attachments=source_meta.get("excel_attachments", []),
             )
+
+            # Nothing routable — every sheet's tab is hidden. Fail loudly here,
+            # before any LLM call, rather than completing with zero rules and a
+            # green status the reviewer would read as "no commission data".
+            if not sheets_to_process:
+                raise ValueError(
+                    all_hidden_error(
+                        len(indexed.sheet_contents),
+                        hidden_sheet_names(classifications),
+                    )
+                )
+
             for sheet_name in sheets_to_process:
                 for pass_num in ExtractionPass.PassNumber.values:
                     ExtractionPass.objects.get_or_create(
@@ -291,10 +365,39 @@ def run_extraction(document_id: str):
 
             pipeline._on_sheet_complete_callback = _on_sheet_done
 
-            result = pipeline.process_from_indexed(indexed_doc, output_path=fake_dir / "cics.json")
+            result = pipeline.process_from_indexed(
+                indexed_doc, output_path=fake_dir / "cics.json"
+            )
 
             # Final upsert for any entries not yet persisted by the callback.
             _save_extraction_passes(doc, result)
+
+            # ── Cross-run regression guard ───────────────────────────────────
+            # Diff this (cache-miss) extraction against the last gate-passing run
+            # of the same source content. A lost product/segment or big shortfall
+            # → surface a loud warning and refuse to pin the regressed result, so a
+            # prompt/pipeline bump can't silently drop a segment the good run had.
+            regression = cics_cache.RegressionReport()
+            try:
+                baseline = cics_cache.find_prior_baseline(
+                    indexed.content_hash, exclude_cache_key=cache_key
+                )
+                if baseline is not None:
+                    regression = cics_cache.detect_regression(
+                        baseline.cics_doc, result.cics_doc
+                    )
+                    if regression.is_regression:
+                        result.warnings = list(result.warnings or []) + [
+                            regression.warning
+                        ]
+                        logger.warning(
+                            f"Regression guard for {document_id}: "
+                            f"{regression.reason} "
+                            f"(baseline {regression.baseline_total} → "
+                            f"{regression.new_total} rules)"
+                        )
+            except Exception as re_exc:  # guard is best-effort; never fail extraction
+                logger.warning(f"Regression guard failed: {re_exc}")
 
             # Save final CICS result
             CICSResult.objects.update_or_create(
@@ -303,6 +406,7 @@ def run_extraction(document_id: str):
                     "cics_doc": result.cics_doc,
                     "raw_extraction": None,  # populated via ExtractionPass rows
                     "warnings": result.warnings,
+                    "notices": result.notices,
                     "errors": result.errors,
                     "duration_seconds": result.duration,
                     "sheet_results": result.sheet_results,
@@ -314,10 +418,44 @@ def run_extraction(document_id: str):
             # with spaces -> underscores per CICS schema regex) and reverse the
             # underscore conversion so the DB matches the user-facing list.
             # Skip UNKNOWN_PROVIDER so the column isn't polluted with sentinel.
-            provider_id = (result.cics_doc or {}).get("provider", {}).get("provider_id", "")
+            provider_id = (
+                (result.cics_doc or {}).get("provider", {}).get("provider_id", "")
+            )
             if provider_id and provider_id != "UNKNOWN_PROVIDER":
                 doc.provider = provider_id.replace("_", " ")
                 doc.save(update_fields=["provider", "updated_at"])
+
+            # ── Output-cache write ───────────────────────────────────────────
+            # Pin only clean, gate-passing results so a rerun is reproducible and
+            # a segment-dropping / requires_review run is never frozen in.
+            try:
+                if cics_cache.should_cache(result) and not regression.is_regression:
+                    cics_cache.store(
+                        cache_key=cache_key,
+                        content_hash=indexed.content_hash,
+                        indexer_version=indexed.indexer_version,
+                        prompt_version_hash=cics_cache.compute_prompt_version_hash(),
+                        llm_provider=doc.llm_provider or "",
+                        llm_model=_resolved_model,
+                        result=result,
+                        provider_id=provider_id or "",
+                    )
+                    logger.info(
+                        f"CICS output-cache STORE for {document_id} "
+                        f"(key={cache_key[:12]}…)"
+                    )
+                else:
+                    reason = (
+                        "regression vs prior good run"
+                        if regression.is_regression
+                        else "errors, validation errors or requires_review"
+                    )
+                    logger.info(
+                        f"CICS output-cache SKIP for {document_id} "
+                        f"({reason} — not pinning)"
+                    )
+            except Exception as ce:  # cache is best-effort; never fail extraction
+                logger.warning(f"CICS output-cache write failed: {ce}")
 
         finally:
             shutil.rmtree(fake_dir, ignore_errors=True)
@@ -342,6 +480,36 @@ def _build_content_files(indexed: "IndexedContent") -> dict:
     if indexed.sheet_contents:
         content_files["sheets"] = list(indexed.sheet_contents.keys())
     return content_files
+
+
+def _rebuild_indexed_document(doc, indexed, base_dir):
+    """Reconstruct an IndexedDocument from DB rows (no disk reads).
+
+    The coverage validators need the source grid to compare emitted rules
+    against, and they only get it from an IndexedDocument. `run_extraction`
+    builds one inline for the Pipeline; `run_validation` needs the same thing to
+    run the full validator set. `base_dir` only has to be a real path — nothing
+    is read from it.
+    """
+    from cins.processors.content.indexer import IndexedDocument
+
+    sheet_metadata = indexed.sheet_metadata or {}
+    return IndexedDocument(
+        document_id=doc.original_filename,
+        provider=doc.provider or "unknown",
+        source_file=base_dir / doc.original_filename,
+        source_type=indexed.source_type,
+        indexed_dir=base_dir,
+        metadata={
+            "content_files": _build_content_files(indexed),
+            "table_splits": sheet_metadata.get("table_splits", {}),
+            "source_metadata": sheet_metadata.get("source_metadata", {}),
+            "sheet_classifications": sheet_metadata.get("classifications", {}),
+        },
+        _primary_content=indexed.primary_content or None,
+        _sheet_contents=indexed.sheet_contents or None,
+        _email_context=indexed.email_context or None,
+    )
 
 
 def _purge_extraction_artifacts(doc) -> None:
@@ -426,6 +594,39 @@ def _save_extraction_passes(doc, result) -> None:
         _upsert_extraction_passes(doc, result.sheet_pass_results)
 
 
+def _repopulate_from_cache(doc, cached) -> None:
+    """Rebuild ExtractionPass + CICSResult rows from a cache hit, no LLM.
+
+    ``run_extraction`` deletes those rows before the lookup, so a hit must fully
+    re-materialise them or the UI would show an empty document. Validation is left
+    to the normal ``run_validation`` task that follows in the chain (it reads the
+    repopulated CICSResult and is deterministic/cheap).
+    """
+    from commission_intake.models import CICSResult
+
+    _upsert_extraction_passes(doc, cached.sheet_pass_results or [])
+
+    CICSResult.objects.update_or_create(
+        document=doc,
+        defaults={
+            "cics_doc": cached.cics_doc,
+            "raw_extraction": None,
+            "warnings": cached.warnings or [],
+            "notices": cached.notices or [],
+            "errors": cached.errors or [],
+            "duration_seconds": cached.duration_seconds or 0.0,
+            "sheet_results": cached.sheet_results or [],
+        },
+    )
+
+    provider_id = cached.provider_id or (
+        (cached.cics_doc or {}).get("provider", {}).get("provider_id", "")
+    )
+    if provider_id and provider_id != "UNKNOWN_PROVIDER":
+        doc.provider = provider_id.replace("_", " ")
+        doc.save(update_fields=["provider", "updated_at"])
+
+
 # ---------------------------------------------------------------------------
 # Stage 3: Validation
 # ---------------------------------------------------------------------------
@@ -434,13 +635,19 @@ def _save_extraction_passes(doc, result) -> None:
 @shared_task(queue=COMMISSION_INTAKE_QUEUE)
 def run_validation(document_id: str):
     """
-    Load CICSResult from DB, run schema + overlap validators,
-    and save ValidationResult.
+    Load CICSResult from DB, run the full validator set, and save
+    ValidationResult.
     """
     import json
     import tempfile
+    from pathlib import Path
 
-    from commission_intake.models import CommissionDocument, CICSResult, ValidationResult
+    from commission_intake.models import (
+        CommissionDocument,
+        CICSResult,
+        IndexedContent,
+        ValidationResult,
+    )
 
     try:
         doc = CommissionDocument.objects.get(id=document_id)
@@ -453,18 +660,41 @@ def run_validation(document_id: str):
             tmp_path = tmp.name
             json.dump(cics_result.cics_doc, tmp, ensure_ascii=False)
 
-        try:
-            from cins.validators.schema_validator import SchemaValidator
-            from cins.validators.rule_overlap_checker import RuleOverlapChecker
+        # Reuse the pipeline's validator fan-out rather than re-listing the
+        # validators here. Running only SchemaValidator + RuleOverlapChecker
+        # meant the Chola product-hierarchy, row-coverage, coverage-integrity
+        # and state-column-alignment validators never reached the persisted
+        # ValidationResult — their findings existed only inside the pipeline
+        # run, so the UI reported has_high=False on a document carrying three
+        # HIGH mandatory-vehicle_sub_class findings across 2079 rules.
+        from cins.processors.core.pipeline import _run_validators
 
-            schema_result = SchemaValidator().validate(tmp_path)
-            overlap_result = RuleOverlapChecker().check(tmp_path)
+        base_dir = Path(tempfile.mkdtemp())
+        try:
+            indexed_doc = None
+            try:
+                indexed = IndexedContent.objects.get(document=doc)
+                indexed_doc = _rebuild_indexed_document(doc, indexed, base_dir)
+            except IndexedContent.DoesNotExist:
+                # No index row (e.g. a hand-built CICS): the coverage validators
+                # simply sit out; schema/overlap/Chola still run.
+                pass
+            except Exception as e:
+                logger.warning(f"Could not rebuild IndexedDocument for validation: {e}")
+
+            schema_result, overlap_result = _run_validators(tmp_path, indexed_doc)
         finally:
             os.unlink(tmp_path)
+            shutil.rmtree(base_dir, ignore_errors=True)
+
+        if schema_result is None or overlap_result is None:
+            raise RuntimeError("Validators unavailable")
 
         def _issue_to_dict(issue):
             return {
-                "severity": issue.severity.value if hasattr(issue.severity, "value") else str(issue.severity),
+                "severity": issue.severity.value
+                if hasattr(issue.severity, "value")
+                else str(issue.severity),
                 "category": getattr(issue, "category", ""),
                 "field_path": getattr(issue, "field_path", ""),
                 "message": getattr(issue, "message", str(issue)),
@@ -473,16 +703,22 @@ def run_validation(document_id: str):
 
         def _overlap_to_dict(overlap):
             return {
-                "severity": overlap.severity.value if hasattr(overlap.severity, "value") else str(overlap.severity),
+                "severity": overlap.severity.value
+                if hasattr(overlap.severity, "value")
+                else str(overlap.severity),
                 "overlap_type": getattr(overlap, "overlap_type", ""),
                 "product_code": getattr(overlap, "product_code", ""),
                 "rule1_id": getattr(overlap, "rule1_id", ""),
                 "rule2_id": getattr(overlap, "rule2_id", ""),
                 "description": getattr(overlap, "description", ""),
-                "overlapping_dimensions": getattr(overlap, "overlapping_dimensions", []),
+                "overlapping_dimensions": getattr(
+                    overlap, "overlapping_dimensions", []
+                ),
             }
 
-        schema_issues = [_issue_to_dict(i) for i in (schema_result.errors + schema_result.warnings)]
+        schema_issues = [
+            _issue_to_dict(i) for i in (schema_result.errors + schema_result.warnings)
+        ]
         overlap_issues = [_overlap_to_dict(o) for o in overlap_result.overlaps]
 
         ValidationResult.objects.update_or_create(
@@ -491,7 +727,8 @@ def run_validation(document_id: str):
                 "schema_issues": schema_issues,
                 "overlap_issues": overlap_issues,
                 "is_valid": not (schema_result.has_critical or schema_result.has_high),
-                "has_critical": schema_result.has_critical or overlap_result.has_critical,
+                "has_critical": schema_result.has_critical
+                or overlap_result.has_critical,
                 "has_high": schema_result.has_high or overlap_result.has_high,
             },
         )
@@ -552,7 +789,9 @@ def _fail_document(document_id: str, error: str) -> None:
         pass
 
 
-def build_processing_chain(document_id: str, mode: str = "full"):
+def build_processing_chain(
+    document_id: str, mode: str = "full", force_refresh: bool = False
+):
     """Build the Celery chain for the given processing mode (not yet applied)."""
     from commission_intake.models import CommissionDocument
 
@@ -566,7 +805,7 @@ def build_processing_chain(document_id: str, mode: str = "full"):
     if mode == "extract_only":
         return chain(
             _set_status.si(document_id, CommissionDocument.Status.EXTRACTING),
-            run_extraction.si(document_id),
+            run_extraction.si(document_id, force_refresh),
             run_validation.si(document_id),
             _set_completed.si(document_id),
         )
@@ -582,9 +821,13 @@ def build_processing_chain(document_id: str, mode: str = "full"):
     )
 
 
-def enqueue_processing_chain(document_id: str, mode: str = "full") -> None:
+def enqueue_processing_chain(
+    document_id: str, mode: str = "full", force_refresh: bool = False
+) -> None:
     """Enqueue a processing chain according to mode (full, index_only, extract_only)."""
-    build_processing_chain(document_id, mode).apply_async(queue=COMMISSION_INTAKE_QUEUE)
+    build_processing_chain(document_id, mode, force_refresh).apply_async(
+        queue=COMMISSION_INTAKE_QUEUE
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -593,19 +836,22 @@ def enqueue_processing_chain(document_id: str, mode: str = "full") -> None:
 
 
 @shared_task(queue=COMMISSION_INTAKE_QUEUE)
-def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attachment_name: str):
+def rerun_single_pass(
+    document_id: str, pass_number: int, sheet_name: str, attachment_name: str
+):
     """
     Re-run a single extraction pass (1, 2, or 3) for a specific sheet.
     Reads indexed content from DB, rebuilds the same per-pass content strings
     that the pipeline builds in _process_sheets, and updates the ExtractionPass row.
     Does NOT rerun transform or validation.
     """
-    import shutil
-    import tempfile
     import time as _time
-    from pathlib import Path
 
-    from commission_intake.models import CommissionDocument, IndexedContent, ExtractionPass
+    from commission_intake.models import (
+        CommissionDocument,
+        IndexedContent,
+        ExtractionPass,
+    )
     from cins.processors.llm_services.factory import get_llm_service
     from cins.processors.core.llm_extract import (
         _extract_pass1_metadata,
@@ -618,9 +864,16 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
     try:
         set_trace_context(
             session_id=document_id,
-            trace_id=make_pass_trace_id(document_id, pass_number, sheet_name, attachment_name),
+            trace_id=make_pass_trace_id(
+                document_id, pass_number, sheet_name, attachment_name
+            ),
             trace_name=f"rerun-pass-{pass_number}",
-            metadata={"document_id": document_id, "pass": pass_number, "sheet": sheet_name, "attachment": attachment_name},
+            metadata={
+                "document_id": document_id,
+                "pass": pass_number,
+                "sheet": sheet_name,
+                "attachment": attachment_name,
+            },
         )
         doc = CommissionDocument.objects.get(id=document_id)
         indexed = IndexedContent.objects.get(document=doc)
@@ -634,19 +887,18 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
         ).update(status=ExtractionPass.Status.RUNNING, error="")
 
         from cins.processors.core.pipeline import build_pass_contents
+        from cins.processors.core.sheet_visibility import derive_sheet_sets
 
         sheet_contents = indexed.sheet_contents or {}
         sheet_metadata = indexed.sheet_metadata or {}
         classifications = sheet_metadata.get("classifications", {})
 
-        master_sheets = [
-            s for s, meta in classifications.items()
-            if (meta.get("classification") or meta.get("sheet_type")) == "master_data"
-        ]
-        commission_sheets = [
-            s for s, meta in classifications.items()
-            if (meta.get("classification") or meta.get("sheet_type")) == "commission_data"
-        ]
+        # Same derivation the pipeline routes on. This used to be a local
+        # comprehension keyed on `classification or sheet_type` while routing
+        # keyed on `sheet_type` alone — two readers, one document, two different
+        # Pass 2 prompts. Sharing the helper also means the rerun cannot
+        # re-inject a hidden master sheet the main run excluded.
+        commission_sheets, master_sheets, _hidden = derive_sheet_sets(classifications)
 
         master_context = ""
         for ms in master_sheets:
@@ -657,15 +909,20 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
         sheet_content = sheet_contents.get(sheet_name, "")
         email_body = indexed.primary_content if indexed.source_type == "email" else ""
 
-        pass1_prompt, pass2_prompt, pass3_prompt, email_is_primary_commission = build_pass_contents(
-            sheet_name=sheet_name,
-            sheet_content=sheet_content,
-            master_context=master_context,
-            email_body=email_body,
-            commission_sheets=commission_sheets,
+        pass1_prompt, pass2_prompt, pass3_prompt, email_is_primary_commission = (
+            build_pass_contents(
+                sheet_name=sheet_name,
+                sheet_content=sheet_content,
+                master_context=master_context,
+                email_body=email_body,
+                commission_sheets=commission_sheets,
+            )
         )
 
-        service = get_llm_service(provider=doc.llm_provider, **({"model": doc.llm_model} if doc.llm_model else {}))
+        service = get_llm_service(
+            provider=doc.llm_provider,
+            **({"model": doc.llm_model} if doc.llm_model else {}),
+        )
 
         start = _time.monotonic()
         p2_codegen_code = ""
@@ -678,10 +935,16 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
             result_dict = result_obj.model_dump()
         elif pass_number == 2:
             pass1_row = ExtractionPass.objects.filter(
-                document=doc, pass_number=1,
-                sheet_name=sheet_name, attachment_name=attachment_name,
+                document=doc,
+                pass_number=1,
+                sheet_name=sheet_name,
+                attachment_name=attachment_name,
             ).first()
-            metadata_obj = MetadataExtraction.model_validate(pass1_row.result) if pass1_row and pass1_row.result else MetadataExtraction()
+            metadata_obj = (
+                MetadataExtraction.model_validate(pass1_row.result)
+                if pass1_row and pass1_row.result
+                else MetadataExtraction()
+            )
             # Pass 2 always runs via codegen (matches main pipeline; the JSON
             # path was removed for perf reasons — see plan A1).
             result_obj, p2_codegen_code, _user_prompt = _extract_pass2_via_codegen(
@@ -691,27 +954,59 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
             result_dict = result_obj.model_dump()
         else:  # pass 3
             pass1_row = ExtractionPass.objects.filter(
-                document=doc, pass_number=1,
-                sheet_name=sheet_name, attachment_name=attachment_name,
+                document=doc,
+                pass_number=1,
+                sheet_name=sheet_name,
+                attachment_name=attachment_name,
             ).first()
             pass2_row = ExtractionPass.objects.filter(
-                document=doc, pass_number=2,
-                sheet_name=sheet_name, attachment_name=attachment_name,
+                document=doc,
+                pass_number=2,
+                sheet_name=sheet_name,
+                attachment_name=attachment_name,
             ).first()
-            metadata_obj = MetadataExtraction.model_validate(pass1_row.result) if pass1_row and pass1_row.result else MetadataExtraction()
-            master_data_obj = MasterDataExtraction.model_validate(pass2_row.result) if pass2_row and pass2_row.result else MasterDataExtraction()
+            metadata_obj = (
+                MetadataExtraction.model_validate(pass1_row.result)
+                if pass1_row and pass1_row.result
+                else MetadataExtraction()
+            )
+            master_data_obj = (
+                MasterDataExtraction.model_validate(pass2_row.result)
+                if pass2_row and pass2_row.result
+                else MasterDataExtraction()
+            )
 
             # email_is_primary_commission: email body already IS pass3_content — no prepend needed.
             # Otherwise fall back to the has_commission_data flag (email body mixed with sheet content).
-            if not email_is_primary_commission and metadata_obj.has_commission_data and email_body:
+            if (
+                not email_is_primary_commission
+                and metadata_obj.has_commission_data
+                and email_body
+            ):
                 pass3_prompt = (
-                    f"## Email Commission Data\n\n{email_body}"
-                    f"\n\n---\n\n{pass3_prompt}"
+                    f"## Email Commission Data\n\n{email_body}\n\n---\n\n{pass3_prompt}"
                 )
+
+            # Per-sheet shape for the codegen completeness gate (fails open if
+            # the doc was indexed before rate_cell_count existed).
+            from cins.processors.core.pipeline import (
+                get_safe_sheet_name,
+                _table_shape_for_sheet,
+            )
+
+            pass3_table_shape = _table_shape_for_sheet(
+                (indexed.sheet_metadata or {}).get("table_splits", {}),
+                sheet_name,
+                get_safe_sheet_name(sheet_name),
+            )
 
             # Pass 3 always runs via codegen (matches the main pipeline).
             result_obj, p3_codegen_code, _ = _extract_pass3_via_codegen(
-                pass3_prompt, service, metadata_obj, master_data_obj
+                pass3_prompt,
+                service,
+                metadata_obj,
+                master_data_obj,
+                table_shape=pass3_table_shape,
             )
             p3_extraction_method = "codegen"
             result_dict = result_obj.model_dump()
@@ -727,8 +1022,16 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
                 "status": ExtractionPass.Status.COMPLETED,
                 "result": result_dict,
                 "llm_model_used": service.model,
-                "extraction_method": p3_extraction_method if pass_number == 3 else p2_extraction_method if pass_number == 2 else "llm",
-                "codegen_code": p3_codegen_code if pass_number == 3 else p2_codegen_code if pass_number == 2 else "",
+                "extraction_method": p3_extraction_method
+                if pass_number == 3
+                else p2_extraction_method
+                if pass_number == 2
+                else "llm",
+                "codegen_code": p3_codegen_code
+                if pass_number == 3
+                else p2_codegen_code
+                if pass_number == 2
+                else "",
                 "duration_seconds": round(duration, 2),
                 "error": "",
             },
@@ -737,7 +1040,9 @@ def rerun_single_pass(document_id: str, pass_number: int, sheet_name: str, attac
         return document_id
 
     except Exception as exc:
-        logger.exception(f"Rerun pass {pass_number} failed for document {document_id}: {exc}")
+        logger.exception(
+            f"Rerun pass {pass_number} failed for document {document_id}: {exc}"
+        )
         if doc:
             ExtractionPass.objects.filter(
                 document=doc,
@@ -763,28 +1068,41 @@ def rerun_transform(document_id: str):
     the RawToCICSTransformer.  Does NOT re-run any LLM passes.
     Followed by validation automatically.
     """
-    import shutil
-    import tempfile
 
-    from commission_intake.models import CommissionDocument, ExtractionPass, CICSResult, ValidationResult
-    from cins.schema.extraction_passes import MetadataExtraction, MasterDataExtraction, RulesExtraction
+    from commission_intake.models import (
+        CommissionDocument,
+        ExtractionPass,
+        CICSResult,
+        ValidationResult,
+    )
+    from cins.schema.extraction_passes import (
+        MetadataExtraction,
+        MasterDataExtraction,
+        RulesExtraction,
+    )
     from cins.schema.raw_extraction import RawExtraction
     from cins.processors.core.raw_to_cics_transformer import RawToCICSTransformer
+    from cins.processors.core.cpa_split import materialize_cpa_split
+    from cins.processors.core.rule_priority import normalize_rule_priorities
 
     try:
         doc = CommissionDocument.objects.get(id=document_id)
 
         # Gather all completed pass results grouped by sheet
         passes = list(
-            ExtractionPass.objects.filter(document=doc, status=ExtractionPass.Status.COMPLETED)
-            .order_by("sheet_name", "attachment_name", "pass_number")
+            ExtractionPass.objects.filter(
+                document=doc, status=ExtractionPass.Status.COMPLETED
+            ).order_by("sheet_name", "attachment_name", "pass_number")
         )
 
         if not passes:
-            raise ValueError("No completed extraction passes found — run extraction first.")
+            raise ValueError(
+                "No completed extraction passes found — run extraction first."
+            )
 
         # Group by (sheet_name, attachment_name)
         from collections import defaultdict
+
         sheet_passes: dict = defaultdict(dict)
         for p in passes:
             key = (p.sheet_name, p.attachment_name)
@@ -800,15 +1118,29 @@ def rerun_transform(document_id: str):
             if merged_raw is None:
                 merged_raw = raw
             else:
-                merged_raw.commission_entries = (merged_raw.commission_entries or []) + (raw.commission_entries or [])
-                merged_raw.master_data = (merged_raw.master_data or []) + (raw.master_data or [])
+                merged_raw.commission_entries = (
+                    merged_raw.commission_entries or []
+                ) + (raw.commission_entries or [])
+                merged_raw.master_data = (merged_raw.master_data or []) + (
+                    raw.master_data or []
+                )
 
         if merged_raw is None:
             raise ValueError("Failed to build RawExtraction from passes.")
 
         transformer = RawToCICSTransformer()
-        cics_doc, transform_warnings, transform_errors = transformer.transform(merged_raw)
+        cics_doc, transform_warnings, transform_errors = transformer.transform(
+            merged_raw
+        )
         cics_json = cics_doc.model_dump(exclude_none=False)
+        # Materialize CPA-deduction rules into With/Without-CPA variants — the
+        # full pipeline (pipeline.py) applies this immediately after transform,
+        # so re-transform must too or the rebuilt document silently loses the
+        # CPA dimension (every rule collapses to cpa=None, halving CV counts).
+        cics_json = materialize_cpa_split(cics_json)
+        # Rule fan-out and cpa split clone the parent's priority; renumber once
+        # the rule list is final (pipeline.py does the same after transform).
+        cics_json = normalize_rule_priorities(cics_json)
 
         CICSResult.objects.update_or_create(
             document=doc,
@@ -816,6 +1148,7 @@ def rerun_transform(document_id: str):
                 "cics_doc": cics_json,
                 "raw_extraction": None,
                 "warnings": transform_warnings or [],
+                "notices": list(transformer.notices),
                 "errors": transform_errors or [],
                 "duration_seconds": 0.0,
                 "sheet_results": [],
