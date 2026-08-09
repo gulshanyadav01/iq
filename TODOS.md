@@ -15,6 +15,47 @@
 
 ## cins
 
+- [ ] **Declarative `RuleConditions` field registry** — replace the ten
+      hand-synced enumerations of the condition fields with one table that
+      derives them.
+      **Priority:** P2
+      **Context:** Surfaced by the NCB% eng review (branch
+      `ravipiplani/ncb-percent-rule-condition`). Adding ONE condition dimension
+      required edits in nine independent places: `cics_model.py:26`,
+      `commission_schema_v1.json` `$defs.RuleConditions`,
+      `raw_to_cics_transformer.py` `_has_conditions:1680` and
+      `_DEDUPE_LIST_FIELDS`/`_DEDUPE_SCALAR_FIELDS`/`_DEDUPE_RANGES:2469-2501`,
+      `rule_overlap_checker.py` `single_fields:242` + `range_pairs:255` +
+      `_RANGE_KEY_TO_LABEL:41`, `schema_validator.py:303-316,597`,
+      `commission_document.py` header list `:759` AND positional cell list
+      `:1009`, `useCommissionIntakeDetail.ts` `CONDITION_LABELS`, and
+      `cpa_split.py` `_MIRROR_DIM_KEYS:199`. The reviews caught three that a
+      careful reading had already missed — `_DEDUPE_SCALAR_FIELDS` (whose
+      omission silently fused three-tier ladders), the export, whose
+      header/cell lists had no length guard at all, and `_MIRROR_DIM_KEYS`,
+      whose consumer DELETES rules. Same
+      failure shape as the logged `cins-five-sheet-set-derivations` learning:
+      "any change must touch all five or it half-works silently."
+      **Depends on:** the NCB% branch landing first. Effort: human ~3d / CC ~4h.
+      **Risk:** touches the highest-traffic files in `cins`; the export's
+      positional header/cell pairing is genuinely awkward to derive. Do NOT ride
+      this along with a feature change.
+
+- [ ] **Generic notice dedupe/cap between the transformer and the UI** —
+      stop per-rule notices burying the ones that matter.
+      **Priority:** P3
+      **Context:** Surfaced by the NCB% eng review. `raw_to_cics_transformer.py`
+      has 14 `self.notices.append` sites, several inside per-rule loops, and
+      `commission_intake/tasks.py:1151` copies `list(transformer.notices)`
+      straight to the DB with no dedupe or cap — so a large grid emits hundreds
+      of identical lines on the detail page. That is how people stop reading the
+      notices panel, which is the primary channel for "the transformer did
+      something surprising". The NCB branch aggregated its own two notices
+      (count inside the loop, one summary line after, with the distinct band
+      list); generalise that helper to the other 12 sites.
+      **Depends on:** the NCB% aggregation landing first — it is the pattern to
+      generalise. Effort: human ~1d / CC ~1h.
+
 - [ ] **Third `SheetType.IGNORE` label + pre-LLM emptiness heuristic** — stop
       blank/instruction sheets injecting fabricated commission rules.
       **Priority:** P2
