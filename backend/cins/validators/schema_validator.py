@@ -21,15 +21,15 @@ Usage:
 
 import json
 import re
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import List, Dict, Any, Optional
+from datetime import datetime
+from typing import List, Dict, Optional
 from dataclasses import dataclass
 from enum import Enum
 
 
 class Severity(Enum):
     """Issue severity levels"""
+
     CRITICAL = "CRITICAL"
     HIGH = "HIGH"
     MEDIUM = "MEDIUM"
@@ -40,6 +40,7 @@ class Severity(Enum):
 @dataclass
 class ValidationIssue:
     """Represents a validation issue"""
+
     severity: Severity
     message: str
     field_path: str
@@ -50,6 +51,7 @@ class ValidationIssue:
 @dataclass
 class ValidationResult:
     """Result of validation"""
+
     is_valid: bool
     errors: List[ValidationIssue]
     warnings: List[ValidationIssue]
@@ -94,7 +96,7 @@ class SchemaValidator:
 
     def load_schema(self, schema_path: str):
         """Load JSON schema from file"""
-        with open(schema_path, 'r') as f:
+        with open(schema_path, "r") as f:
             self.schema = json.load(f)
 
     def validate(self, document_path: str) -> ValidationResult:
@@ -111,23 +113,27 @@ class SchemaValidator:
 
         # Load document
         try:
-            with open(document_path, 'r') as f:
+            with open(document_path, "r") as f:
                 self.current_doc = json.load(f)
         except json.JSONDecodeError as e:
-            self.issues.append(ValidationIssue(
-                severity=Severity.CRITICAL,
-                message=f"Invalid JSON: {str(e)}",
-                field_path="root",
-                category="JSON Structure"
-            ))
+            self.issues.append(
+                ValidationIssue(
+                    severity=Severity.CRITICAL,
+                    message=f"Invalid JSON: {str(e)}",
+                    field_path="root",
+                    category="JSON Structure",
+                )
+            )
             return self._build_result()
         except Exception as e:
-            self.issues.append(ValidationIssue(
-                severity=Severity.CRITICAL,
-                message=f"Failed to load document: {str(e)}",
-                field_path="root",
-                category="File Loading"
-            ))
+            self.issues.append(
+                ValidationIssue(
+                    severity=Severity.CRITICAL,
+                    message=f"Failed to load document: {str(e)}",
+                    field_path="root",
+                    category="File Loading",
+                )
+            )
             return self._build_result()
 
         # Run validations
@@ -144,28 +150,29 @@ class SchemaValidator:
 
     def _build_result(self) -> ValidationResult:
         """Build validation result from collected issues"""
-        errors = [i for i in self.issues if i.severity in [Severity.CRITICAL, Severity.HIGH]]
+        errors = [
+            i for i in self.issues if i.severity in [Severity.CRITICAL, Severity.HIGH]
+        ]
         warnings = [i for i in self.issues if i.severity == Severity.MEDIUM]
         info = [i for i in self.issues if i.severity in [Severity.LOW, Severity.INFO]]
 
         is_valid = len([i for i in self.issues if i.severity == Severity.CRITICAL]) == 0
 
         return ValidationResult(
-            is_valid=is_valid,
-            errors=errors,
-            warnings=warnings,
-            info=info
+            is_valid=is_valid, errors=errors, warnings=warnings, info=info
         )
 
     def _validate_structure(self):
         """Validate top-level document structure"""
         if not isinstance(self.current_doc, dict):
-            self.issues.append(ValidationIssue(
-                severity=Severity.CRITICAL,
-                message="Document must be a JSON object",
-                field_path="root",
-                category="Structure"
-            ))
+            self.issues.append(
+                ValidationIssue(
+                    severity=Severity.CRITICAL,
+                    message="Document must be a JSON object",
+                    field_path="root",
+                    category="Structure",
+                )
+            )
             return
 
     def _validate_required_fields(self):
@@ -174,78 +181,88 @@ class SchemaValidator:
             "document_metadata",
             "provider",
             "commission_period",
-            "products"
+            "products",
         ]
 
         for field in required_top_level:
             if field not in self.current_doc:
-                self.issues.append(ValidationIssue(
-                    severity=Severity.CRITICAL,
-                    message=f"Missing required field: {field}",
-                    field_path=field,
-                    category="Required Fields"
-                ))
+                self.issues.append(
+                    ValidationIssue(
+                        severity=Severity.CRITICAL,
+                        message=f"Missing required field: {field}",
+                        field_path=field,
+                        category="Required Fields",
+                    )
+                )
 
         # Validate nested required fields
         if "document_metadata" in self.current_doc:
             self._validate_required_in_object(
                 self.current_doc["document_metadata"],
                 ["document_id", "extracted_at", "extractor"],
-                "document_metadata"
+                "document_metadata",
             )
 
         if self.current_doc.get("provider"):
             self._validate_required_in_object(
                 self.current_doc["provider"],
                 ["provider_id", "provider_name"],
-                "provider"
+                "provider",
             )
 
         if "commission_period" in self.current_doc:
             self._validate_required_in_object(
                 self.current_doc["commission_period"],
                 ["effective_from"],
-                "commission_period"
+                "commission_period",
             )
 
         # Validate products array
         if "products" in self.current_doc:
             if not isinstance(self.current_doc["products"], list):
-                self.issues.append(ValidationIssue(
-                    severity=Severity.CRITICAL,
-                    message="products must be an array",
-                    field_path="products",
-                    category="Field Types"
-                ))
+                self.issues.append(
+                    ValidationIssue(
+                        severity=Severity.CRITICAL,
+                        message="products must be an array",
+                        field_path="products",
+                        category="Field Types",
+                    )
+                )
             elif len(self.current_doc["products"]) == 0:
-                self.issues.append(ValidationIssue(
-                    severity=Severity.CRITICAL,
-                    message="products array must have at least one item",
-                    field_path="products",
-                    category="Completeness"
-                ))
+                self.issues.append(
+                    ValidationIssue(
+                        severity=Severity.CRITICAL,
+                        message="products array must have at least one item",
+                        field_path="products",
+                        category="Completeness",
+                    )
+                )
             else:
                 for i, product in enumerate(self.current_doc["products"]):
                     self._validate_required_in_object(
                         product,
                         ["product_code", "product_name", "commission_rules"],
-                        f"products[{i}]"
+                        f"products[{i}]",
                     )
 
-                    if "commission_rules" in product and isinstance(product["commission_rules"], list):
+                    if "commission_rules" in product and isinstance(
+                        product["commission_rules"], list
+                    ):
                         if len(product["commission_rules"]) == 0:
-                            self.issues.append(ValidationIssue(
-                                severity=Severity.CRITICAL,
-                                message=f"Product {product.get('product_code', i)} has no commission rules",
-                                field_path=f"products[{i}].commission_rules",
-                                category="Completeness"
-                            ))
+                            self.issues.append(
+                                ValidationIssue(
+                                    severity=Severity.CRITICAL,
+                                    message=f"Product {product.get('product_code', i)} has no commission rules",
+                                    field_path=f"products[{i}].commission_rules",
+                                    category="Completeness",
+                                )
+                            )
                         else:
                             for j, rule in enumerate(product["commission_rules"]):
                                 self._validate_required_in_object(
                                     rule,
                                     ["rule_id", "priority", "outcome"],
-                                    f"products[{i}].commission_rules[{j}]"
+                                    f"products[{i}].commission_rules[{j}]",
                                 )
 
     def _validate_required_in_object(self, obj: Dict, required: List[str], path: str):
@@ -255,43 +272,55 @@ class SchemaValidator:
 
         for field in required:
             if field not in obj:
-                self.issues.append(ValidationIssue(
-                    severity=Severity.CRITICAL,
-                    message=f"Missing required field: {field}",
-                    field_path=f"{path}.{field}",
-                    category="Required Fields"
-                ))
+                self.issues.append(
+                    ValidationIssue(
+                        severity=Severity.CRITICAL,
+                        message=f"Missing required field: {field}",
+                        field_path=f"{path}.{field}",
+                        category="Required Fields",
+                    )
+                )
 
     def _validate_field_types(self):
         """Validate field types are correct"""
         if "schema_version" in self.current_doc:
             if not isinstance(self.current_doc["schema_version"], str):
-                self.issues.append(ValidationIssue(
-                    severity=Severity.CRITICAL,
-                    message="schema_version must be a string",
-                    field_path="schema_version",
-                    category="Field Types"
-                ))
+                self.issues.append(
+                    ValidationIssue(
+                        severity=Severity.CRITICAL,
+                        message="schema_version must be a string",
+                        field_path="schema_version",
+                        category="Field Types",
+                    )
+                )
             elif self.current_doc["schema_version"] != "1.0":
-                self.issues.append(ValidationIssue(
-                    severity=Severity.HIGH,
-                    message=f"Unsupported schema version: {self.current_doc['schema_version']} (expected '1.0')",
-                    field_path="schema_version",
-                    category="Version"
-                ))
+                self.issues.append(
+                    ValidationIssue(
+                        severity=Severity.HIGH,
+                        message=f"Unsupported schema version: {self.current_doc['schema_version']} (expected '1.0')",
+                        field_path="schema_version",
+                        category="Version",
+                    )
+                )
 
         # Validate products array types
-        if "products" in self.current_doc and isinstance(self.current_doc["products"], list):
+        if "products" in self.current_doc and isinstance(
+            self.current_doc["products"], list
+        ):
             for i, product in enumerate(self.current_doc["products"]):
-                if "commission_rules" in product and isinstance(product["commission_rules"], list):
+                if "commission_rules" in product and isinstance(
+                    product["commission_rules"], list
+                ):
                     for j, rule in enumerate(product["commission_rules"]):
                         if "priority" in rule and not isinstance(rule["priority"], int):
-                            self.issues.append(ValidationIssue(
-                                severity=Severity.CRITICAL,
-                                message="priority must be an integer",
-                                field_path=f"products[{i}].commission_rules[{j}].priority",
-                                category="Field Types"
-                            ))
+                            self.issues.append(
+                                ValidationIssue(
+                                    severity=Severity.CRITICAL,
+                                    message="priority must be an integer",
+                                    field_path=f"products[{i}].commission_rules[{j}].priority",
+                                    category="Field Types",
+                                )
+                            )
 
     def _validate_enums(self):
         """Validate enum field values"""
@@ -307,8 +336,20 @@ class SchemaValidator:
             "business_type": ["new", "renewal", "rollover", "port"],
             "number_of_wheels": ["3w", "4w-and-above"],
             "vehicle_carrier": ["public", "private", "commercial"],
-            "school_bus_type": ["on-individual-name", "on-school-name", "on-company-name", "on-contract-transporter"],
-            "deal_parameter": ["od", "net", "regular-tp", "tp-with-vehicle-age", "flat-amount", "ape"],
+            "school_bus_type": [
+                "on-individual-name",
+                "on-school-name",
+                "on-company-name",
+                "on-contract-transporter",
+            ],
+            "deal_parameter": [
+                "od",
+                "net",
+                "regular-tp",
+                "tp-with-vehicle-age",
+                "flat-amount",
+                "ape",
+            ],
         }
         condition_single_enums = {
             "zero_dep": ["yes", "no"],
@@ -317,30 +358,64 @@ class SchemaValidator:
 
         # Product-level metadata enum validators
         product_meta_enums = {
-            "deal_type": ["market-deal", "market-bonus-deal", "special-deal", "special-bonus-deal", "declined-deal", "basic-deal"],
+            "deal_type": [
+                "market-deal",
+                "market-bonus-deal",
+                "special-deal",
+                "special-bonus-deal",
+                "declined-deal",
+                "basic-deal",
+            ],
             "deal_business_type": ["net", "ape", "tp", "od"],
-            "portfolio_business": ["market-deal", "special-deal", "declined-deal", "partner-specific-special-deal", "registration-deal"],
+            "portfolio_business": [
+                "market-deal",
+                "special-deal",
+                "declined-deal",
+                "partner-specific-special-deal",
+                "registration-deal",
+            ],
             "approval_type": ["deal", "booking", "manual-override"],
-            "file_type": ["irda-statement", "rewards-statement", "enhancement-statement", "orc-statement"],
+            "file_type": [
+                "irda-statement",
+                "rewards-statement",
+                "enhancement-statement",
+                "orc-statement",
+            ],
             "zone": ["north", "south", "east", "west"],
             "product_mode": ["online", "offline"],
             "bu_parameters": ["motor"],
             "decline_deal": ["decline"],
-            "product_subproduct": ["car", "two-wheeler", "commercial-gcv", "commercial-pcv", "commercial-buses", "commercial-miscd"],
-            "vehicle_type": ["car-taxi", "two-wheeler", "gcv", "pcv", "buses", "misc-d"],
+            "product_subproduct": [
+                "car",
+                "two-wheeler",
+                "commercial-gcv",
+                "commercial-pcv",
+                "commercial-buses",
+                "commercial-miscd",
+            ],
+            "vehicle_type": [
+                "car-taxi",
+                "two-wheeler",
+                "gcv",
+                "pcv",
+                "buses",
+                "misc-d",
+            ],
         }
 
         # Validate source_type
         if "document_metadata" in self.current_doc:
             source_type = self.current_doc["document_metadata"].get("source_type")
             if source_type and source_type not in source_type_values:
-                self.issues.append(ValidationIssue(
-                    severity=Severity.HIGH,
-                    message=f"Invalid source_type: {source_type}",
-                    field_path="document_metadata.source_type",
-                    category="Enum Values",
-                    suggestion=f"Valid values: {', '.join(source_type_values)}"
-                ))
+                self.issues.append(
+                    ValidationIssue(
+                        severity=Severity.HIGH,
+                        message=f"Invalid source_type: {source_type}",
+                        field_path="document_metadata.source_type",
+                        category="Enum Values",
+                        suggestion=f"Valid values: {', '.join(source_type_values)}",
+                    )
+                )
 
         if "products" not in self.current_doc:
             return
@@ -350,26 +425,30 @@ class SchemaValidator:
             if "product_category" in product:
                 category = product["product_category"]
                 if category not in product_category_values:
-                    self.issues.append(ValidationIssue(
-                        severity=Severity.MEDIUM,
-                        message=f"Invalid product_category: {category}",
-                        field_path=f"products[{i}].product_category",
-                        category="Enum Values",
-                        suggestion=f"Valid values: {', '.join(product_category_values)}"
-                    ))
+                    self.issues.append(
+                        ValidationIssue(
+                            severity=Severity.MEDIUM,
+                            message=f"Invalid product_category: {category}",
+                            field_path=f"products[{i}].product_category",
+                            category="Enum Values",
+                            suggestion=f"Valid values: {', '.join(product_category_values)}",
+                        )
+                    )
 
             # Validate product-level metadata enums
             for field_name, valid_values in product_meta_enums.items():
                 if field_name in product:
                     value = product[field_name]
                     if value and value not in valid_values:
-                        self.issues.append(ValidationIssue(
-                            severity=Severity.MEDIUM,
-                            message=f"Invalid {field_name}: {value}",
-                            field_path=f"products[{i}].{field_name}",
-                            category="Enum Values",
-                            suggestion=f"Valid values: {', '.join(valid_values)}"
-                        ))
+                        self.issues.append(
+                            ValidationIssue(
+                                severity=Severity.MEDIUM,
+                                message=f"Invalid {field_name}: {value}",
+                                field_path=f"products[{i}].{field_name}",
+                                category="Enum Values",
+                                suggestion=f"Valid values: {', '.join(valid_values)}",
+                            )
+                        )
 
             # Validate rule condition enums
             if "commission_rules" not in product:
@@ -385,56 +464,64 @@ class SchemaValidator:
                         if isinstance(values, list):
                             for val in values:
                                 if val not in valid_values:
-                                    self.issues.append(ValidationIssue(
-                                        severity=Severity.MEDIUM,
-                                        message=f"Invalid {field_name} value: {val}",
-                                        field_path=f"products[{i}].commission_rules[{j}].conditions.{field_name}",
-                                        category="Enum Values",
-                                        suggestion=f"Valid values: {', '.join(valid_values)}"
-                                    ))
+                                    self.issues.append(
+                                        ValidationIssue(
+                                            severity=Severity.MEDIUM,
+                                            message=f"Invalid {field_name} value: {val}",
+                                            field_path=f"products[{i}].commission_rules[{j}].conditions.{field_name}",
+                                            category="Enum Values",
+                                            suggestion=f"Valid values: {', '.join(valid_values)}",
+                                        )
+                                    )
 
                 # Validate single enum fields
                 for field_name, valid_values in condition_single_enums.items():
                     if field_name in conditions:
                         val = conditions[field_name]
                         if val and val not in valid_values:
-                            self.issues.append(ValidationIssue(
-                                severity=Severity.MEDIUM,
-                                message=f"Invalid {field_name}: {val}",
-                                field_path=f"products[{i}].commission_rules[{j}].conditions.{field_name}",
-                                category="Enum Values",
-                                suggestion=f"Valid values: {', '.join(valid_values)}"
-                            ))
+                            self.issues.append(
+                                ValidationIssue(
+                                    severity=Severity.MEDIUM,
+                                    message=f"Invalid {field_name}: {val}",
+                                    field_path=f"products[{i}].commission_rules[{j}].conditions.{field_name}",
+                                    category="Enum Values",
+                                    suggestion=f"Valid values: {', '.join(valid_values)}",
+                                )
+                            )
 
     def _validate_formats(self):
         """Validate field formats (dates, IDs, emails, etc.)"""
         # Validate ID patterns (alphanumeric, underscore, hyphen only)
-        id_pattern = re.compile(r'^[A-Za-z0-9_-]+$')
+        id_pattern = re.compile(r"^[A-Za-z0-9_-]+$")
 
         if "document_metadata" in self.current_doc:
             doc_id = self.current_doc["document_metadata"].get("document_id")
             if doc_id and not id_pattern.match(doc_id):
-                self.issues.append(ValidationIssue(
-                    severity=Severity.MEDIUM,
-                    message=f"document_id contains invalid characters: {doc_id}",
-                    field_path="document_metadata.document_id",
-                    category="Format",
-                    suggestion="Use only alphanumeric, underscore, and hyphen"
-                ))
+                self.issues.append(
+                    ValidationIssue(
+                        severity=Severity.MEDIUM,
+                        message=f"document_id contains invalid characters: {doc_id}",
+                        field_path="document_metadata.document_id",
+                        category="Format",
+                        suggestion="Use only alphanumeric, underscore, and hyphen",
+                    )
+                )
 
         if self.current_doc.get("provider"):
             provider_id = self.current_doc["provider"].get("provider_id")
             if provider_id and not id_pattern.match(provider_id):
-                self.issues.append(ValidationIssue(
-                    severity=Severity.MEDIUM,
-                    message=f"provider_id contains invalid characters: {provider_id}",
-                    field_path="provider.provider_id",
-                    category="Format",
-                    suggestion="Use only alphanumeric, underscore, and hyphen"
-                ))
+                self.issues.append(
+                    ValidationIssue(
+                        severity=Severity.MEDIUM,
+                        message=f"provider_id contains invalid characters: {provider_id}",
+                        field_path="provider.provider_id",
+                        category="Format",
+                        suggestion="Use only alphanumeric, underscore, and hyphen",
+                    )
+                )
 
         # Validate dates (YYYY-MM-DD format)
-        date_pattern = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+        date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
         if "commission_period" in self.current_doc:
             period = self.current_doc["commission_period"]
@@ -442,69 +529,81 @@ class SchemaValidator:
             if "effective_from" in period:
                 effective_from = period["effective_from"]
                 if effective_from is None:
-                    self.issues.append(ValidationIssue(
-                        severity=Severity.CRITICAL,
-                        message="effective_from is null/missing",
-                        field_path="commission_period.effective_from",
-                        category="Required Data",
-                        suggestion="Provide effective_from date in YYYY-MM-DD format"
-                    ))
+                    self.issues.append(
+                        ValidationIssue(
+                            severity=Severity.CRITICAL,
+                            message="effective_from is null/missing",
+                            field_path="commission_period.effective_from",
+                            category="Required Data",
+                            suggestion="Provide effective_from date in YYYY-MM-DD format",
+                        )
+                    )
                 elif not date_pattern.match(effective_from):
-                    self.issues.append(ValidationIssue(
-                        severity=Severity.CRITICAL,
-                        message=f"effective_from has invalid date format: {effective_from}",
-                        field_path="commission_period.effective_from",
-                        category="Format",
-                        suggestion="Use YYYY-MM-DD format"
-                    ))
+                    self.issues.append(
+                        ValidationIssue(
+                            severity=Severity.CRITICAL,
+                            message=f"effective_from has invalid date format: {effective_from}",
+                            field_path="commission_period.effective_from",
+                            category="Format",
+                            suggestion="Use YYYY-MM-DD format",
+                        )
+                    )
 
             if "effective_to" in period:
                 effective_to = period["effective_to"]
                 if effective_to is None:
                     # effective_to is optional, so this is just a warning
-                    self.issues.append(ValidationIssue(
-                        severity=Severity.LOW,
-                        message="effective_to is null (no end date specified)",
-                        field_path="commission_period.effective_to",
-                        category="Completeness",
-                        suggestion="Consider adding end date if commission period is limited"
-                    ))
+                    self.issues.append(
+                        ValidationIssue(
+                            severity=Severity.LOW,
+                            message="effective_to is null (no end date specified)",
+                            field_path="commission_period.effective_to",
+                            category="Completeness",
+                            suggestion="Consider adding end date if commission period is limited",
+                        )
+                    )
                 elif not date_pattern.match(effective_to):
-                    self.issues.append(ValidationIssue(
-                        severity=Severity.CRITICAL,
-                        message=f"effective_to has invalid date format: {effective_to}",
-                        field_path="commission_period.effective_to",
-                        category="Format",
-                        suggestion="Use YYYY-MM-DD format"
-                    ))
+                    self.issues.append(
+                        ValidationIssue(
+                            severity=Severity.CRITICAL,
+                            message=f"effective_to has invalid date format: {effective_to}",
+                            field_path="commission_period.effective_to",
+                            category="Format",
+                            suggestion="Use YYYY-MM-DD format",
+                        )
+                    )
 
         # Validate ISO 8601 timestamp
         if "document_metadata" in self.current_doc:
             extracted_at = self.current_doc["document_metadata"].get("extracted_at")
             if extracted_at:
                 try:
-                    datetime.fromisoformat(extracted_at.replace('Z', '+00:00'))
+                    datetime.fromisoformat(extracted_at.replace("Z", "+00:00"))
                 except ValueError:
-                    self.issues.append(ValidationIssue(
-                        severity=Severity.HIGH,
-                        message=f"extracted_at has invalid ISO 8601 format: {extracted_at}",
-                        field_path="document_metadata.extracted_at",
-                        category="Format",
-                        suggestion="Use ISO 8601 format with timezone (e.g., 2024-01-15T10:30:00Z)"
-                    ))
+                    self.issues.append(
+                        ValidationIssue(
+                            severity=Severity.HIGH,
+                            message=f"extracted_at has invalid ISO 8601 format: {extracted_at}",
+                            field_path="document_metadata.extracted_at",
+                            category="Format",
+                            suggestion="Use ISO 8601 format with timezone (e.g., 2024-01-15T10:30:00Z)",
+                        )
+                    )
 
         # Validate email format
-        email_pattern = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+        email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
         if self.current_doc.get("provider"):
             contact_email = self.current_doc["provider"].get("contact_email")
             if contact_email and not email_pattern.match(contact_email):
-                self.issues.append(ValidationIssue(
-                    severity=Severity.MEDIUM,
-                    message=f"Invalid email format: {contact_email}",
-                    field_path="provider.contact_email",
-                    category="Format"
-                ))
+                self.issues.append(
+                    ValidationIssue(
+                        severity=Severity.MEDIUM,
+                        message=f"Invalid email format: {contact_email}",
+                        field_path="provider.contact_email",
+                        category="Format",
+                    )
+                )
 
     def _validate_business_rules(self):
         """Validate business rules and logic"""
@@ -525,12 +624,14 @@ class SchemaValidator:
                         to_date = datetime.strptime(effective_to, "%Y-%m-%d")
 
                         if to_date < from_date:
-                            self.issues.append(ValidationIssue(
-                                severity=Severity.CRITICAL,
-                                message=f"effective_to ({effective_to}) is before effective_from ({effective_from})",
-                                field_path="commission_period",
-                                category="Business Logic"
-                            ))
+                            self.issues.append(
+                                ValidationIssue(
+                                    severity=Severity.CRITICAL,
+                                    message=f"effective_to ({effective_to}) is before effective_from ({effective_from})",
+                                    field_path="commission_period",
+                                    category="Business Logic",
+                                )
+                            )
                     except ValueError:
                         pass  # Date format already validated
 
@@ -550,92 +651,133 @@ class SchemaValidator:
                             continue
 
                         if pct < 0:
-                            self.issues.append(ValidationIssue(
-                                severity=Severity.CRITICAL,
-                                message=f"Negative commission percentage: {pct}%",
-                                field_path=f"products[{i}].commission_rules[{j}].outcome.percentage_value",
-                                category="Business Logic"
-                            ))
+                            self.issues.append(
+                                ValidationIssue(
+                                    severity=Severity.CRITICAL,
+                                    message=f"Negative commission percentage: {pct}%",
+                                    field_path=f"products[{i}].commission_rules[{j}].outcome.percentage_value",
+                                    category="Business Logic",
+                                )
+                            )
                         elif pct > 100:
-                            self.issues.append(ValidationIssue(
-                                severity=Severity.HIGH,
-                                message=f"Commission percentage exceeds 100%: {pct}%",
-                                field_path=f"products[{i}].commission_rules[{j}].outcome.percentage_value",
-                                category="Business Logic"
-                            ))
+                            self.issues.append(
+                                ValidationIssue(
+                                    severity=Severity.HIGH,
+                                    message=f"Commission percentage exceeds 100%: {pct}%",
+                                    field_path=f"products[{i}].commission_rules[{j}].outcome.percentage_value",
+                                    category="Business Logic",
+                                )
+                            )
                         elif pct > 50:
-                            self.issues.append(ValidationIssue(
-                                severity=Severity.MEDIUM,
-                                message=f"Unusually high commission percentage: {pct}% (verify with source)",
-                                field_path=f"products[{i}].commission_rules[{j}].outcome.percentage_value",
-                                category="Business Logic"
-                            ))
+                            self.issues.append(
+                                ValidationIssue(
+                                    severity=Severity.MEDIUM,
+                                    message=f"Unusually high commission percentage: {pct}% (verify with source)",
+                                    field_path=f"products[{i}].commission_rules[{j}].outcome.percentage_value",
+                                    category="Business Logic",
+                                )
+                            )
 
                     # Check flat values
                     if "flat_value" in outcome:
                         flat = outcome["flat_value"]
                         if isinstance(flat, (int, float)) and flat < 0:
-                            self.issues.append(ValidationIssue(
-                                severity=Severity.CRITICAL,
-                                message=f"Negative flat commission: {flat}",
-                                field_path=f"products[{i}].commission_rules[{j}].outcome.flat_value",
-                                category="Business Logic"
-                            ))
+                            self.issues.append(
+                                ValidationIssue(
+                                    severity=Severity.CRITICAL,
+                                    message=f"Negative flat commission: {flat}",
+                                    field_path=f"products[{i}].commission_rules[{j}].outcome.flat_value",
+                                    category="Business Logic",
+                                )
+                            )
 
                     # Check priority values
                     if "priority" in rule:
                         priority = rule["priority"]
                         if isinstance(priority, int) and priority < 1:
-                            self.issues.append(ValidationIssue(
-                                severity=Severity.HIGH,
-                                message=f"Priority must be >= 1, got {priority}",
-                                field_path=f"products[{i}].commission_rules[{j}].priority",
-                                category="Business Logic"
-                            ))
+                            self.issues.append(
+                                ValidationIssue(
+                                    severity=Severity.HIGH,
+                                    message=f"Priority must be >= 1, got {priority}",
+                                    field_path=f"products[{i}].commission_rules[{j}].priority",
+                                    category="Business Logic",
+                                )
+                            )
 
                     # Validate condition range fields
                     conditions = rule.get("conditions") or {}
                     range_pairs = [
                         ("gvw_start_range", "gvw_end_range", "GVW"),
                         ("cc_start_range", "cc_end_range", "CC"),
-                        ("seating_capacity_start_range", "seating_capacity_end_range", "Seating Capacity"),
-                        ("policies_count_start_range", "policies_count_end_range", "Policies Count"),
+                        (
+                            "seating_capacity_start_range",
+                            "seating_capacity_end_range",
+                            "Seating Capacity",
+                        ),
+                        (
+                            "policies_count_start_range",
+                            "policies_count_end_range",
+                            "Policies Count",
+                        ),
+                        ("ncb_start_range", "ncb_end_range", "NCB"),
                     ]
                     for start_key, end_key, label in range_pairs:
                         start_val = conditions.get(start_key)
                         end_val = conditions.get(end_key)
                         if start_val is not None and end_val is not None:
-                            if isinstance(start_val, (int, float)) and isinstance(end_val, (int, float)):
+                            if isinstance(start_val, (int, float)) and isinstance(
+                                end_val, (int, float)
+                            ):
                                 if start_val > end_val:
-                                    self.issues.append(ValidationIssue(
-                                        severity=Severity.HIGH,
-                                        message=f"{label} start ({start_val}) > end ({end_val})",
-                                        field_path=f"products[{i}].commission_rules[{j}].conditions.{start_key}",
-                                        category="Business Logic"
-                                    ))
+                                    self.issues.append(
+                                        ValidationIssue(
+                                            severity=Severity.HIGH,
+                                            message=f"{label} start ({start_val}) > end ({end_val})",
+                                            field_path=f"products[{i}].commission_rules[{j}].conditions.{start_key}",
+                                            category="Business Logic",
+                                        )
+                                    )
+
+                    # Validate NCB percentage band bounds
+                    for ncb_key in ["ncb_start_range", "ncb_end_range"]:
+                        ncb_val = conditions.get(ncb_key)
+                        if ncb_val is not None and isinstance(ncb_val, int):
+                            if ncb_val < 0 or ncb_val > 100:
+                                self.issues.append(
+                                    ValidationIssue(
+                                        severity=Severity.MEDIUM,
+                                        message=f"{ncb_key} value {ncb_val} out of expected range (0-100)",
+                                        field_path=f"products[{i}].commission_rules[{j}].conditions.{ncb_key}",
+                                        category="Business Logic",
+                                    )
+                                )
 
                     # Validate vehicle_age range
                     vehicle_age = conditions.get("vehicle_age")
                     if vehicle_age is not None and isinstance(vehicle_age, int):
                         if vehicle_age < 0 or vehicle_age > 35:
-                            self.issues.append(ValidationIssue(
-                                severity=Severity.MEDIUM,
-                                message=f"Vehicle age {vehicle_age} out of expected range (0-35)",
-                                field_path=f"products[{i}].commission_rules[{j}].conditions.vehicle_age",
-                                category="Business Logic"
-                            ))
+                            self.issues.append(
+                                ValidationIssue(
+                                    severity=Severity.MEDIUM,
+                                    message=f"Vehicle age {vehicle_age} out of expected range (0-35)",
+                                    field_path=f"products[{i}].commission_rules[{j}].conditions.vehicle_age",
+                                    category="Business Logic",
+                                )
+                            )
 
                     # Validate od_term / tp_term range
                     for term_key in ["od_term", "tp_term"]:
                         term_val = conditions.get(term_key)
                         if term_val is not None and isinstance(term_val, int):
                             if term_val < 0 or term_val > 10:
-                                self.issues.append(ValidationIssue(
-                                    severity=Severity.MEDIUM,
-                                    message=f"{term_key} value {term_val} out of expected range (0-10)",
-                                    field_path=f"products[{i}].commission_rules[{j}].conditions.{term_key}",
-                                    category="Business Logic"
-                                ))
+                                self.issues.append(
+                                    ValidationIssue(
+                                        severity=Severity.MEDIUM,
+                                        message=f"{term_key} value {term_val} out of expected range (0-10)",
+                                        field_path=f"products[{i}].commission_rules[{j}].conditions.{term_key}",
+                                        category="Business Logic",
+                                    )
+                                )
 
         # Check for duplicate priorities within products
         if "products" in self.current_doc:
@@ -650,13 +792,15 @@ class SchemaValidator:
 
                     if priority is not None:
                         if priority in priorities:
-                            self.issues.append(ValidationIssue(
-                                severity=Severity.HIGH,
-                                message=f"Duplicate priority {priority} in product {product.get('product_code', i)}: rules {priorities[priority]} and {rule_id}",
-                                field_path=f"products[{i}].commission_rules",
-                                category="Business Logic",
-                                suggestion="Each rule must have a unique priority within the product"
-                            ))
+                            self.issues.append(
+                                ValidationIssue(
+                                    severity=Severity.HIGH,
+                                    message=f"Duplicate priority {priority} in product {product.get('product_code', i)}: rules {priorities[priority]} and {rule_id}",
+                                    field_path=f"products[{i}].commission_rules",
+                                    category="Business Logic",
+                                    suggestion="Each rule must have a unique priority within the product",
+                                )
+                            )
                         else:
                             priorities[priority] = rule_id
 
@@ -666,17 +810,23 @@ class SchemaValidator:
         if self.current_doc.get("provider"):
             provider = self.current_doc["provider"]
             if not provider.get("contact_email") and not provider.get("contact_phone"):
-                self.issues.append(ValidationIssue(
-                    severity=Severity.MEDIUM,
-                    message="Provider has no contact information (email or phone)",
-                    field_path="provider",
-                    category="Completeness",
-                    suggestion="Add contact_email or contact_phone"
-                ))
+                self.issues.append(
+                    ValidationIssue(
+                        severity=Severity.MEDIUM,
+                        message="Provider has no contact information (email or phone)",
+                        field_path="provider",
+                        category="Completeness",
+                        suggestion="Add contact_email or contact_phone",
+                    )
+                )
 
         # Check for at least one source trace per product
         if "products" in self.current_doc and "source_traces" in self.current_doc:
-            product_codes = {p.get("product_code") for p in self.current_doc["products"] if p.get("product_code")}
+            product_codes = {
+                p.get("product_code")
+                for p in self.current_doc["products"]
+                if p.get("product_code")
+            }
             traced_products = {
                 t.get("entity_id")
                 for t in self.current_doc["source_traces"]
@@ -687,13 +837,15 @@ class SchemaValidator:
             if untraced:
                 # Filter out None values and convert to strings
                 untraced_str = [str(code) for code in untraced if code is not None]
-                self.issues.append(ValidationIssue(
-                    severity=Severity.LOW,
-                    message=f"Products without source traces: {', '.join(untraced_str)}",
-                    field_path="source_traces",
-                    category="Completeness",
-                    suggestion="Add at least one source trace per product"
-                ))
+                self.issues.append(
+                    ValidationIssue(
+                        severity=Severity.LOW,
+                        message=f"Products without source traces: {', '.join(untraced_str)}",
+                        field_path="source_traces",
+                        category="Completeness",
+                        suggestion="Add at least one source trace per product",
+                    )
+                )
 
     def _validate_traceability(self):
         """Validate source traces reference valid entities"""
@@ -720,24 +872,28 @@ class SchemaValidator:
 
             if entity_type in ["product", "rule", "condition", "outcome"]:
                 if entity_id and entity_id not in entity_ids:
-                    self.issues.append(ValidationIssue(
-                        severity=Severity.MEDIUM,
-                        message=f"Source trace references non-existent entity: {entity_id}",
-                        field_path=f"source_traces[{i}].entity_id",
-                        category="Traceability"
-                    ))
+                    self.issues.append(
+                        ValidationIssue(
+                            severity=Severity.MEDIUM,
+                            message=f"Source trace references non-existent entity: {entity_id}",
+                            field_path=f"source_traces[{i}].entity_id",
+                            category="Traceability",
+                        )
+                    )
 
             # Check for confidence scores on low-confidence traces
             confidence = trace.get("confidence")
             if confidence is not None and confidence < 0.7:
                 if not trace.get("extraction_notes"):
-                    self.issues.append(ValidationIssue(
-                        severity=Severity.LOW,
-                        message=f"Low confidence trace ({confidence}) missing extraction_notes",
-                        field_path=f"source_traces[{i}]",
-                        category="Traceability",
-                        suggestion="Add extraction_notes explaining low confidence"
-                    ))
+                    self.issues.append(
+                        ValidationIssue(
+                            severity=Severity.LOW,
+                            message=f"Low confidence trace ({confidence}) missing extraction_notes",
+                            field_path=f"source_traces[{i}]",
+                            category="Traceability",
+                            suggestion="Add extraction_notes explaining low confidence",
+                        )
+                    )
 
 
 def main():
