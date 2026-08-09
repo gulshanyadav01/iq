@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   computeSheetCoverage,
   coverageText,
+  formatConditions,
   getSheetClassification,
   getSheetVisibility,
   isSheetHidden,
@@ -278,5 +279,47 @@ describe('coverageText', () => {
 
   it('is empty when there is nothing to report', () => {
     expect(coverageText(null)).toBe('')
+  })
+})
+
+/**
+ * Condition labels shown on the rule rows.
+ *
+ * Unlabelled keys fall through to an underscore-replaced key, which reads
+ * visibly worse beside its labelled siblings — so the label map is the thing
+ * that silently rots when a condition field is added on the backend.
+ */
+describe('formatConditions', () => {
+  it('labels the NCB percentage band', () => {
+    expect(formatConditions({ ncb_start_range: 25, ncb_end_range: 100 }))
+      .toBe('NCB from: 25 · NCB to: 100')
+  })
+
+  it('renders the base twin band including a zero start', () => {
+    // 0 is falsy — a truthiness check instead of a null check would drop it.
+    expect(formatConditions({ ncb_start_range: 0, ncb_end_range: 24 }))
+      .toBe('NCB from: 0 · NCB to: 24')
+  })
+
+  it('renders the derived NCB boolean alongside the band', () => {
+    expect(formatConditions({ ncb: true, ncb_start_range: 25, ncb_end_range: 100 }))
+      .toBe('NCB: yes · NCB from: 25 · NCB to: 100')
+  })
+
+  it('labels the keys that previously fell through to the raw key', () => {
+    expect(formatConditions({ policies_count_start_range: 30, policies_count_end_range: 100 }))
+      .toBe('policies from: 30 · policies to: 100')
+    expect(formatConditions({ vehicle_make_exclude: ['TATA'] }))
+      .toBe('make excl: TATA')
+  })
+
+  it('skips nulls and returns All for an empty or absent condition set', () => {
+    expect(formatConditions({ ncb_start_range: null, ncb_end_range: undefined })).toBe('All')
+    expect(formatConditions(null)).toBe('All')
+    expect(formatConditions({})).toBe('All')
+  })
+
+  it('still falls back to the humanised key for an unknown field', () => {
+    expect(formatConditions({ some_new_field: 'x' })).toBe('some new field: x')
   })
 })

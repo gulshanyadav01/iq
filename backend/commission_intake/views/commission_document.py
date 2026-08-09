@@ -757,6 +757,8 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             "BookingMode",
             "ZeroDep",
             "NCB",
+            "NCBStartRange",
+            "NCBEndRange",
             "CPA",
             "FuelType",
             "VehicleAge",
@@ -1007,6 +1009,10 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                     cv(conditions.get("booking_mode")),
                     cv(conditions.get("zero_dep")),
                     cv_default(conditions.get("ncb"), "Yes,No"),
+                    # Band defaults mirror the "Yes,No" above: no NCB dimension
+                    # means the rule applies across the whole 0-100 range.
+                    cv_default(conditions.get("ncb_start_range"), "0"),
+                    cv_default(conditions.get("ncb_end_range"), "100"),
                     cpa_label,  # CPA
                     cv_default(
                         conditions.get("fuel_type"), "Petrol,Diesel,CNG,LPG,Electric"

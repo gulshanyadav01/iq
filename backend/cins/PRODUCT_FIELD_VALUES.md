@@ -38,6 +38,13 @@
 
 **vehicleAge** – 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35
 
+**ncbStartRange / ncbEndRange** – 0-100 (inclusive percentage band). Parsed from the
+grid's verbatim label: `NCB GT OR Equal to 25%` → 25-100, `NCB GT 25%` → 26-100 (strict),
+`NCB 25%-45%` → 25-45, `NCB UPTO 20%` → 0-20, `NCB 25% AND ABOVE` → 25-100. A marked
+tier's paired base grid gets the complement (0 to lowest-marked-start minus 1). Both null
+means the rule has no NCB dimension — NOT 0-100. The legacy `NCB` Yes/No column is derived
+from this band and retained for backward compatibility.
+
 **buParameters** – Motor
 
 **zone** – North, South, East, West

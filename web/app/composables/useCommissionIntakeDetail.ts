@@ -189,6 +189,41 @@ export function partitionSheetNames(
   }
 }
 
+/**
+ * Human labels for RuleConditions keys. Anything absent falls through to the
+ * underscore-replaced key, which reads noticeably worse next to its labelled
+ * siblings ("policies count start range" vs "CC from") — so keep new condition
+ * fields in here when they are added on the backend.
+ */
+const CONDITION_LABELS: Record<string, string> = {
+  vehicle_sub_class: 'vehicle', policy_type: 'policy', state: 'state',
+  booking_mode: 'booking', business_type: 'business', fuel_type: 'fuel',
+  number_of_wheels: 'wheels', vehicle_carrier: 'carrier', school_bus_type: 'school bus',
+  vehicle_make: 'make', vehicle_model: 'model', rto: 'RTO',
+  zero_dep: 'zero dep', ncb: 'NCB', cpa: 'CPA', vehicle_age: 'vehicle age',
+  gvw_start_range: 'GVW from', gvw_end_range: 'GVW to',
+  cc_start_range: 'CC from', cc_end_range: 'CC to',
+  ncb_start_range: 'NCB from', ncb_end_range: 'NCB to',
+  seating_capacity_start_range: 'seating from', seating_capacity_end_range: 'seating to',
+  policies_count_start_range: 'policies from', policies_count_end_range: 'policies to',
+  vehicle_make_exclude: 'make excl', vehicle_model_exclude: 'model excl',
+  od_term: 'OD term', tp_term: 'TP term', deal_parameter: 'deal param',
+}
+
+export function formatConditions(conditions: Record<string, unknown> | null | undefined): string {
+  if (!conditions) return 'All'
+  const parts: string[] = []
+  for (const [key, value] of Object.entries(conditions)) {
+    if (value === null || value === undefined) continue
+    const label = CONDITION_LABELS[key] || key.replace(/_/g, ' ')
+    if (Array.isArray(value) && value.length) parts.push(`${label}: ${value.join(', ')}`)
+    else if (typeof value === 'boolean') parts.push(`${label}: ${value ? 'yes' : 'no'}`)
+    else if (typeof value === 'number') parts.push(`${label}: ${value}`)
+    else if (typeof value === 'string' && value) parts.push(`${label}: ${value}`)
+  }
+  return parts.join(' · ') || 'All'
+}
+
 export function computeSheetCoverage(
   indexed: IndexedContent | undefined | null
 ): SheetCoverage | null {
@@ -528,30 +563,6 @@ export function useCommissionIntakeDetail() {
     return '—'
   }
 
-  function formatConditions(conditions: Record<string, unknown> | null | undefined): string {
-    if (!conditions) return 'All'
-    const labelMap: Record<string, string> = {
-      vehicle_sub_class: 'vehicle', policy_type: 'policy', state: 'state',
-      booking_mode: 'booking', business_type: 'business', fuel_type: 'fuel',
-      number_of_wheels: 'wheels', vehicle_carrier: 'carrier', school_bus_type: 'school bus',
-      vehicle_make: 'make', vehicle_model: 'model', rto: 'RTO',
-      zero_dep: 'zero dep', ncb: 'NCB', cpa: 'CPA', vehicle_age: 'vehicle age',
-      gvw_start_range: 'GVW from', gvw_end_range: 'GVW to',
-      cc_start_range: 'CC from', cc_end_range: 'CC to',
-      seating_capacity_start_range: 'seating from', seating_capacity_end_range: 'seating to',
-      od_term: 'OD term', tp_term: 'TP term', deal_parameter: 'deal param',
-    }
-    const parts: string[] = []
-    for (const [key, value] of Object.entries(conditions)) {
-      if (value === null || value === undefined) continue
-      const label = labelMap[key] || key.replace(/_/g, ' ')
-      if (Array.isArray(value) && value.length) parts.push(`${label}: ${value.join(', ')}`)
-      else if (typeof value === 'boolean') parts.push(`${label}: ${value ? 'yes' : 'no'}`)
-      else if (typeof value === 'number') parts.push(`${label}: ${value}`)
-      else if (typeof value === 'string' && value) parts.push(`${label}: ${value}`)
-    }
-    return parts.join(' · ') || 'All'
-  }
 
   function sheetPassStatus(passNum: number, attachment: string, sheet: string): string {
     return doc.value?.extraction_passes.find(

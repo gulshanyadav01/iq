@@ -16,6 +16,8 @@ Key simplifications:
 from typing import Any, Dict, List
 from pydantic import BaseModel, Field
 
+from cins.prompts._shared import RAW_CONDITION_KEYS_BLOCK
+
 
 class RawProviderInfo(BaseModel):
     """Flat provider information - no nested structures"""
@@ -42,7 +44,7 @@ class RawCommissionEntry(BaseModel):
 
     # Product identification
     product_name: str = Field(
-        '',
+        "",
         description=(
             "Canonical product name. Motor products must use exactly one of: "
             "'Private Car', 'Two Wheeler', or 'Commercial Vehicle'. "
@@ -50,48 +52,41 @@ class RawCommissionEntry(BaseModel):
         ),
     )
     product_type: str = Field(
-        '',
+        "",
         description="Product type/category (e.g., 'motor', 'health', 'life', 'GCV', 'PCV'). For motor, subtype if known.",
     )
 
     # Condition fields as free-text (no enums, no nested objects)
     customer_type_text: str = Field(
-        '',
+        "",
         description=(
             "Business type as stated. Standard values: 'new', 'renewal', 'rollover', 'port'. "
             "Do NOT put 'Preferred'/'Non Preferred' here — those are grid column groups; "
-            "use conditions dict instead: {\"preferred\": \"Preferred\"}."
+            'use conditions dict instead: {"preferred": "Preferred"}.'
         ),
     )
     channel_text: str = Field(
-        '',
+        "",
         description="Booking mode as stated (e.g., 'online', 'offline')",
     )
     coverage_type_text: str = Field(
-        '',
+        "",
         description="Policy type as stated (e.g., 'comprehensive', 'TP', 'SAOD', 'third party')",
     )
     state_text: str = Field(
-        '',
+        "",
         description="States/regions as stated (e.g., 'BR, CG', 'all states except TN', 'Maharashtra')",
     )
-    # Structured key-value conditions for grid dimensions without a dedicated field
+    # Structured key-value conditions for grid dimensions without a dedicated
+    # field. Description is shared with RuleEntry.conditions in
+    # schema/extraction_passes.py — edit RAW_CONDITION_KEYS_BLOCK, not this.
     conditions: Dict[str, str] = Field(
         default_factory=dict,
-        description=(
-            "Key-value pairs for any grid dimension conditions that have no dedicated field. "
-            "Use for: fuel_type, ncb, cpa, zero_dep, vehicle_sub_class, vehicle_carrier, "
-            "number_of_wheels, school_bus_type, gvw, cc, seating_capacity, vehicle_age, "
-            "vehicle_make, vehicle_model, od_term, tp_term, deal_parameter, rto, etc. "
-            "Keys should be snake_case. Values should be the exact label from the grid header. "
-            "Do NOT put here: state (use state_text), booking mode (use channel_text), "
-            "policy type (use coverage_type_text), business type (use customer_type_text). "
-            "Examples: {\"fuel_type\": \"Non Petrol\", \"ncb\": \"Yes\", \"vehicle_sub_class\": \"Private Car\"}"
-        ),
+        description=RAW_CONDITION_KEYS_BLOCK,
     )
     # Custom/other conditions as free-text catch-all
     other_conditions: str = Field(
-        '',
+        "",
         description=(
             "Free-text conditions with no dedicated field AND no clean key-value structure "
             "(e.g., 'tourist permit only', 'corporate-registered vehicles'). "
@@ -111,7 +106,7 @@ class RawCommissionEntry(BaseModel):
 
     # Commission modifiers
     applied_on_text: str = Field(
-        '',
+        "",
         description="What commission is applied on (e.g., 'OD Premium', 'Total Premium', 'Net Premium', 'GWP')",
     )
     gst_applicable: bool = Field(
@@ -120,17 +115,17 @@ class RawCommissionEntry(BaseModel):
 
     # Source traceability - simple flat strings
     source_section: str = Field(
-        '',
+        "",
         description="Section/table/heading where this was found (e.g., 'Commission Rates Table', 'Page 2 - Motor Section')",
     )
     quoted_text: str = Field(
-        '',
+        "",
         description="Exact text excerpt from source document supporting this rule",
     )
 
     # Confidence for this specific entry
     confidence_note: str = Field(
-        '', description="Any uncertainty or ambiguity notes for this specific rule"
+        "", description="Any uncertainty or ambiguity notes for this specific rule"
     )
 
 
@@ -145,7 +140,7 @@ class RawMasterDataEntry(BaseModel):
         description="Type of master data: 'rto_mapping', 'declined', 'vehicle_classification', 'state_mapping', 'general_term'",
     )
     applies_to: str = Field(
-        '',
+        "",
         description="What this entry applies to (product name, vehicle type, etc.)",
     )
     key: str = Field(
@@ -153,12 +148,12 @@ class RawMasterDataEntry(BaseModel):
         description="The key/identifier (state code, vehicle type, term name, etc.)",
     )
     values: str = Field(
-        '',
+        "",
         description="Associated values (RTO codes as comma-separated, conditions, definitions, etc.)",
     )
-    notes: str = Field('', description="Additional notes or conditions")
+    notes: str = Field("", description="Additional notes or conditions")
     source_sheet: str = Field(
-        '', description="Sheet name where this was found (for Excel files)"
+        "", description="Sheet name where this was found (for Excel files)"
     )
 
 
@@ -171,12 +166,10 @@ class RawExtraction(BaseModel):
     """
 
     # Source information
-    source_file: str = Field('', description="Original filename")
-    source_type: str = Field(
-        '', description="Type of source: 'email', 'pdf', 'excel'"
-    )
+    source_file: str = Field("", description="Original filename")
+    source_type: str = Field("", description="Type of source: 'email', 'pdf', 'excel'")
     extraction_notes: str = Field(
-        '', description="General notes about the extraction or document structure"
+        "", description="General notes about the extraction or document structure"
     )
 
     # Provider - simple flat structure
@@ -187,9 +180,9 @@ class RawExtraction(BaseModel):
         ...,
         description="Start date in any recognizable format (e.g., 'January 1, 2024', '2024-01-01', '1st Jan 2024')",
     )
-    end_date: str = Field('', description="End date if specified")
+    end_date: str = Field("", description="End date if specified")
     period_label: str = Field(
-        '',
+        "",
         description="Human-readable period label (e.g., 'Q1 2024', 'January 2024', 'FY 2024-25')",
     )
 
@@ -207,30 +200,30 @@ class RawExtraction(BaseModel):
 
     # Global settings that apply to all rules
     global_gst_percentage: str = Field(
-        '', description="Default GST if mentioned globally (e.g., '18%')"
+        "", description="Default GST if mentioned globally (e.g., '18%')"
     )
     global_deductions: str = Field(
-        '',
+        "",
         description="Deductions that apply to all rules (e.g., 'Platform fee 0.5% on all online transactions')",
     )
     global_applied_on: str = Field(
-        '',
+        "",
         description="What commission is generally applied on if stated globally (e.g., 'Net Premium', 'OD Premium', 'Total Premium'). Extract exactly as stated in the document.",
     )
     global_vehicle_type_text: str = Field(
-        '',
+        "",
         description="Comma-separated vehicle type(s) that apply to all rules (e.g., 'Staff Bus', 'GCV')",
     )
     global_state_text: str = Field(
-        '',
+        "",
         description="States that apply to all rules (e.g., 'All states except TN')",
     )
     global_seating_capacity_text: str = Field(
-        '',
+        "",
         description="Seating capacity that applies to all rules (e.g., '> 12')",
     )
     global_other_conditions: str = Field(
-        '',
+        "",
         description="Other conditions that apply to all rules (e.g., 'Registered in corporate name')",
     )
 
@@ -239,7 +232,7 @@ class RawExtraction(BaseModel):
         False, description="True if document says rates are same as previous period"
     )
     inheritance_note: str = Field(
-        '', description="Note about what is inherited or changed from previous period"
+        "", description="Note about what is inherited or changed from previous period"
     )
 
     # Overall extraction quality

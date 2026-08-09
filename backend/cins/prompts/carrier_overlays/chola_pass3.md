@@ -192,8 +192,17 @@ titles end `… - NCB GT 25%` and whose row labels carry a `[ NCB GT 25%]` suffi
 - **Preserve the `[ NCB GT 25%]` row-label suffix in `rule_text`** — do not strip it. It is a
   second place the marker survives.
 - **Do NOT set `conditions["ncb"]` yourself.** The transformer derives the NCB tier from the
-  marker (NCB>25% → `ncb=True`) and flips the paired base twin to `ncb=False`. A codegen that
-  guesses `"ncb": "Yes"` on the base table would invert the entire product.
+  marker (NCB>25% → the band `(25, 100)`, `ncb=True`) and gives the paired base twin the
+  complement band `(0, 24)`, `ncb=False`. A codegen that guesses `"ncb": "Yes"` on the base
+  table would invert the entire product.
+
+  **This overrides the general Pass 3 instruction to copy the NCB band label into
+  `conditions["ncb"]`.** That instruction exists for grids where the band is the only place
+  the threshold appears. Chola is different: the marker is already in the table title
+  (`source_section`) and the row-label suffix (`rule_text`), both of which the transformer
+  reads — and, critically, Chola's **base** table carries no NCB label at all, so there is
+  nothing to copy verbatim and any value you emit for it is a guess. Leave the key unset and
+  let the pairing derive both tiers.
 
 ### Chola — Two Wheeler flattened make × CC grid
 

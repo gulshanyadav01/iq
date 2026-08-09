@@ -213,6 +213,15 @@ _MIRROR_DIM_KEYS = (
     "seating_capacity_end_range",
     "policies_count_start_range",
     "policies_count_end_range",
+    # The NCB band is a grid slot like any other: a base tier and its ">25%"
+    # twin sit in the SAME cell of every other dimension and differ only here.
+    # Omitting it makes two genuinely different tiers share one signature, so a
+    # third-party rule can mirror a comprehensive rule it does not actually
+    # duplicate — and this signature feeds a path that DELETES rules. Including
+    # it can only make `drop_mirrored_third_party` fire less often, which is the
+    # conservative direction that function documents for itself.
+    "ncb_start_range",
+    "ncb_end_range",
 )
 
 
