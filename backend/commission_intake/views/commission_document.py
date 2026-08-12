@@ -900,23 +900,17 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         # RTO fill (Fix v): when a rule names a state but no explicit RTO, fill
         # the export RTO cell with the product-active RTOs for that state. Built
         # once; degrades to the raw (empty) value if the master is unavailable.
+        # product_bucket is a pure string mapping with no DB access, so it is
+        # imported outside the guard — only the resolver's master-table load can
+        # fail, and the bucket pre-pass below still needs to work when it does.
+        from master_data.services.resolver import product_bucket as _product_bucket
+
         try:
             from master_data.services.resolver import MasterDataResolver
 
             _rto_resolver = MasterDataResolver()
         except Exception:
             _rto_resolver = None
-
-        def _product_bucket(name):
-            """Normalise an export product_name to the {CAR,CV,TW} RTO bucket."""
-            n = (name or "").lower()
-            if any(k in n for k in ("commercial", "gcv", "pcv", "goods", "bus")):
-                return "CV"
-            if any(k in n for k in ("two", "2w", "wheeler")) and "four" not in n:
-                return "TW"
-            if any(k in n for k in ("car", "private", "taxi")):
-                return "CAR"
-            return None
 
         # Export complement fill (1A): a UW-zone grid can carry a specific
         # zone rule ("UP- East" -> explicit rto=[UP28..]) alongside a plain
@@ -947,18 +941,20 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                 )
                 _claimed.update(str(v) for v in _vals if v)
 
-        def rto_cell(conditions, product_name):
+        def rto_cell(conditions, bucket):
             """RTO column value: explicit rto if present, else state-derived
             fill minus any RTO codes a sibling rule already claims explicitly
-            (1A)."""
+            (1A).
+
+            Takes the resolved ``bucket`` rather than the product_name: it is
+            loop-invariant per product, and resolving it per rule re-ran the
+            token match 5k+ times on a real Chola document.
+            """
             rto = conditions.get("rto")
             if rto:  # present and non-empty -> honor explicit value
                 return cv(rto)
             states = conditions.get("state")
-            if not states or _rto_resolver is None:
-                return cv(rto)
-            bucket = _product_bucket(product_name)
-            if bucket is None:
+            if not states or _rto_resolver is None or bucket is None:
                 return cv(rto)
             if not isinstance(states, list):
                 states = [states]
@@ -971,6 +967,7 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
         for product in cics_doc.get("products", []):
             product_name = product.get("product_name", "")
             sub_product = product.get("sub_category", "")
+            product_rto_bucket = _product_bucket(product_name)
             for rule in product.get("commission_rules", []):
                 conditions = rule.get("conditions") or {}
                 outcome = rule.get("outcome") or {}
@@ -995,7 +992,7 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                     cv(conditions.get("vehicle_sub_class")),
                     cv(conditions.get("policy_type")),
                     cv(conditions.get("state")),
-                    rto_cell(conditions, product_name),
+                    rto_cell(conditions, product_rto_bucket),
                     cv(conditions.get("number_of_wheels")),
                     cv(conditions.get("gvw_start_range")),
                     cv(conditions.get("gvw_end_range")),
