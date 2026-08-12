@@ -238,6 +238,93 @@ class TableShapeLookupTests(unittest.TestCase):
         self.assertIsNotNone(got)
         self.assertEqual(got["tables"], [{"y": 2}])
 
+    def test_hit_by_indexer_key(self):
+        """The exact match: table_splits keys are written by the INDEXER's sanitizer."""
+        from cins.processors.content.indexer import sanitize_sheet_key
+        from cins.processors.core.pipeline import (
+            _table_shape_for_sheet,
+            get_safe_sheet_name,
+        )
+
+        name = "Some_Workbook_Name_Long_Enough_To_Exceed_The_Pipeline_Prefix__CV June"
+        splits = {
+            sanitize_sheet_key(name): {
+                "original_sheet_name": name,
+                "tables": [{"z": 3}],
+            }
+        }
+        got = _table_shape_for_sheet(splits, name, get_safe_sheet_name(name))
+        self.assertIsNotNone(got, "indexer-keyed shape must resolve")
+        self.assertEqual(got["tables"], [{"z": 3}])
+
+    def test_attachment_prefixed_sheet_resolves(self):
+        """Multi-attachment emails key on the PREFIXED name but store it BARE.
+
+        The indexer builds the ``table_splits`` key from ``{prefix}{sheet_name}``
+        (indexer.py:1199) while writing ``original_sheet_name`` as the bare sheet
+        name (indexer.py:1309). The pipeline routes the prefixed name, so a
+        fallback comparing only against the full name never matched and the gate
+        lost its index-time witness — silently, because a None shape fails open.
+        """
+        from cins.processors.core.pipeline import (
+            _table_shape_for_sheet,
+            get_safe_sheet_name,
+        )
+
+        bare = " CV June 26"
+        prefixed = f"Broker_june_26_Grid_for_Circulation_Retail_Broking_Final__{bare}"
+        # Keyed by something neither sanitizer will reproduce, so only the
+        # original_sheet_name fallback can resolve it.
+        splits = {
+            "some_other_key_shape": {
+                "original_sheet_name": bare,
+                "tables": [{"w": 4}],
+            }
+        }
+        got = _table_shape_for_sheet(splits, prefixed, get_safe_sheet_name(prefixed))
+        self.assertIsNotNone(
+            got, "a prefixed sheet must still find its bare-stored shape"
+        )
+        self.assertEqual(got["tables"], [{"w": 4}])
+
+    def test_ambiguous_original_sheet_name_fails_open(self):
+        """Two attachments can each hold a sheet with the same bare name.
+
+        First-match-wins would bind one workbook's shape to the other's sheet, and
+        a WRONG shape is worse than none: it feeds the coverage gate and the Pass-3
+        empty-result guard. Ambiguity must resolve to None.
+        """
+        from cins.processors.core.pipeline import (
+            _table_shape_for_sheet,
+            get_safe_sheet_name,
+        )
+
+        bare = "Commission Grid"
+        prefixed = f"WorkbookA__{bare}"
+        splits = {
+            "key_a": {"original_sheet_name": bare, "tables": [{"from": "A"}]},
+            "key_b": {"original_sheet_name": bare, "tables": [{"from": "B"}]},
+        }
+        got = _table_shape_for_sheet(splits, prefixed, get_safe_sheet_name(prefixed))
+        self.assertIsNone(got, "ambiguous match must fail open, not pick one")
+
+    def test_sheet_name_containing_double_underscore_recovers_correctly(self):
+        """The indexer joins {stem}__{sheet}, so the bare name is after the FIRST '__'.
+
+        A sheet legitimately named "Rate__Card" inside attachment "Book" is stored
+        as "Book__Rate__Card"; recovering it means splitting once from the left.
+        """
+        from cins.processors.core.pipeline import (
+            _table_shape_for_sheet,
+            get_safe_sheet_name,
+        )
+
+        splits = {"k": {"original_sheet_name": "Rate__Card", "tables": [{"ok": True}]}}
+        joined = "Book__Rate__Card"
+        got = _table_shape_for_sheet(splits, joined, get_safe_sheet_name(joined))
+        self.assertIsNotNone(got, "bare name must be recovered as 'Rate__Card'")
+        self.assertEqual(got["tables"], [{"ok": True}])
+
     def test_miss_returns_none(self):
         from cins.processors.core.pipeline import _table_shape_for_sheet
 

@@ -7,6 +7,7 @@ import os
 import json
 import hashlib
 import logging
+import re
 from pathlib import Path
 from typing import Dict, Optional, Iterator, Tuple, List, Any
 from dataclasses import dataclass, field
@@ -35,6 +36,71 @@ from cins.processors.core.sheet_visibility import (
 
 # Setup logging
 logger = logging.getLogger("content_indexer")
+
+
+def legacy_sanitize_sheet_key(name: str) -> str:
+    """The pre-digest sheet key: sanitize, then truncate. Read-compat only.
+
+    Kept so documents indexed before the digest suffix still load. Do NOT write
+    new keys with this — it is not injective, which is the whole point of the
+    replacement below.
+    """
+    return re.sub(r"[^\w\-_]", "_", str(name))[:100]
+
+
+DIGEST_BYTES = 8
+"""Digest width appended to every per-sheet key.
+
+64 bits, not 32. Sheet names come from uploaded workbooks, so they are untrusted:
+an 8-hex (32-bit) suffix is brute-forceable in seconds, which would let a crafted
+workbook re-create the exact same-key clobber this whole change exists to remove —
+one sheet's grid silently extracted for another, on a commission statement. The
+cost is 8 characters of readable prefix.
+"""
+
+DIGEST_HEX_LEN = DIGEST_BYTES * 2
+
+
+def digest_suffixed_key(name: str, budget: int) -> str:
+    """Sanitize ``name`` to a unique, filesystem-safe key of at most ``budget`` chars.
+
+    Sanitize-then-truncate alone is not injective, and two names that collapse to
+    one key silently share one file: the second write clobbers the first and both
+    sheets are then read back as the same content. That exact failure shipped to a
+    client — a workbook's whole CV book was replaced by another sheet's grid, with
+    no error raised anywhere. Appending a digest of the FULL name makes collisions
+    impossible regardless of how long the shared prefix is, while the readable
+    prefix keeps artifacts greppable.
+
+    Truncation is on ENCODED BYTES, not characters. ``\\w`` is unicode-aware, so a
+    Devanagari or CJK sheet name keeps 3-byte characters: a 91-character prefix is
+    282 bytes, past the 255-byte ``NAME_MAX`` on ext4/APFS, and the write fails
+    with ENAMETOOLONG — indexing dies on a legitimately-named workbook.
+    """
+    if budget <= DIGEST_HEX_LEN:
+        raise ValueError(
+            f"budget {budget} leaves no room for a {DIGEST_HEX_LEN}-char digest; "
+            "a negative prefix slice would silently cut from the END of the name"
+        )
+    safe = re.sub(r"[^\w\-_]", "_", str(name))
+    prefix_budget = budget - 1 - DIGEST_HEX_LEN
+    # Cut on bytes, then drop any partial character the cut left behind.
+    safe = safe.encode("utf-8")[:prefix_budget].decode("utf-8", "ignore")
+    digest = hashlib.blake2b(
+        str(name).encode("utf-8"), digest_size=DIGEST_BYTES
+    ).hexdigest()
+    return f"{safe}_{digest}"
+
+
+def sanitize_sheet_key(name: str) -> str:
+    """Sheet key for ``table_splits`` and the ``sheets/*.md`` filenames.
+
+    The write side (``ContentIndexer._sanitize_sheet_key``) and the read side
+    (``IndexedDocument._sanitize_for_lookup``) both delegate here so they cannot
+    drift apart. See ``digest_suffixed_key`` for why the digest exists.
+    """
+    return digest_suffixed_key(name, 100)
+
 
 # Current indexer version for cache invalidation.
 #
@@ -77,7 +143,15 @@ logger = logging.getLogger("content_indexer")
 # generated Pass-3 code, which one codegen run simply omitted — emitting ZERO
 # goods-3-wheeler rules. Codegen now sees ordinary positional rows. The codegen
 # coverage gate shares the same trimmed band so "expected" counts them too.
-INDEXER_VERSION = "1.8"
+#
+# 1.9 — per-sheet keys (``table_splits`` keys and the ``sheets/*.md`` filenames)
+# carry a digest of the full sheet name instead of a bare 100-char truncation.
+# Rationale lives in ``digest_suffixed_key`` below — in short, the truncation is
+# not injective and two colliding sheets silently share one file. The stored key
+# SHAPE changes, not the content; ``IndexedDocument._resolve_sheet_key`` falls
+# back to the legacy key so documents indexed at <= 1.8 keep loading without a
+# re-index.
+INDEXER_VERSION = "1.9"
 
 
 def _retag_single_commission_table(content_str: str, sheet_name: str) -> str:
@@ -147,15 +221,74 @@ class IndexedDocument:
         return self._primary_content
 
     def _sanitize_for_lookup(self, name: str) -> str:
-        """Convert original name to sanitized form for table_splits lookup."""
-        import re
+        """Sheet key for ``table_splits`` and ``sheets/*`` filenames.
 
-        safe_name = re.sub(r"[^\w\-_]", "_", str(name))
-        return safe_name[:100]
+        MUST stay identical to ``ContentIndexer._sanitize_sheet_key`` — this is the
+        read side of the same key the indexer writes.
+        """
+        return sanitize_sheet_key(name)
+
+    def _legacy_sanitize_for_lookup(self, name: str) -> str:
+        """The pre-digest key shape, for documents indexed before the change."""
+        return legacy_sanitize_sheet_key(name)
 
     def get_table_splits(self) -> Dict[str, Any]:
         """Get table split information from metadata. Returns {} for old documents."""
         return self.metadata.get("table_splits", {})
+
+    def _resolve_sheet_key(self, sheet_name: str) -> str:
+        """Sheet key that actually resolves for THIS document.
+
+        Prefers the current digest-suffixed key; falls back to the legacy
+        truncate-only key so documents indexed before the change keep loading
+        without a re-index. Legacy keys can collide (that is the bug being fixed),
+        but for already-indexed documents the stored bytes are what they are —
+        refusing to read them would be strictly worse.
+        """
+        current = self._sanitize_for_lookup(sheet_name)
+        table_splits = self.get_table_splits()
+        sheets_dir = self.indexed_dir / "sheets"
+        if (
+            current in table_splits
+            or (sheets_dir / f"{current}.md").exists()
+            or (sheets_dir / f"{current}.csv").exists()
+        ):
+            return current
+
+        # Only consult the legacy key for a document that was actually indexed
+        # under it. Re-indexing reuses the same output directory and does not purge
+        # `sheets/`, so a pre-1.9 `.md` written under the old TRUNCATED (and
+        # therefore possibly COLLIDED) key can still be sitting there next to the
+        # new files. Probing it on mere existence would let a sheet that is simply
+        # missing from the current run resolve to a stale file that the collision
+        # bug may have filled with a different sheet's grid — resurrecting the exact
+        # defect this change removes.
+        indexed_version = str(self.metadata.get("indexer_version") or "")
+        is_pre_digest = indexed_version < "1.9" if indexed_version else True
+        if is_pre_digest:
+            legacy = self._legacy_sanitize_for_lookup(sheet_name)
+            if (
+                legacy in table_splits
+                or (sheets_dir / f"{legacy}.md").exists()
+                or (sheets_dir / f"{legacy}.csv").exists()
+            ):
+                return legacy
+        else:
+            legacy = "<not consulted: indexed at %s>" % indexed_version
+
+        # Neither shape resolved. Say so: get_all_sheet_contents swallows the
+        # FileNotFoundError this leads to, so without a log a sheet vanishes from
+        # the extraction with no error, no warning and no validator finding — a
+        # partial workbook that still produces a plausible-looking rule count.
+        logger.warning(
+            "Sheet %r resolved to neither the current key (%s) nor the legacy key "
+            "(%s); its content will not load. The index may have been written by a "
+            "different indexer version — re-index this document.",
+            sheet_name,
+            current,
+            legacy,
+        )
+        return current
 
     def get_sheet_content(self, sheet_name: str) -> str:
         """Load specific sheet content.
@@ -166,7 +299,7 @@ class IndexedDocument:
         For unsplit sheets, returns the single CSV file.
         """
         table_splits = self.get_table_splits()
-        safe_name = self._sanitize_for_lookup(sheet_name)
+        safe_name = self._resolve_sheet_key(sheet_name)
 
         split_info = table_splits.get(safe_name, {})
         if split_info.get("split_applied"):
@@ -924,11 +1057,10 @@ class ContentIndexer:
             filename = att.get("filename", "image")
             stem = Path(filename).stem or "image"
             sheet_key = f"image::{stem}"
-            # IndexedDocument.get_sheet_content() looks up by passing the
-            # sheet name through `re.sub(r"[^\w\-_]", "_", name)`, which turns
-            # "image::imageNNN" into "image__imageNNN". Use the same sanitiser
-            # here so the file we write matches what the loader reads.
-            safe_name = self._sanitize_filename(sheet_key)
+            # IndexedDocument.get_sheet_content() resolves the file through the
+            # shared sheet-key sanitiser (module-level `sanitize_sheet_key`), so
+            # write with the same one or the loader will not find this file.
+            safe_name = self._sanitize_sheet_key(sheet_key)
 
             progress("extracting_image_table", f"Vision: {filename}")
             md = extract_table_markdown(Path(att["image_path"]), llm_service)
@@ -1095,7 +1227,7 @@ class ContentIndexer:
                     f"Sheet {sheet_idx}/{len(sheet_names)}: {sheet_name}",
                 )
 
-                safe_name = self._sanitize_filename(
+                safe_name = self._sanitize_sheet_key(
                     f"{sheet_name_prefix}{sheet_name}"
                     if sheet_name_prefix
                     else sheet_name
@@ -1409,7 +1541,7 @@ class ContentIndexer:
                 "sheet_names": [
                     f"{sheet_name_prefix}{name}" if sheet_name_prefix else name
                     for name in sheet_names
-                    if self._sanitize_filename(
+                    if self._sanitize_sheet_key(
                         f"{sheet_name_prefix}{name}" if sheet_name_prefix else name
                     )
                     in sheet_files
@@ -1695,11 +1827,25 @@ class ContentIndexer:
         Sanitize filename for use as document ID.
 
         Replaces special characters with underscores and limits length.
+
+        Document IDs only. For per-sheet keys use ``_sanitize_sheet_key`` — those
+        must be collision-free, and this is not (two names sharing a 100-char
+        prefix collapse to one key). Document IDs are derived from a file stem and
+        keeping them stable matters more than the theoretical collision, so this
+        deliberately keeps the truncate-only shape.
         """
         import re
 
         safe_name = re.sub(r"[^\w\-_]", "_", str(name))
         return safe_name[:100]
+
+    def _sanitize_sheet_key(self, name: str) -> str:
+        """Collision-free key for a sheet's ``table_splits`` entry and its file.
+
+        Must stay identical to ``IndexedDocument._sanitize_for_lookup``; both
+        delegate to the module-level ``sanitize_sheet_key`` so they cannot drift.
+        """
+        return sanitize_sheet_key(name)
 
     def _save_metadata(self, metadata: dict, output_dir: Path):
         """Save metadata JSON to output directory."""
