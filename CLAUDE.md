@@ -23,6 +23,7 @@ Domain: insurance commission intake and policy data extraction.
 | `backend/commission_intake/` | Commission statement ingestion pipeline (models, tasks, serializers, views) |
 | `backend/policy_extract/`    | Policy data extraction app (models, services, tasks)                        |
 | `backend/cins/`              | CINS product field mapping, schema, prompts, processors, validators         |
+| `backend/master_data/`       | Carrier master tables + `services/resolver.py` (RTO/product bucket lookups) |
 | `backend/system/`            | System-level models and views                                               |
 | `web/`                       | Nuxt frontend                                                               |
 | `web/app/pages/`             | Nuxt file-based routes (incl. `commission-intake/`, `policy-extract.vue`)   |
