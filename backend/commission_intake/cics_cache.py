@@ -80,7 +80,23 @@ def _env_int(name: str, default: int) -> int:
 #         (ROM / ROTN) and the NE group; product_bucket extracted + word-bounded;
 #         StateRtoPresenceValidator added. Without this bump a cached Chola
 #         document keeps serving the blank State/RTO columns the fix removes.
-CICS_PIPELINE_VERSION = "1.2.0"
+# 1.3.0 — two extraction-correctness fixes. (a) Per-sheet filename keys are now
+#         collision-free: four Chola June sheets shared a 60-char prefix, so all
+#         four truncated to one 50-char key, shared one pass-content file, and —
+#         being processed concurrently — the last writer won. Three sheets were
+#         extracted from the Two Wheeler grid and the document's entire CV book
+#         (1,552 rules across GCV/PCV/Buses/MISC-D) became 2,633 phantom TW
+#         rules. No extraction content round-trips through the filesystem any
+#         more — neither the per-sheet path nor the single-file email path, whose
+#         temp file also sat in a shared PROVIDER directory. Remaining writes are
+#         debug artifacts with no reader. (b) An empty codegen result is a
+#         legitimate outcome, rather than a 3-retry failure that sets
+#         requires_review and blocks the cache pin forever, when BOTH the pass-3
+#         markdown and the index-time rate_cell_count agree the sheet holds no
+#         rate rows.
+#         Cached documents must re-extract or they keep serving the swapped
+#         segments and stay unpinnable.
+CICS_PIPELINE_VERSION = "1.3.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"
