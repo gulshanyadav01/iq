@@ -76,7 +76,11 @@ def _env_int(name: str, default: int) -> int:
 #         changes prompt_version_hash and therefore invalidates the cache for
 #         EVERY carrier on its own, independently of this constant. See the
 #         cache-key list in the module docstring above.
-CICS_PIPELINE_VERSION = "1.1.0"
+#         1.2.0 — state expansion learned Chola's "rest of <state>" zone tokens
+#         (ROM / ROTN) and the NE group; product_bucket extracted + word-bounded;
+#         StateRtoPresenceValidator added. Without this bump a cached Chola
+#         document keeps serving the blank State/RTO columns the fix removes.
+CICS_PIPELINE_VERSION = "1.2.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"
