@@ -507,6 +507,20 @@ def _run_validators(output_path: Path, indexed_doc=None):
         except Exception as e:  # never let this validator break the pipeline
             logger.warning(f"Chola product hierarchy validator failed: {e}")
 
+        try:
+            from cins.validators.state_rto_presence_validator import (
+                StateRtoPresenceValidator,
+            )
+
+            # Reads only the CICS doc (no source grid), so it belongs here
+            # rather than in the indexed_doc branch below.
+            sr_result = StateRtoPresenceValidator().validate(str(output_path))
+            schema_result.errors.extend(sr_result.errors)
+            schema_result.warnings.extend(sr_result.warnings)
+            schema_result.info.extend(sr_result.info)
+        except Exception as e:  # never let this validator break the pipeline
+            logger.warning(f"State/RTO presence validator failed: {e}")
+
     extractable = None
     if indexed_doc is not None and schema_result is not None:
         # Derived once for both validators — the filter walks every sheet and
