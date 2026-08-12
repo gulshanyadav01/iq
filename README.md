@@ -11,15 +11,15 @@ Full-stack app for insurance commission intake and policy data extraction.
 
 ## Monorepo structure
 
-| Path         | Purpose                                                                                                                     |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------- |
-| `backend/`   | Django project (`config/`, `accounts/`, `core/`, `commission_intake/`, `policy_extract/`, `cins/`, `pipelines/`, `system/`) |
-| `web/`       | Nuxt 4 frontend (`app/pages`, `app/components`, `app/stores`, …)                                                            |
-| `conf/`      | Nginx dev/prod configs                                                                                                      |
-| `postgres/`  | DB init SQL (`insur_iq`, `auth`)                                                                                            |
-| `scripts/`   | Helper scripts (env gen, build/push, db reset, nuke)                                                                        |
-| `infra/aws/` | One-time AWS OIDC → ECR wiring (`setup-aws.sh` + policies)                                                                  |
-| `.github/`   | CI workflow + dependabot                                                                                                    |
+| Path         | Purpose                                                                                                                                     |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backend/`   | Django project (`config/`, `accounts/`, `core/`, `commission_intake/`, `policy_extract/`, `cins/`, `master_data/`, `pipelines/`, `system/`) |
+| `web/`       | Nuxt 4 frontend (`app/pages`, `app/components`, `app/stores`, …)                                                                            |
+| `conf/`      | Nginx dev/prod configs                                                                                                                      |
+| `postgres/`  | DB init SQL (`insur_iq`, `auth`)                                                                                                            |
+| `scripts/`   | Helper scripts (env gen, build/push, db reset, nuke)                                                                                        |
+| `infra/aws/` | One-time AWS OIDC → ECR wiring (`setup-aws.sh` + policies)                                                                                  |
+| `.github/`   | CI workflow + dependabot                                                                                                                    |
 
 ## Local setup (development)
 

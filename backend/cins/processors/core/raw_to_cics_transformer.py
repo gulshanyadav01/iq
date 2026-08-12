@@ -17,6 +17,7 @@ import re
 import hashlib
 from collections import OrderedDict
 from datetime import datetime
+from itertools import chain
 from typing import List, Dict, NamedTuple, Optional, Set, Tuple, Any
 
 from cins.schema.carriers import CARRIER_FULL_NAMES, normalize_carrier
@@ -342,12 +343,21 @@ PRODUCT_NAME_MAPPINGS = [
     ("passenger bus", "Commercial Vehicle"),
     ("mini bus", "Commercial Vehicle"),
     ("bus", "Commercial Vehicle"),
+    # Chola spells its CV tables with a doubled C (GCCV / PCCV) and abbreviates
+    # miscellaneous-D as MSV. These are disjoint from the bare "gcv"/"pcv"
+    # substrings below -- "gcv" does not occur inside "gccv" -- so without their
+    # own entries a product_name of "GCCV" fell through to the raw key and the
+    # export could not resolve its RTO bucket.
+    ("gccv", "Commercial Vehicle"),
+    ("pccv", "Commercial Vehicle"),
+    ("msv", "Commercial Vehicle"),
     ("gcv", "Commercial Vehicle"),
     ("goods carrying", "Commercial Vehicle"),
     ("pcv", "Commercial Vehicle"),
     ("passenger carrying", "Commercial Vehicle"),
     ("commercial vehicle", "Commercial Vehicle"),
     ("misc d", "Commercial Vehicle"),
+    ("misc-d", "Commercial Vehicle"),
     ("miscd", "Commercial Vehicle"),
     # Private Car variants
     ("four wheeler", "Private Car"),
@@ -525,6 +535,41 @@ STATE_NAME_MAPPINGS = {
     "ua": "uttarakhand",  # RTO data uses both UK and UA for Uttarakhand
     "wb": "west-bengal",
     "dn": "dadra-and-nagar-haveli-and-daman-and-diu",
+    # "Rest of <state>" zone columns. Chola's CV grids pair an explicit metro
+    # zone column with a "rest of" remainder column -- "TN-Chennai" beside
+    # "ROTN", "Mumbai/GA/Pune/Central MH" beside "ROM". Both halves name the
+    # same STATE; what separates them is the RTO set, and the export already
+    # models that: the metro rule carries an explicit conditions.rto (seeded
+    # from CarrierRTOZoneMaster) and the export's claimed-RTO complement
+    # subtracts those codes from the remainder rule's state-derived fill. This
+    # is the same shape as the already-shipped "UP" / "UP- East" pair.
+    #
+    # Deliberately NOT here: "ROK" (Rest of Karnataka, in the Two-Wheeler
+    # grid). Its sibling "KA (Bangalore)" resolves to plain karnataka with NO
+    # explicit rto, because chola_rto_zone.csv seeds no bangalore zone -- so
+    # mapping ROK would produce two identical karnataka rules at different
+    # rates rather than a complement. Seed the zone first.
+    "rom": "maharashtra",
+    "rotn": "tamil-nadu",
+}
+
+# Tokens naming a GROUP of states rather than one. Consulted by
+# _expand_state_names alongside STATE_NAME_MAPPINGS, with the same
+# boundary-matching rules, but contributing several canonical names at once.
+STATE_GROUP_MAPPINGS = {
+    # Chola's Two-Wheeler grid spells the north-east block "AS/ML/TR/ AR/NL" in
+    # one table and bare "NE" in the next table of the SAME sheet (same six
+    # NOP/SOD/ANNUAL/ACT tiers, same key column) -- so NE is that group's
+    # abbreviation, not a separate geography. Membership is taken verbatim from
+    # the spelled-out sibling: Chola's north-east block excludes Manipur and
+    # Mizoram, and this must not "helpfully" add them.
+    "ne": [
+        "assam",
+        "meghalaya",
+        "tripura",
+        "arunachal-pradesh",
+        "nagaland",
+    ],
 }
 
 
@@ -1756,15 +1801,52 @@ class RawToCICSTransformer:
             "vehicle_sub_class",
         )
 
+        # Extract domain-specific fields from entry.conditions dict. Read before
+        # the state block below, which needs it for the conditions fallback.
+        entry_conditions = getattr(entry, "conditions", None) or {}
+
         # Normalize states
         location_text = entry.state_text or getattr(raw, "global_state_text", None)
+        if not location_text:
+            # Fallback: recover a state the codegen filed under the conditions
+            # dict instead of the top-level state_text field. `conditions` is a
+            # free-form Dict[str, str], so such a key survives on the entry and
+            # was simply never read -- the blank State (and, downstream, blank
+            # RTO) column on Chola's Two-Wheeler and commercial rows. That grid
+            # carries its state in a per-row leading cell ("State (RTO) > AP")
+            # rather than a column header, which is exactly where a generated
+            # parser routes it into the row's base conditions.
+            #
+            # Mirrors the RTO alias list further down: accept the spellings a
+            # generated parser plausibly picks, not just one.
+            for key in ("state", "states", "state_group", "region"):
+                candidate = entry_conditions.get(key)
+                # Must be a string: `conditions` is codegen output, and a
+                # plural alias ("states") is exactly the shape a generated
+                # parser emits as a list. _expand_state_names calls .lower()
+                # on this, so a non-string would crash the whole transform.
+                if isinstance(candidate, (list, tuple)):
+                    candidate = ", ".join(str(v) for v in candidate if v)
+                elif candidate is not None and not isinstance(candidate, str):
+                    candidate = str(candidate)
+                if candidate:
+                    location_text = candidate
+                    # Warn ONCE per alias key, not once per rule: this fires on
+                    # every row of the grid it targets, and warnings are
+                    # persisted into the document's validation_notes.
+                    warning = (
+                        f"State recovered from conditions['{key}']: the "
+                        f"extraction should emit it as the top-level "
+                        f"state_text field"
+                    )
+                    if warning not in self.warnings:
+                        self.warnings.append(warning)
+                    break
         state = self._expand_state_names(location_text, master_data)
 
         # Extract/expand RTO codes from location_text
         rto = self._expand_rto_codes(location_text, master_data)
 
-        # Extract domain-specific fields from entry.conditions dict
-        entry_conditions = getattr(entry, "conditions", None) or {}
         # Built once and threaded through the probe-based recoveries below.
         # _segment_probe re-joins and re-lowercases four fields on every call,
         # and this function consults it more than once per entry.
@@ -4139,15 +4221,23 @@ class RawToCICSTransformer:
                         if names:
                             discovered_names.extend(names)
 
-        # Standard state name/abbreviation mapping
-        for name, canonical in STATE_NAME_MAPPINGS.items():
+        # Standard state name/abbreviation mapping, then the multi-state group
+        # tokens ("NE" -> the north-east block). One loop over both tables: the
+        # boundary rule is the load-bearing part and must not drift between
+        # them. A short key is boundary-matched so it cannot fire inside a word
+        # -- "NE" must not match the "NEW(100-500 NOP)" tier label sitting in
+        # the very next cell of the grid that token comes from.
+        for name, canonicals in chain(
+            ((k, [v]) for k, v in STATE_NAME_MAPPINGS.items()),
+            STATE_GROUP_MAPPINGS.items(),
+        ):
             if len(name) <= 3:
                 pattern = rf"(?:^|[\s,_\-\/]){re.escape(name)}(?=$|[\s,_\-\/])"
             else:
                 pattern = rf"{re.escape(name)}"
 
             if re.search(pattern, text, re.IGNORECASE):
-                discovered_names.append(canonical)
+                discovered_names.extend(canonicals)
 
         # Chola UW-zone label -> state expansion (scoped query built once in
         # transform()). Only at _top: recursive calls process master-data

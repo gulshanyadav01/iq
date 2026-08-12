@@ -143,6 +143,19 @@
       carrier's full RTO-zone data; extend `chola_rto_zone.csv` (or re-run the
       upload API against a fuller source workbook — both paths share
       `chola_parsers.py`) once available.
+      **Now also blocks `ROK`:** the state-token change
+      (`ravipiplani/no-default-state-miss`) mapped `ROM` → maharashtra and
+      `ROTN` → tamil-nadu because their metro siblings (`Mumbai/GA/Pune/Central MH`, `TN-Chennai`) carry explicit `conditions.rto` from the seeded zones,
+      so the export's complement subtracts them (verified: per-bucket overlap
+      zero). `ROK` (Rest of Karnataka) is deliberately left UNMAPPED because no
+      `bangalore` zone is seeded — its sibling `KA (Bangalore)` resolves to
+      plain karnataka with no explicit RTO, so mapping ROK would produce two
+      identical karnataka rules at different rates instead of a complement
+      pair. Seed the zone, then add `"rok": "karnataka"` to
+      `STATE_NAME_MAPPINGS` and drop the guard test in
+      `test_state_zone_tokens.py::test_rok_is_not_mapped`. Until then, `TN/ROK`
+      rows silently carry tamil-nadu only and their Karnataka payout is absent
+      from the export.
 
 - [ ] **Lock down `MasterDataUploadViewSet` (the Master Mapper upload) behind
       authentication** — it is still `permission_classes = [AllowAny]`
@@ -155,6 +168,53 @@
       its older sibling was left as-is to keep the change scoped. Both should end
       up on the same posture — flip the sibling and confirm nothing internal
       depends on anonymous upload.
+
+- [ ] **Resolve the Pass-3 header-split contradiction between the base codegen
+      prompt and the Chola overlay** — `pass3_rules_codegen_prompt.md:217-219`
+      says split the `<state> > <coverage>` header before the **last** `>`;
+      `carrier_overlays/chola_pass3.md:134-141` says split from the **left** and
+      take `parts[0]`/`parts[1]`, and explicitly calls the former wrong.
+      **Priority:** P1
+      **Context:** Surfaced during the State/RTO fix
+      (`ravipiplani/no-default-state-miss`), where fixing it was deliberately
+      deferred: editing ANY file under `cins/prompts/` rehashes
+      `prompt_version_hash` and invalidates the CICS output cache for EVERY
+      carrier, forcing a full codegen re-roll of every cached document — and
+      that cache exists precisely so a re-extraction cannot regress a good
+      result into a segment-dropping one. The root cause of the blank
+      State/RTO columns turned out to be transformer-side, so the blast radius
+      was not justified. On a 3-segment CV header (`AP/TS > ACT > 0.325`) the
+      base rule yields state `"AP/TS > ACT"`; it survives today ONLY because
+      `_expand_state_names`' boundary regex still finds `ap` inside that
+      string. A state token that is not a bare 2-letter code would not
+      survive. Bundle with the next intentional prompt change so the
+      cache-invalidation cost is paid once, and confirm
+      `CINS_REGRESSION_GUARD` is on before merging.
+
+- [ ] **State/RTO validator + product_bucket follow-ups** — deferred review
+      findings from `ravipiplani/no-default-state-miss`.
+      **Priority:** P2
+      **Context:** All informational; the shipped fix is verified end-to-end
+      (0 blank State/RTO across 4 Chola documents). In rough value order:
+      (a) memoize `MasterDataResolver.rtos_for_states` on
+      `(frozenset(slugs), bucket, frozenset(exclude_codes))` — the validator
+      calls it once per rule (measured 0.1s typical, up to 1.0s per document
+      when a rule expands to all 40 state prefixes), duplicating work
+      `rto_cell` already does; `_rto_by_state` is immutable after `_reload()`
+      so a per-instance dict is sufficient.
+      (b) Chola's CV spellings are now enumerated in THREE unsynced places —
+      `_BUCKET_TOKENS` (resolver), `PRODUCT_NAME_MAPPINGS` and
+      `_prod_token_segment` (transformer) — with no test tying them together;
+      add a test asserting every CV key in `PRODUCT_NAME_MAPPINGS` buckets to
+      `CV`, or derive one table from the other.
+      (c) `_CAMEL_SPLIT_RE` is duplicated between `resolver.py` and
+      `chola_product_hierarchy_validator.py`.
+      (d) `state_rto_presence_validator` imports the private `_env_flag` from
+      `cins.processors.core.codegen_coverage`; `cics_cache.py` has a third
+      copy — promote one shared `env_flag` helper.
+      (e) no test covers the export path where `MasterDataResolver()` raises
+      and `_rto_resolver` is None (the import guard is deliberately outside
+      the `try`, so the bucket pre-pass still works).
 
 ## Completed
 
