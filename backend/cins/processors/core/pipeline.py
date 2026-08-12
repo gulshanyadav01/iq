@@ -23,8 +23,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from cins.processors.content.indexer import ContentIndexer, IndexedDocument
-from cins.processors.content.prepare_prompt import prepare_extraction_request
+from cins.processors.content.indexer import (
+    ContentIndexer,
+    IndexedDocument,
+    digest_suffixed_key,
+    sanitize_sheet_key,
+)
 from cins.processors.core.cpa_split import materialize_cpa_split
 from cins.processors.core.rule_priority import normalize_rule_priorities
 from cins.processors.core.sheet_visibility import (
@@ -72,30 +76,89 @@ class PipelineResult:
 
 
 def get_safe_sheet_name(sheet_name: str) -> str:
-    """Sanitize sheet name for use in filenames."""
-    safe_name = re.sub(r"[^\w\-_]", "_", str(sheet_name))
-    return safe_name[:50]
+    """Sanitize a sheet name into a UNIQUE, filesystem-safe key.
+
+    This is the 50-char budget; the indexer's ``sanitize_sheet_key`` is the 100-char
+    twin. Both delegate to ``digest_suffixed_key``, which carries the full rationale
+    and keeps the parts that matter (digest width, byte-safe truncation) from
+    drifting between them.
+
+    Concretely, this is what bit: Chola's June workbook holds four commission sheets
+    sharing a 60-character prefix, so all four collapsed to one truncated key. Every
+    per-sheet artifact — pass-content files, codegen source, output JSON — landed on
+    one path, and because sheets are processed CONCURRENTLY (see the ThreadPoolExecutor
+    in ``_process_sheets``) the last writer won. Three sheets were handed the Two
+    Wheeler grid and the document's entire CV book was replaced by phantom TW rules,
+    with no error anywhere.
+    """
+    return digest_suffixed_key(sheet_name, 50)
+
+
+def _normalize_newlines(text: str) -> str:
+    """CRLF/CR -> LF, matching what a universal-newline file read used to do."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _table_shape_for_sheet(table_splits, sheet_name: str, safe_name: str):
     """Per-sheet ``table_splits`` entry for the codegen completeness gate.
 
     Looks up the sheet's persisted table shape ({"tables": [...]} with each
-    commission table carrying ``rate_cell_count``). The indexer keys ``table_splits``
-    by its own filename sanitizer (truncates at 100 chars) while the pipeline uses
-    ``get_safe_sheet_name`` (50 chars), so a direct key hit can miss on long names —
-    fall back to matching the stored ``original_sheet_name``. Returns ``None`` when
-    absent (legacy docs); the gate fails open on ``None``.
+    commission table carrying ``rate_cell_count``).
+
+    Three lookups, because no single one covers every document:
+
+    1. ``sanitize_sheet_key(sheet_name)`` — the INDEXER's key, which is what
+       actually wrote these dict keys. This is the exact match and should hit.
+    2. ``safe_name`` — the pipeline's own 50-budget key. Only equal to (1) when the
+       sanitized name fits the smaller prefix; it does NOT cover pre-1.9 documents,
+       whose keys are truncate-only and carry no digest at all.
+    3. ``original_sheet_name`` — matched against the sheet name AND its
+       post-``__`` suffix, but ONLY when exactly one entry matches. The indexer
+       keys ``table_splits`` by the ATTACHMENT-PREFIXED name while storing
+       ``original_sheet_name`` BARE (indexer.py:1199 vs :1309), so on a
+       multi-attachment email the pipeline's prefixed ``sheet_name`` never equals
+       the stored bare one. But two attachments can each hold a sheet called
+       "Commission Grid", and a first-match-wins scan would bind one workbook's
+       shape to the other's sheet. A WRONG shape is worse than none — it feeds the
+       coverage gate and the Pass-3 empty-result guard — so an ambiguous match
+       resolves to ``None``.
+
+    Returning ``None`` fails the gate open, which is why this matters: a miss does
+    not raise, it silently removes the index-time witness that
+    ``_extract_pass3_via_codegen`` relies on. Legacy documents (truncate-only keys,
+    no digest) miss lookups 1 and 2 by construction and rest entirely on 3.
     """
     splits = table_splits or {}
     if not isinstance(splits, dict) or not splits:
         return None
-    entry = splits.get(safe_name)
+
+    entry = None
+    for key in (sanitize_sheet_key(sheet_name), safe_name):
+        if key in splits:
+            entry = splits[key]
+            break
+
     if entry is None:
-        for val in splits.values():
-            if isinstance(val, dict) and val.get("original_sheet_name") == sheet_name:
-                entry = val
-                break
+        # The indexer joins as f"{attachment_stem}__{sheet_name}" (indexer.py:1199),
+        # so the bare name is everything after the FIRST "__". That is also why the
+        # uniqueness check below is required rather than optional: an unprefixed
+        # sheet legitimately named "Rate__Card" reduces to "Card" here and could
+        # false-match a different sheet actually called "Card".
+        bare = sheet_name.split("__", 1)[-1]
+        matches = [
+            val
+            for val in splits.values()
+            if isinstance(val, dict)
+            and val.get("original_sheet_name") in (sheet_name, bare)
+        ]
+        if len(matches) == 1:
+            entry = matches[0]
+        elif len(matches) > 1:
+            logger.warning(
+                f"Ambiguous table_shape for sheet {sheet_name!r}: {len(matches)} "
+                "entries share that original_sheet_name. Failing open rather than "
+                "binding a possibly-wrong shape."
+            )
     if isinstance(entry, dict) and isinstance(entry.get("tables"), list):
         return entry
     return None
@@ -865,10 +928,27 @@ class Pipeline:
             model_used = ""
 
         content_str = indexed_doc.get_primary_content()
-        temp_content = output_dir / "extracted_content.txt"
-        temp_content.write_text(content_str, encoding="utf-8")
+        # Debug artifact only — the prompt comes from memory below. This file name
+        # is NOT document-scoped: on the default CLI output path `output_dir` is the
+        # shared PROVIDER directory, so two documents for one provider running
+        # concurrently would write and read the same path. Reading it back was the
+        # same shared-file corruption channel the per-sheet path just lost.
+        try:
+            (output_dir / "extracted_content.txt").write_text(
+                content_str, encoding="utf-8"
+            )
+        except OSError as debug_write_err:
+            logger.warning(
+                f"could not write debug extracted_content.txt ({debug_write_err}) "
+                "— continuing, extraction is unaffected"
+            )
 
-        _, user_prompt = prepare_extraction_request(str(temp_content))
+        # The removed round-trip read the file in universal-newline mode, so it
+        # normalized CRLF. Keep normalizing: no document in the corpus carries CR
+        # today (the indexer strips it upstream), but this refactor is meant to be
+        # byte-identical, and a silent tokenization change on a rates pipeline is
+        # not something to discover from a payout diff.
+        user_prompt = _normalize_newlines(content_str)
 
         system_instructions = {
             1: get_pass1_metadata_prompt(),
@@ -1101,22 +1181,38 @@ class Pipeline:
                         f"  '{sheet_name}': email body used as Pass 3 commission content"
                     )
 
-                for pass_name, pass_content in [
-                    (f"pass1_content_{safe_name}.txt", pass1_content),
-                    (f"pass2_content_{safe_name}.txt", pass2_content),
-                    (f"pass3_content_{safe_name}.txt", pass3_content),
-                ]:
-                    (output_dir / pass_name).write_text(pass_content, encoding="utf-8")
+                # Debug artifacts only. NOTHING reads these back — the pass content
+                # is used from memory below. This used to be a write-then-read hop
+                # through a document-shared directory, which is how one sheet's grid
+                # reached another sheet's extraction once two names sanitized alike
+                # (see get_safe_sheet_name). The filenames are unique now, but the
+                # round-trip is gone regardless: it bought nothing, since the reader
+                # was a plain file read with no transform.
+                # Best-effort: a diagnostic write must never be able to fail the
+                # sheet. A read-only or full volume would otherwise abort all three
+                # passes and produce zero rules for a sheet that extracts fine.
+                try:
+                    for pass_name, pass_content in [
+                        (f"pass1_content_{safe_name}.txt", pass1_content),
+                        (f"pass2_content_{safe_name}.txt", pass2_content),
+                        (f"pass3_content_{safe_name}.txt", pass3_content),
+                    ]:
+                        (output_dir / pass_name).write_text(
+                            pass_content, encoding="utf-8"
+                        )
+                except OSError as debug_write_err:
+                    logger.warning(
+                        f"  '{sheet_name}': could not write debug pass content "
+                        f"({debug_write_err}) — continuing, extraction is unaffected"
+                    )
 
-                _, pass1_prompt = prepare_extraction_request(
-                    str(output_dir / f"pass1_content_{safe_name}.txt")
-                )
-                _, pass2_prompt = prepare_extraction_request(
-                    str(output_dir / f"pass2_content_{safe_name}.txt")
-                )
-                _, pass3_prompt = prepare_extraction_request(
-                    str(output_dir / f"pass3_content_{safe_name}.txt")
-                )
+                # Same shape rerun_single_pass uses (tasks.py) — content straight
+                # from build_pass_contents, never via the filesystem. Newlines are
+                # normalized because the removed round-trip read in universal-newline
+                # mode; see _normalize_newlines.
+                pass1_prompt = _normalize_newlines(pass1_content)
+                pass2_prompt = _normalize_newlines(pass2_content)
+                pass3_prompt = _normalize_newlines(pass3_content)
 
                 pass_prompts = {
                     1: pass1_prompt,
@@ -1289,11 +1385,20 @@ class Pipeline:
                         if failed_entries and on_sheet_complete:
                             on_sheet_complete(failed_entries)
 
-                prompt_path = output_dir / f"{base_name}_{safe_name}_prompt.txt"
-                prompt_path.write_text(
-                    f"=== PASS PROMPTS ===\n=== Pass 1 ===\n{pass1_prompt}\n\n=== Pass 2 ===\n{pass2_prompt}\n\n=== Pass 3 ===\n{pass3_prompt}",
-                    encoding="utf-8",
-                )
+                # Also diagnostic-only, and it lands AFTER all three LLM calls are
+                # paid for — an unguarded failure here would throw away completed,
+                # billed work. Same best-effort treatment as the pass-content writes.
+                try:
+                    prompt_path = output_dir / f"{base_name}_{safe_name}_prompt.txt"
+                    prompt_path.write_text(
+                        f"=== PASS PROMPTS ===\n=== Pass 1 ===\n{pass1_prompt}\n\n=== Pass 2 ===\n{pass2_prompt}\n\n=== Pass 3 ===\n{pass3_prompt}",
+                        encoding="utf-8",
+                    )
+                except OSError as debug_write_err:
+                    logger.warning(
+                        f"  '{sheet_name}': could not write debug prompt dump "
+                        f"({debug_write_err}) — continuing, extraction is unaffected"
+                    )
 
                 # Renumber here too so the per-sheet validation_status agrees
                 # with the combined one (this path has no cpa split of its own).
