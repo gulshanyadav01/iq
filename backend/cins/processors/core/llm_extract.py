@@ -717,7 +717,12 @@ def _extract_pass3_via_codegen(
         validate_code_ast,
         validate_entries,
     )
-    from cins.processors.core.codegen_coverage import table_coverage_report
+    from cins.processors.core.codegen_coverage import (
+        count_rate_bearing_rows_markdown,
+        declares_only_non_rate_tables,
+        expected_rate_cells,
+        table_coverage_report,
+    )
 
     MAX_CODEGEN_ATTEMPTS = 3
 
@@ -913,7 +918,71 @@ def _extract_pass3_via_codegen(
 
         print(f"#   → Code-gen produced {len(raw_dicts)} raw dicts", file=sys.stderr)
 
-        # Empty result — retry
+        # Empty result. Whether that is a failure depends entirely on whether the
+        # sheet HAS anything to extract. A notes/conditions sheet (payout terms
+        # prose, zero rate cells) correctly yields nothing, and punishing it costs
+        # three LLM calls and then sets requires_review — which makes
+        # cics_cache.should_cache refuse to pin the document FOREVER, so every
+        # later access re-runs full codegen with no backoff. Chola's May'26
+        # "conditions" sheet sat in exactly that state.
+        #
+        # The discriminator is the same host-side count the completeness gate uses,
+        # so the two can never disagree about what "has rate data" means.
+        #
+        # Count against commission_data_content, NOT user_prompt. user_prompt is
+        # the content plus a context header carrying Pass-1 global settings and the
+        # Pass-2 master-data dump, and those are prose the counter can misread: a
+        # deductions line like "- Deductions: 1.5%, 2%" splits on the comma into a
+        # cell holding a bare "2%", which scores as a rate-bearing row. Counting the
+        # header would make every notes sheet in such a document look rate-bearing
+        # and silently revert this branch to the 3-retry + requires_review path —
+        # the exact permanent-cache-block symptom it exists to remove.
+        #
+        # Suppressing a failure signal needs POSITIVE evidence that there was
+        # nothing to extract. Three independent witnesses must all agree, because
+        # each one alone has a blind spot that would let a real dropped grid
+        # through as "clean" — and a clean empty gets PINNED TO CACHE, which is
+        # strictly worse than the retry-and-flag behaviour this replaced.
+        #
+        # `declares_only_non_rate_tables` — structural, and the load-bearing one.
+        # Every table in the content is tagged notes/master. Cannot be fooled by
+        # cell formatting.
+        #
+        # `count_rate_bearing_rows_markdown` — heuristic over cell text. Catches
+        # untagged rate rows the markers miss, but under-counts grids whose cells
+        # read "22.5 %" or "Upto 25%", so it can never be the only witness.
+        #
+        # `expected_rate_cells(table_shape) == 0` — the index-time CSV count, an
+        # independent view that survives a mangled markdown conversion. Returns 0
+        # for an absent/legacy shape too, so it adds evidence but never proves
+        # emptiness on its own.
+        #
+        # `not best_entries` — a gate-forced retry can land here after an earlier
+        # attempt really did extract rows; returning empty would discard them, the
+        # gate manufacturing the very drop it exists to prevent.
+        if (
+            not raw_dicts
+            and not best_entries
+            and declares_only_non_rate_tables(commission_data_content)
+            and expected_rate_cells(table_shape) == 0
+            and count_rate_bearing_rows_markdown(commission_data_content) == 0
+        ):
+            msg = (
+                "no rate-bearing rows in this sheet's content — an empty "
+                "extraction is correct, not a drop"
+            )
+            print(f"#   → {msg}", file=sys.stderr)
+            return (
+                RulesExtraction(
+                    products=[],
+                    overall_ambiguities=[f"Code-gen produced no rules: {msg}"],
+                    overall_requires_review=False,
+                ),
+                code,
+                user_prompt,
+            )
+
+        # Empty result on a sheet that DOES carry rate rows — a genuine drop. Retry.
         if not raw_dicts:
             msg = "result list was empty — no rules were generated"
             print(f"#   ⚠ {msg}", file=sys.stderr)

@@ -249,6 +249,62 @@ def _commission_tables_with_shape(table_shape: Optional[dict]) -> List[dict]:
     return out
 
 
+_TABLE_TYPE_RE = re.compile(r"\[type:\s*([A-Za-z]+)\s*\]")
+_NON_RATE_TABLE_TYPES = frozenset({"notes", "master"})
+
+
+def declares_only_non_rate_tables(markdown: Optional[str]) -> bool:
+    """True only when the content POSITIVELY declares no rate-bearing table.
+
+    This is the structural witness that ``count_rate_bearing_rows_markdown`` cannot
+    be: that counter is a heuristic over cell text (``_is_rate`` is a strict
+    ``fullmatch``), so a real payout grid whose cells read ``22.5 %``, ``Upto 25%``,
+    ``25%-30%`` or ``Rs 500`` counts ZERO rate-bearing rows. Anything using the
+    counter alone to SUPPRESS a failure signal will therefore accept a genuinely
+    dropped grid as an empty sheet.
+
+    The ``[type: ...]`` markers come from the indexer's table tagging, not from cell
+    formatting, so they survive whatever the rates look like. A notes/conditions
+    sheet tags every table ``notes`` or ``master``; any real grid carries at least
+    one ``commission``.
+
+    Fails SAFE in both unknown directions — returns False (i.e. "assume there IS
+    rate data") when the content carries no markers at all, or when any marker is
+    something other than notes/master. Only an explicit, complete notes/master
+    declaration returns True.
+    """
+    if not markdown:
+        # No content is genuinely nothing to extract.
+        return True
+    found = _TABLE_TYPE_RE.findall(markdown)
+    if not found:
+        return False
+    return all(t.strip().lower() in _NON_RATE_TABLE_TYPES for t in found)
+
+
+def expected_rate_cells(table_shape: Optional[dict]) -> int:
+    """Rate cells the INDEX-TIME shape says this sheet holds.
+
+    Counted from the raw CSV slice at index time, so it is independent of the
+    markdown codegen actually read — and the two can disagree (a mangled or
+    re-banded markdown conversion drops rows the CSV had). That disagreement is
+    the whole point of this helper: a caller deciding "this sheet has nothing to
+    extract" must not reach that conclusion from the markdown alone while the
+    persisted shape still claims rate cells.
+
+    **0 means "the shape offers no evidence of rate cells", NOT "the sheet is
+    empty."** An absent or legacy shape also returns 0, so a caller gating on
+    ``== 0`` degrades to whatever other evidence it has (for the Pass-3 empty
+    branch, the markdown count) rather than gaining a second witness. That is the
+    same fail-open direction every other consumer of ``table_splits`` takes, but
+    it does mean this function alone must never be treated as proof of emptiness.
+    """
+    return sum(
+        int(t.get("rate_cell_count") or 0)
+        for t in _commission_tables_with_shape(table_shape)
+    )
+
+
 def _markdown_floor_report(markdown: str, emitted: int) -> CoverageReport:
     """Per-sheet floor from the pass-3 markdown (no table_splits needed).
 
