@@ -12,6 +12,15 @@
           </p>
         </div>
         <div class="flex items-center gap-2 shrink-0">
+          <UInput
+            v-model="searchQuery"
+            icon="i-lucide-search"
+            placeholder="Search form no, filename, ID…"
+            class="w-64"
+            :loading="loading && !!searchQuery"
+            @update:model-value="onSearchInput"
+            @keydown.enter="runSearch"
+          />
           <button
             class="flex items-center gap-2 border border-gray-300 dark:border-gray-700 bg-white/70 dark:bg-gray-900/70 hover:bg-white dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 px-4 py-2 rounded-lg text-sm font-medium transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
             :disabled="loading"
@@ -78,7 +87,18 @@
 
       <!-- Empty State -->
       <div v-else-if="requests.length === 0" class="glass rounded-2xl p-12">
-        <div class="text-center space-y-3">
+        <div v-if="searchQuery.trim()" class="text-center space-y-3">
+          <p class="text-sm text-gray-600 dark:text-gray-400">
+            No requests match “{{ searchQuery.trim() }}”.
+          </p>
+          <button
+            class="text-xs font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300 transition"
+            @click="clearSearch"
+          >
+            Clear search
+          </button>
+        </div>
+        <div v-else class="text-center space-y-3">
           <p class="text-sm text-gray-600 dark:text-gray-400">
             No extraction requests yet.
           </p>
@@ -104,6 +124,9 @@
                   Filename
                 </th>
                 <th class="text-left px-4 py-3 text-xs font-semibold uppercase tracking-widest text-gray-600 dark:text-gray-400">
+                  Form No.
+                </th>
+                <th class="text-left px-4 py-3 text-xs font-semibold uppercase tracking-widest text-gray-600 dark:text-gray-400">
                   Status
                 </th>
                 <th class="text-left px-4 py-3 text-xs font-semibold uppercase tracking-widest text-gray-600 dark:text-gray-400">
@@ -127,6 +150,9 @@
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-900 dark:text-gray-100 max-w-xs truncate">
                   {{ req.original_filename }}
+                </td>
+                <td class="px-4 py-3 text-xs text-gray-600 dark:text-gray-400 font-mono" :title="formNum(req)">
+                  {{ formNum(req) || '—' }}
                 </td>
                 <td class="px-4 py-3">
                   <span :class="['px-2 py-1 rounded-full text-xs font-medium', getStatusBadgeClass(req.status)]">
@@ -304,7 +330,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 
 interface ExtractionRequest {
   id: string
@@ -351,6 +377,44 @@ const pageSize = 20
 const page = ref(1)
 const total = ref(0)
 const counts = ref<StatusCounts>({ total: 0, completed: 0, failed: 0, in_progress: 0 })
+
+// Search state
+const searchQuery = ref('')
+let searchDebounce: ReturnType<typeof setTimeout> | undefined
+// Monotonic token so an earlier, slower response can't overwrite a newer one
+// (rapid typing fires overlapping requests; only the latest may apply).
+let loadSeq = 0
+
+function formNum(req: ExtractionRequest): string {
+  const value = req.metadata?.form_num
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
+}
+
+function runSearch() {
+  // Cancel any pending debounced run so an Enter press doesn't also fire the
+  // timer (which would issue a second redundant request).
+  if (searchDebounce) {
+    clearTimeout(searchDebounce)
+    searchDebounce = undefined
+  }
+  // Reset to first page for a new search; the page watcher reloads when the
+  // value actually changes, so trigger the reload manually if already on page 1.
+  if (page.value !== 1) {
+    page.value = 1
+  } else {
+    loadRequests()
+  }
+}
+
+function onSearchInput() {
+  if (searchDebounce) clearTimeout(searchDebounce)
+  searchDebounce = setTimeout(runSearch, 300)
+}
+
+function clearSearch() {
+  searchQuery.value = ''
+  runSearch()
+}
 
 const metrics = computed(() => ({
   total: counts.value.total,
@@ -427,23 +491,30 @@ async function getAuthHeaders() {
 }
 
 async function loadRequests() {
+  const seq = ++loadSeq
   loading.value = true
   error.value = false
 
   try {
     const headers = await getAuthHeaders()
+    const query: Record<string, string | number> = { page: page.value }
+    const search = searchQuery.value.trim()
+    if (search) query.search = search
     const data = await $fetch<PaginatedRequests>(`${getBaseUrl()}/api/policy-extract/requests/`, {
       headers,
-      query: { page: page.value }
+      query
     })
+    // A newer request superseded this one — discard the stale response.
+    if (seq !== loadSeq) return
     requests.value = data.results
     total.value = data.count
     counts.value = data.counts
   } catch (err) {
+    if (seq !== loadSeq) return
     console.error('Failed to load requests:', err)
     error.value = true
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 
@@ -567,5 +638,9 @@ async function copyContent() {
 
 onMounted(() => {
   loadRequests()
+})
+
+onBeforeUnmount(() => {
+  if (searchDebounce) clearTimeout(searchDebounce)
 })
 </script>
