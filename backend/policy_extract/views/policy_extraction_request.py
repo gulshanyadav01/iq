@@ -1,5 +1,7 @@
+import uuid
+
 from django.db.models import Count, Q
-from drf_spectacular.utils import extend_schema, OpenApiCallback
+from drf_spectacular.utils import extend_schema, OpenApiCallback, OpenApiParameter
 from rest_framework import viewsets, status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -31,6 +33,7 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
     GET /api/policy-extract/requests/{id}/
         - Fetch a single request. Useful for one-off recovery if a callback was missed.
     """
+
     permission_classes = [AllowAny]
     queryset = PolicyExtractionRequest.objects.all()
 
@@ -42,7 +45,7 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
     @extend_schema(
         summary="Submit policy extraction request",
         description="Accept file upload (multipart) or file_link (JSON). Returns extraction request with status=initiated. "
-                    "On completion or failure, a POST callback is sent to the server-configured callback URL.",
+        "On completion or failure, a POST callback is sent to the server-configured callback URL.",
         tags=["Policy Extract"],
         request=PolicyExtractionRequestCreateSerializer,
         responses={201: PolicyExtractionRequestSerializer},
@@ -73,30 +76,56 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
     @extend_schema(
         summary="List extraction requests",
         description="Paginated list of extraction requests (newest first). Response includes "
-                    "DRF pagination keys (count/next/previous/results) plus an all-time `counts` "
-                    "breakdown by status. Intended for inspection/admin; clients should rely on the "
-                    "configured callback for canonical results, not on polling this endpoint.",
+        "DRF pagination keys (count/next/previous/results) plus an all-time `counts` "
+        "breakdown by status. Intended for inspection/admin; clients should rely on the "
+        "configured callback for canonical results, not on polling this endpoint.",
         tags=["Policy Extract"],
+        parameters=[
+            OpenApiParameter(
+                name="search",
+                type=str,
+                description="Case-insensitive substring match over the partner form number "
+                "(metadata.form_num), original filename and policy_extraction_id, "
+                "plus an exact match on the request id (UUID). The all-time `counts` "
+                "breakdown is not affected by this filter.",
+            ),
+        ],
         responses={200: PolicyExtractionRequestSerializer(many=True)},
     )
     def list(self, request, *args, **kwargs):
-        queryset = self.get_queryset().order_by('-created_at')
+        queryset = self.get_queryset().order_by("-created_at")
+        # Bound the term length so a pathologically long value can't blow up the
+        # LIKE patterns run across the table on every (unauthenticated) call.
+        search = request.query_params.get("search", "").strip()[:200]
+        if search:
+            filters = (
+                Q(metadata__form_num__icontains=search)
+                | Q(original_filename__icontains=search)
+                | Q(policy_extraction_id__icontains=search)
+            )
+            # Match our internal UUID only when the term is a valid UUID
+            # (avoids a database cast error on non-UUID search terms).
+            try:
+                filters |= Q(id=uuid.UUID(search))
+            except (ValueError, TypeError):
+                pass
+            queryset = queryset.filter(filters)
         counts = self.get_queryset().aggregate(
-            total=Count('id'),
-            completed=Count('id', filter=Q(status='completed')),
-            failed=Count('id', filter=Q(status='failed')),
-            in_progress=Count('id', filter=Q(status__in=['initiated', 'processing'])),
+            total=Count("id"),
+            completed=Count("id", filter=Q(status="completed")),
+            failed=Count("id", filter=Q(status="failed")),
+            in_progress=Count("id", filter=Q(status__in=["initiated", "processing"])),
         )
         page = self.paginate_queryset(queryset)
         serializer = PolicyExtractionRequestSerializer(page, many=True)
         response = self.get_paginated_response(serializer.data)
-        response.data['counts'] = counts
+        response.data["counts"] = counts
         return response
 
     @extend_schema(
         summary="Get extraction request",
         description="Fetch a single extraction request by id. Intended for one-off recovery if a callback was missed; "
-                    "not for client-driven polling.",
+        "not for client-driven polling.",
         tags=["Policy Extract"],
         responses={200: PolicyExtractionRequestSerializer},
     )
