@@ -1,5 +1,7 @@
+import uuid
+
 from django.db.models import Count, Q
-from drf_spectacular.utils import extend_schema, OpenApiCallback
+from drf_spectacular.utils import extend_schema, OpenApiCallback, OpenApiParameter
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
@@ -79,10 +81,36 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
         "breakdown by status. Intended for inspection/admin; clients should rely on the "
         "configured callback for canonical results, not on polling this endpoint.",
         tags=["Policy Extract"],
+        parameters=[
+            OpenApiParameter(
+                name="search",
+                type=str,
+                description="Case-insensitive substring match over the partner form number "
+                "(metadata.form_num), original filename and policy_extraction_id, "
+                "plus an exact match on the request id (UUID). The all-time `counts` "
+                "breakdown is not affected by this filter.",
+            ),
+        ],
         responses={200: PolicyExtractionRequestSerializer(many=True)},
     )
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset().order_by("-created_at")
+        # Bound the term length so a pathologically long value can't blow up the
+        # LIKE patterns run across the table on every (unauthenticated) call.
+        search = request.query_params.get("search", "").strip()[:200]
+        if search:
+            filters = (
+                Q(metadata__form_num__icontains=search)
+                | Q(original_filename__icontains=search)
+                | Q(policy_extraction_id__icontains=search)
+            )
+            # Match our internal UUID only when the term is a valid UUID
+            # (avoids a database cast error on non-UUID search terms).
+            try:
+                filters |= Q(id=uuid.UUID(search))
+            except (ValueError, TypeError):
+                pass
+            queryset = queryset.filter(filters)
         counts = self.get_queryset().aggregate(
             total=Count("id"),
             completed=Count("id", filter=Q(status="completed")),
