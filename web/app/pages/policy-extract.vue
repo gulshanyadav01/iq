@@ -186,8 +186,16 @@
     </div>
 
     <!-- Detail Slide-over -->
-    <USlideover v-model:open="detailOpen" :title="selectedRequest?.original_filename ?? 'Details'" side="right" :ui="{ content: 'w-full max-w-3xl' }">
+    <USlideover v-model:open="detailOpen" :title="selectedRequest?.original_filename ?? 'Details'" side="right" :ui="{ content: 'w-full max-w-[90vw] xl:max-w-6xl' }">
       <template #body>
+       <div class="flex h-full">
+        <!-- Left: source document -->
+        <div class="w-3/5 h-full border-r border-gray-200 dark:border-gray-700">
+          <DocumentPreview :url="documentUrl" :filename="selectedRequest?.original_filename ?? ''" />
+        </div>
+
+        <!-- Right: extracted response -->
+        <div class="w-2/5 h-full overflow-hidden flex flex-col">
         <!-- In-flight -->
         <div v-if="selectedRequest?.status === 'initiated' || selectedRequest?.status === 'processing'" class="p-6 flex items-center gap-2 text-gray-500">
           <UIcon name="i-lucide-loader-circle" class="animate-spin" />
@@ -234,7 +242,7 @@
             <div class="px-6 py-3 flex gap-4 text-xs text-gray-600 dark:text-gray-400 border-b border-gray-100 dark:border-gray-800">
               <span class="font-medium text-gray-700 dark:text-gray-300">Show</span>
               <label v-for="f in fieldFilters" :key="f.id" class="flex items-center gap-1 cursor-pointer">
-                <input type="radio" :value="f.id" v-model="activeFilter" class="accent-primary-500" />
+                <input v-model="activeFilter" type="radio" :value="f.id" class="accent-primary-500" >
                 {{ f.label }}
               </label>
             </div>
@@ -273,6 +281,8 @@
             <div v-else class="text-xs text-gray-400">No callback response yet</div>
           </div>
         </div>
+        </div>
+       </div>
       </template>
     </USlideover>
 
@@ -432,6 +442,12 @@ const uploadError = ref('')
 // Detail slide-over state
 const selectedRequest = ref<ExtractionRequest | null>(null)
 const detailOpen = ref(false)
+const documentUrl = ref<string | null>(null)
+
+// Clear the document viewer when the slide-over closes so PDF.js tears down.
+watch(detailOpen, (open) => {
+  if (!open) documentUrl.value = null
+})
 
 const views: { id: 'fields' | 'json' | 'callback'; label: string }[] = [
   { id: 'fields', label: 'Extracted Fields' },
@@ -617,6 +633,7 @@ const copied = ref(false)
 
 function openDetail(req: ExtractionRequest) {
   selectedRequest.value = req
+  documentUrl.value = `${getBaseUrl()}/api/policy-extract/requests/${req.id}/document/`
   detailOpen.value = true
   activeView.value = 'fields'
   activeFilter.value = 'all'
