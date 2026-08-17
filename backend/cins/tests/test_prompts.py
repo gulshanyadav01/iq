@@ -154,6 +154,74 @@ class Pass3CholaNcbTierTests(TestCase):
         # Carrier-specific NCB tier rule must NOT bleed into the shared base.
         self.assertNotIn("NCB GT 25%", self.codegen_prompt)
 
+    def test_ncb_instruction_is_internally_consistent(self):
+        """MANDATORY REGRESSION GUARD.
+
+        The general Pass 3 prompt tells the LLM to copy the NCB band label into
+        `conditions["ncb"]`. The Chola overlay tells it NOT to set that key at
+        all. Both are correct for their own scope, but if they ever read as
+        UNCONDITIONAL OPPOSITES the model has no way to resolve them and the
+        behaviour becomes a coin flip on a path that works today.
+
+        One of them must state precedence. Guard that it still does.
+        """
+        rules_prompt = (PROMPTS_DIR / "pass3_rules_prompt.md").read_text().lower()
+        overlay = self.chola_overlay.lower()
+
+        # The general prompt asks for the verbatim band label...
+        self.assertIn("verbatim", rules_prompt)
+        self.assertIn("ncb gt or equal to 25%", rules_prompt)
+        # ...and explicitly defers to a carrier overlay that says otherwise.
+        self.assertIn("overlay", rules_prompt)
+        self.assertTrue(
+            "overlays override" in rules_prompt or "follow the overlay" in rules_prompt,
+            "pass3_rules_prompt.md must state that a carrier overlay overrides "
+            "the general 'copy the ncb label' instruction — otherwise it and "
+            "chola_pass3.md are unconditional opposites",
+        )
+        # The overlay states which instruction wins, and why.
+        self.assertIn("overrides the general pass 3 instruction", overlay)
+
+    def test_codegen_whitelist_forbids_invented_ncb_keys(self):
+        # The band is parsed by the transformer from ONE verbatim label. A
+        # codegen that invents ncb_start/ncb_end would bypass the parser and
+        # emit keys RuleConditions silently drops (extra='ignore'), so the
+        # whitelist must name and forbid them explicitly.
+        self.assertIn("Do NOT invent keys outside this list", self.codegen_prompt)
+        self.assertIn('no "ncb_start"/"ncb_end"', self.codegen_prompt)
+        self.assertIn("VERBATIM band label", self.codegen_prompt)
+        # The approved key list still carries plain "ncb" and nothing else.
+        approved = self.codegen_prompt.split("Do NOT invent keys outside")[0]
+        self.assertIn('"ncb"', approved)
+        self.assertNotIn("ncb_start", approved)
+        self.assertNotIn("ncb_end", approved)
+
+
+class RawConditionKeysSharedBlockTests(TestCase):
+    """The raw `conditions` key vocabulary is defined ONCE.
+
+    It used to be duplicated verbatim in two docstrings (raw_extraction.py and
+    extraction_passes.py) kept in sync by hand — the same manual-multi-site
+    pattern that lets changes half-apply silently elsewhere in this app. Pin
+    them equal so drift is impossible rather than merely discouraged.
+    """
+
+    def test_both_models_render_the_same_description(self):
+        from cins.schema.extraction_passes import RuleEntry
+        from cins.schema.raw_extraction import RawCommissionEntry
+
+        a = RawCommissionEntry.model_fields["conditions"].description
+        b = RuleEntry.model_fields["conditions"].description
+        self.assertEqual(a, b)
+
+    def test_shared_block_documents_the_verbatim_ncb_label(self):
+        from cins.prompts._shared import RAW_CONDITION_KEYS_BLOCK
+
+        self.assertIn("verbatim", RAW_CONDITION_KEYS_BLOCK)
+        self.assertIn("NCB GT OR Equal to 25%", RAW_CONDITION_KEYS_BLOCK)
+        # Legacy Yes/No must stay accepted — old grids still use it.
+        self.assertIn("Yes", RAW_CONDITION_KEYS_BLOCK)
+
 
 class Pass3ColumnIndexLiteralTests(TestCase):
     """Defect 1: a generated parser that filters blank spacer headers before

@@ -41,6 +41,15 @@ _BOTH = "both"
 _RANGE_KEY_TO_LABEL = {
     "gvw_start_range": "gvw",
     "gvw_end_range": "gvw",
+    # The NCB band folds to the SAME label as the ``ncb`` boolean, on purpose.
+    # _constrained_dims builds a set and the caller compares
+    # ``set(overlapping_dims) == all_dims``; a separate label would let a rule
+    # carrying both the bool and the band register two dims while
+    # overlapping_dims records one, silently breaking that equality. Sharing the
+    # label makes the duplicate append (once from single_fields, once from
+    # range_pairs) harmless.
+    "ncb_start_range": "ncb",
+    "ncb_end_range": "ncb",
     "cc_start_range": "cc",
     "cc_end_range": "cc",
     "seating_capacity_start_range": "seating_capacity",
@@ -256,6 +265,9 @@ class RuleOverlapChecker:
         range_pairs = [
             ("gvw_start_range", "gvw_end_range", "gvw"),
             ("cc_start_range", "cc_end_range", "cc"),
+            # Label shared with the ``ncb`` boolean in single_fields above — see
+            # _RANGE_KEY_TO_LABEL for why they must not diverge.
+            ("ncb_start_range", "ncb_end_range", "ncb"),
             (
                 "seating_capacity_start_range",
                 "seating_capacity_end_range",

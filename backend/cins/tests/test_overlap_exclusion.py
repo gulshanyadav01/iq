@@ -163,6 +163,8 @@ _ALL_KEYS = [
     "seating_capacity_end_range",
     "policies_count_start_range",
     "policies_count_end_range",
+    "ncb_start_range",
+    "ncb_end_range",
 ]
 
 
@@ -280,3 +282,72 @@ class NullConditionSemanticsTests(TestCase):
             vehicle_make_exclude=["TATA", "Maruti", "Mahindra"],
         )
         self.assertEqual(self._pair(a, c), [])
+
+
+class NcbBandOverlapTests(TestCase):
+    """The NCB band participates in overlap detection under the SAME dimension
+    label as the ``ncb`` boolean.
+
+    _constrained_dims folds every range key through _RANGE_KEY_TO_LABEL into a
+    SET, and the caller compares ``set(overlapping_dims) == all_dims``. If the
+    band used its own label, a rule carrying both the bool and the band would
+    register two dims while overlapping_dims recorded one, and the complete-
+    overlap verdict would silently stop firing.
+    """
+
+    def setUp(self):
+        self.c = RuleOverlapChecker()
+
+    def _pair(self, c1, c2):
+        self.c.overlaps = []
+        self.c._check_rule_pair("P", _rule("r1", c1, 10), _rule("r2", c2, 20))
+        return self.c.overlaps
+
+    def test_disjoint_bands_do_not_overlap(self):
+        # The base twin and its marked tier: adjacent, non-overlapping bands.
+        a = _dense(state=["MH"], ncb=False, ncb_start_range=0, ncb_end_range=24)
+        b = _dense(state=["MH"], ncb=True, ncb_start_range=25, ncb_end_range=100)
+        self.assertEqual(self._pair(a, b), [])
+
+    def test_identical_bands_are_a_complete_overlap(self):
+        # Two rules on the same tier with everything else equal are a genuine
+        # duplicate — the band must not accidentally make them look distinct.
+        a = _dense(state=["MH"], ncb=True, ncb_start_range=25, ncb_end_range=100)
+        overlaps = self._pair(a, dict(a))
+        self.assertEqual(len(overlaps), 1, overlaps)
+        self.assertEqual(overlaps[0].overlap_type, "complete_overlap")
+        self.assertEqual(overlaps[0].severity, OverlapSeverity.CRITICAL)
+
+    def test_partially_overlapping_bands_are_not_reported(self):
+        # A literal grid ladder "NCB 25%-45%" / "NCB 45%-70%" collides at 45.
+        # NCB is deliberately NOT in _DEDUPE_RANGES, so nothing silently bumps
+        # the boundary. This checker only ever emits COMPLETE overlaps (partials
+        # are priority-resolved by construction), so the pair is not a finding
+        # here — it is caught downstream by the export/priority ordering. What
+        # matters for this change is that the pair is not wrongly promoted to a
+        # complete overlap just because both rules carry ncb=True.
+        a = _dense(state=["MH"], ncb=True, ncb_start_range=25, ncb_end_range=45)
+        b = _dense(state=["MH"], ncb=True, ncb_start_range=45, ncb_end_range=70)
+        self.assertEqual(self._pair(a, b), [])
+
+    def test_band_distinguishes_tiers_the_bool_cannot(self):
+        # Both tiers derive ncb=True, so WITHOUT the band in the condition set
+        # these two would be judged identical and reported as a CRITICAL
+        # duplicate. The band is what keeps them apart.
+        a = _dense(state=["MH"], ncb=True, ncb_start_range=25, ncb_end_range=44)
+        b = _dense(state=["MH"], ncb=True, ncb_start_range=45, ncb_end_range=100)
+        self.assertEqual(self._pair(a, b), [])
+
+    def test_one_sided_band_is_not_judged_identical(self):
+        # A legacy cached blob carries the bool but no band. It must not be
+        # judged an exact duplicate of a freshly-extracted rule that has both —
+        # _is_range_constrained sees one side constrained and the other not.
+        legacy = _dense(state=["MH"], ncb=True)
+        fresh = _dense(state=["MH"], ncb=True, ncb_start_range=25, ncb_end_range=100)
+        self.assertEqual(self._pair(legacy, fresh), [])
+
+    def test_band_folds_to_the_ncb_dimension_label(self):
+        dims = RuleOverlapChecker._constrained_dims(
+            {"ncb": True, "ncb_start_range": 25, "ncb_end_range": 100}
+        )
+        self.assertEqual(dims, {"ncb"})

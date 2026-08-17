@@ -47,19 +47,31 @@ Each grid cell = one rule capturing ALL header dimensions simultaneously.
   "conditions": {
     "preferred": "Non Preferred",
     "fuel_type": "Non Petrol",
-    "ncb": "NCB#"
+    "ncb": "NCB GT OR Equal to 25%"
   },
   "commission_value": "0.23",
-  "rule_text": "Chhattisgarh, Non Preferred, Non Petrol, NCB#"
+  "rule_text": "Chhattisgarh, Non Preferred, Non Petrol, NCB GT OR Equal to 25%"
 }
 ```
+
+**`ncb` takes the band label VERBATIM** — copy the grid's wording exactly
+(`"NCB GT OR Equal to 25%"`, `"NCB 25%-45%"`, `"NCB UPTO 20%"`, `"NCB 45% AND ABOVE"`).
+Do not normalise it, do not convert it to Yes/No, do not compute a number. The
+transformer parses the label into a 0-100 percentage band. Legacy `"Yes"`/`"No"` values
+are still accepted where a grid genuinely has no percentage.
+
+**Carrier overlays override this rule.** If the overlay for the current carrier says not
+to set `conditions["ncb"]`, follow the overlay — it means the marker lives somewhere the
+transformer already reads (a section title or row-label suffix), and guessing a value
+would be worse than omitting one.
 
 Use `conditions` (snake_case keys, exact grid label values) for any dimension with no dedicated field.
 Use `other_conditions` only for free-text conditions that have no clean key-value structure (e.g., "tourist permit only"). Never for footnote definitions.
 
 **Footnotes define labels — they are NOT conditions.** Grid label `"Non Petrol"` + footnote `"*Non Petrol includes Diesel, CNG, LPG"` → `conditions = {"fuel_type": "Non Petrol"}`, footnote goes nowhere.
 
-Never invent fields. Wrong: `ncb_condition_text`. Right: `conditions: {"ncb": "NCB#"}`.
+Never invent fields. Wrong: `ncb_condition_text`, `ncb_start`, `ncb_end`.
+Right: `conditions: {"ncb": "NCB GT OR Equal to 25%"}` — one key, the label verbatim.
 
 ---
 

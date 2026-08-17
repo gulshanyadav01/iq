@@ -15,6 +15,7 @@ extraction accuracy. Passes are then merged into RawExtraction format.
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
+from cins.prompts._shared import RAW_CONDITION_KEYS_BLOCK
 from cins.schema.carriers import CarrierCode
 
 
@@ -441,18 +442,11 @@ class RuleEntry(BaseModel):
         "",
         description="(e.g., 'BR, CG', 'all states except TN')",
     )
+    # Description is shared with RawCommissionEntry.conditions in
+    # schema/raw_extraction.py — edit RAW_CONDITION_KEYS_BLOCK, not this.
     conditions: Dict[str, str] = Field(
         default_factory=dict,
-        description=(
-            "Key-value pairs for any grid dimension conditions that have no dedicated field. "
-            "Use for: fuel_type, ncb, cpa, zero_dep, vehicle_sub_class, vehicle_carrier, "
-            "number_of_wheels, school_bus_type, gvw, cc, seating_capacity, vehicle_age, "
-            "vehicle_make, vehicle_model, od_term, tp_term, deal_parameter, rto, etc. "
-            "Keys should be snake_case. Values should be the exact label from the grid header. "
-            "Do NOT put here: state (use state_text), booking mode (use channel_text), "
-            "policy type (use coverage_type_text), business type (use customer_type_text). "
-            'Examples: {"fuel_type": "Non Petrol", "ncb": "Yes", "vehicle_sub_class": "Private Car"}'
-        ),
+        description=RAW_CONDITION_KEYS_BLOCK,
     )
     other_conditions: str = Field(
         "",

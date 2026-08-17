@@ -72,7 +72,12 @@ conditions         (dict) - key-value for grid dimensions. Use ONLY these canoni
                      "number_of_wheels", "school_bus_type", "cc", "gvw", "seating_capacity",
                      "policies_count", "vehicle_age", "vehicle_make", "vehicle_model",
                      "od_term", "tp_term", "deal_parameter", "rto"
-                     Do NOT invent keys outside this list
+                     Do NOT invent keys outside this list (no "ncb_start"/"ncb_end" —
+                     "ncb" carries the VERBATIM band label, e.g.
+                     "NCB GT OR Equal to 25%" / "NCB 25%-45%" / "NCB UPTO 20%";
+                     the transformer parses it into a 0-100 band).
+                     A carrier overlay may forbid setting "ncb" at all — the
+                     overlay wins.
 other_conditions   (str) - free-text conditions that don't fit key-value structure
 qualifying_clauses (list[dict]) - structured machine-ingestable representation of
                      footnote / notes-table clauses (applied_on overrides,

@@ -34,6 +34,13 @@ class RuleConditions(BaseModel):
     code back is therefore NOT safe while new blobs are live: re-extract the
     affected Chola docs (or restore the prior cics_doc blob) after any rollback.
     Do not roll back code-only. See the deploy runbook.
+
+    NCB range (ncb_start_range / ncb_end_range) does NOT carry that hazard: the
+    derived ``ncb`` boolean is retained alongside it and still encodes the tier,
+    so old code reading a new blob drops the band but keeps True/False and the
+    two tiers stay distinguishable. The boolean is therefore NOT vestigial — it
+    is also a member of ``_DEDUPE_SCALAR_FIELDS`` in the transformer, where it is
+    what keeps a two-tier ladder's CC buckets in separate de-overlap groups.
     """
 
     vehicle_sub_class: Optional[List[str]] = Field(
@@ -81,7 +88,27 @@ class RuleConditions(BaseModel):
     zero_dep: Optional[str] = Field(None, description="Zero depreciation: yes, no")
     ncb: Optional[bool] = Field(
         None,
-        description="No Claim Bonus tier: true = the NCB > 25% grid, false = the base (NCB <= 25%) grid, null = no NCB dimension",
+        description=(
+            "No Claim Bonus tier flag, DERIVED from ncb_start_range/ncb_end_range: "
+            "true = a band constrained above the base floor, false = the base band, "
+            "null = no NCB dimension. Retained for backward compatibility with blobs "
+            "extracted before the numeric band existed — prefer the range fields."
+        ),
+    )
+    ncb_start_range: Optional[int] = Field(
+        None,
+        description=(
+            "Start of the No Claim Bonus percentage band, inclusive (0-100). "
+            "'NCB GT OR Equal to 25%' -> 25; its paired base grid -> 0. "
+            "Null = no NCB dimension on this rule."
+        ),
+    )
+    ncb_end_range: Optional[int] = Field(
+        None,
+        description=(
+            "End of the No Claim Bonus percentage band, inclusive (0-100). "
+            "'NCB GT OR Equal to 25%' -> 100; its paired base grid -> 24."
+        ),
     )
     cpa: Optional[str] = Field(None, description="CPA type: with-cpa, without-cpa")
     fuel_type: Optional[List[str]] = Field(

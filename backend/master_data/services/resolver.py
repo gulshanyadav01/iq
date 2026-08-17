@@ -8,6 +8,7 @@ calls, and avoids stale-cache problems if the seeder runs mid-worker-lifetime.
 from __future__ import annotations
 
 import difflib
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -29,6 +30,139 @@ from master_data.services.canonical import normalize_insurer_name
 # Export product bucket -> the RTOMaster zone column that marks the RTO active
 # for that product. An RTO is listed for a product only when its zone is non-null.
 _PRODUCT_ZONE_ATTR = {"CAR": "car_zone", "CV": "cv_zone", "TW": "tw_zone"}
+
+# "PrivateCar" -> "Private Car". Mirrors the split in
+# cins.validators.chola_product_hierarchy_validator, which needs it for the
+# same reason: the carrier masters spell some values without the spacing.
+_CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])")
+
+# A wheel count that rules out the two-wheeler bucket even when the name says
+# "wheeler" ("Four Wheeler" is a car, "Three Wheeler" is a commercial carrier).
+_NON_TW_WHEELS_RE = re.compile(r"(?<![a-z])(four|4w|4|three|3w|3)(?![a-z])")
+
+# Product-name tokens that identify each bucket.
+#
+# GROUP order is load-bearing: the first group with any matching token wins, and
+# the commercial group runs first because "Commercial Vehicle" carries neither a
+# car nor a wheeler token while a bus/goods name might carry both.
+#
+# Token order WITHIN a group is presentational only — one `any(...)` consumes
+# the whole tuple, so nothing shadows anything. The doubled-C spellings are
+# listed before the bare "gcv"/"pcv" purely to read as the same
+# specific-before-general ladder as RawToCICSTransformer._prod_token_segment,
+# which callers compare this table against.
+#
+# Chola writes its CV tables as GCCV / PCCV / MSV, and a product_name that
+# escaped canonicalization keeps that spelling; without these tokens the bucket
+# resolved to None and the export's state-derived RTO fill silently emitted an
+# empty cell even for rules carrying a perfectly good state.
+_BUCKET_TOKENS = (
+    (
+        "CV",
+        (
+            "commercial",
+            "cv",
+            "scv",
+            "lcv",
+            "hcv",
+            "gccv",
+            "pccv",
+            "gcv",
+            "pcv",
+            "msv",
+            "misc-d",
+            "misc d",
+            "miscd",
+            "goods",
+            "goods carrying",
+            "passenger carrying",
+            "bus",
+            "tractor",
+            "trailer",
+            "rickshaw",
+            # Three-wheelers are passenger/goods carriers, NOT two-wheelers.
+            # The CV group runs first, so these win before "wheeler" can claim
+            # them for TW -- which is what the bare-substring form used to do,
+            # filling their RTO cell with two-wheeler-active RTOs.
+            "three wheeler",
+            "3 wheeler",
+            "3w",
+        ),
+    ),
+    ("TW", ("two", "2w", "tw", "wheeler")),
+    # "four wheeler" is a Private Car spelling (PRODUCT_NAME_MAPPINGS agrees).
+    # Without it the TW four-guard skipped TW and nothing else matched, so a
+    # perfectly ordinary product name resolved to None.
+    ("CAR", ("car", "private", "taxi", "four wheeler", "4 wheeler", "4w")),
+)
+
+# One compiled alternation per bucket, built once at import. product_bucket runs
+# per rule on the export path (5k+ rules on a real Chola document), so building
+# ~18 rf-strings per call was pure waste.
+#
+# `(?:es|s)?` allows the plural — "es" first so "Buses" matches on bus+es rather
+# than failing on bus+e. The lookarounds keep it from reopening the substring
+# hole the word boundary closed.
+#
+# The boundary is `[a-z]`, NOT `\w`: `\w` counts digits, so "GCV3T" / "PCV3W" /
+# "TW1+1" -- ordinary carrier grid spellings the old substring form matched
+# fine -- resolved to None. A None bucket blanks the RTO cell, drops the
+# product out of the export's claimed-RTO pre-pass, and (since this change)
+# raises a validator finding. Digits must read as a boundary, not as a letter.
+_BUCKET_PATTERNS = tuple(
+    (
+        bucket,
+        re.compile(
+            "|".join(rf"(?<![a-z]){re.escape(t)}(?:es|s)?(?![a-z])" for t in tokens)
+        ),
+    )
+    for bucket, tokens in _BUCKET_TOKENS
+)
+
+
+def product_bucket(name) -> Optional[str]:
+    """Normalise an export product name to the {CAR,CV,TW} RTO bucket.
+
+    Returns ``None`` when the name matches nothing — callers treat that as
+    "cannot resolve RTOs for this product". Shared by the commission export
+    (which uses it to fill the RTO column from the rule's states) and
+    StateRtoPresenceValidator (which asserts that fill produces a non-empty
+    cell), so the two can never disagree about what a product name means.
+
+    Tokens are matched on WORD BOUNDARIES, not as bare substrings. The bare
+    substring form this replaced silently mis-bucketed any product whose name
+    merely contained a token — "Marine Cargo" read as CAR ("car" inside
+    "cargo"), "Business Package" as CV ("bus" inside "business") — and a wrong
+    bucket is worse than no bucket: it fills the export's RTO cell with another
+    product's active RTOs instead of leaving it blank.
+
+    Two normalizations keep that boundary from over-tightening, because a name
+    the boundary rejects now resolves to None, which both blanks the export's
+    RTO cell AND raises a HIGH in StateRtoPresenceValidator that blocks the
+    cache pin:
+
+    * **camelCase is split** — the carrier masters really do spell it
+      ``PrivateCar`` (chola_product_hierarchy.csv), which has no word boundary
+      before "Car" at all. Same cheap split the Chola hierarchy validator runs.
+    * **a plural suffix is allowed** — "Buses", "Cars", "PCVs" are the same
+      product as "Bus", "Car", "PCV". ``es`` is listed before ``s`` so "Buses"
+      matches on ``bus``+``es`` rather than failing.
+
+    Neither reopens the substring hole: "Cargo" still needs "car" to end the
+    word (a bare "car", "cars" or "cares" — "cargo" is none of those), and
+    "Business" still isn't "bus"/"buses".
+    """
+    n = _CAMEL_SPLIT_RE.sub(" ", name or "").lower()
+    for bucket, pattern in _BUCKET_PATTERNS:
+        if not pattern.search(n):
+            continue
+        # A wheel count other than two disqualifies TW even though the name
+        # carries "wheeler". Three-wheelers are already claimed by the CV group
+        # above; this is the backstop for spellings that group misses.
+        if bucket == "TW" and _NON_TW_WHEELS_RE.search(n):
+            continue
+        return bucket
+    return None
 
 
 @dataclass

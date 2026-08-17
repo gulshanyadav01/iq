@@ -25,17 +25,22 @@ On every PR and on pushes to `dev`/`master` (and `v*` tags):
   (`manage.py check`, `makemigrations --check`), an informational `check --deploy`, the full
   backend suite via **`python manage.py test`** (the runner all backend tests are written for —
   not pytest), and `pnpm --filter web test`.
-- **push-ecr** (pushes/tags only, after lint+test) — builds `linux/amd64` images (provenance +
-  SBOM) and pushes to ECR. **Prod is amd64-only.** Self-skips until AWS is wired
-  (`if: vars.AWS_REGION != ''`), so a repo without AWS config shows no red X.
+- **push-ecr** (pushes/tags only, after lint+test) — a `prep` job resolves the service
+  matrix and gates the pipeline (push or manual dispatch only, never PRs, **never
+  `master`** — prod images come from `v*` tags), then one parallel matrix leg per
+  service runs the repo's own **`scripts/build-and-push.sh`**: keyless OIDC → ECR,
+  per-service registry build cache, `linux/amd64` images. Self-skips until AWS is wired
+  (`if: vars.AWS_REGION != ''`), so a repo without AWS config shows no red X. You can
+  also build manually via **Actions → CI → Run workflow** with a service filter
+  (`all` / `backend` / `web`).
 
-Tag map:
+Tag map (produced by `build-and-push.sh`):
 
-| Trigger          | Image tags               |
-| ---------------- | ------------------------ |
-| push to `dev`    | `dev`, `dev-<sha>`       |
-| push to `master` | `master`, `master-<sha>` |
-| tag `vX.Y.Z`     | `X.Y.Z`, `latest`        |
+| Trigger            | Image tags                                             |
+| ------------------ | ------------------------------------------------------ |
+| push to `dev`      | `git-<sha>`, `dev`                                     |
+| push to `master`   | _(no images — lint/test only)_                         |
+| tag `vX.Y.Z`       | `git-<sha>`, `vX.Y.Z`, `X.Y.Z`, `X.Y`, `X`, `latest`   |
 
 ## One-time AWS setup (keyless OIDC → ECR)
 
@@ -55,11 +60,15 @@ ECR_BACKEND_REPO=insur-iq/backend ECR_WEB_REPO=insur-iq/web \
 
 It prints the role ARN and the exact commands to register:
 
-- Variables: `AWS_REGION`, `ECR_BACKEND_REPO`, `ECR_WEB_REPO`
+- Variable: `AWS_REGION`
 - Secret: `AWS_ROLE_ARN`
 
-If any is unset, the `push-ecr` preflight step fails fast with the fix command instead of an
-opaque OIDC error.
+(`setup-aws.sh` also sets `ECR_BACKEND_REPO`/`ECR_WEB_REPO` variables and pre-creates the
+repos; CI no longer reads those variables — repo names come from
+`scripts/build-and-push.sh` and each matrix leg ensures its own repo exists.)
+
+If either is unset, the `push-ecr` preflight step fails fast with the fix command instead
+of an opaque OIDC error.
 
 ## Branch protection (do this AFTER the first CI run)
 
@@ -105,6 +114,6 @@ not from `1.0.0`. Verify with `pnpm release --dry-run --ci`.
 ## Deploy (out of scope here)
 
 The pipeline gets a versioned `linux/amd64` image into ECR. Wiring the deploy target
-(ECS / EC2 / compose-pull) to pull `latest` (released) or `master` (staging) per environment is
+(ECS / EC2 / compose-pull) to pull `latest` (released) or `dev` (staging) per environment is
 a separate, unowned follow-up. `scripts/build-and-push.sh` (manual, multi-arch) stays for local
 builds and disaster recovery.

@@ -17,6 +17,7 @@ import re
 import hashlib
 from collections import OrderedDict
 from datetime import datetime
+from itertools import chain
 from typing import List, Dict, NamedTuple, Optional, Set, Tuple, Any
 
 from cins.schema.carriers import CARRIER_FULL_NAMES, normalize_carrier
@@ -342,12 +343,21 @@ PRODUCT_NAME_MAPPINGS = [
     ("passenger bus", "Commercial Vehicle"),
     ("mini bus", "Commercial Vehicle"),
     ("bus", "Commercial Vehicle"),
+    # Chola spells its CV tables with a doubled C (GCCV / PCCV) and abbreviates
+    # miscellaneous-D as MSV. These are disjoint from the bare "gcv"/"pcv"
+    # substrings below -- "gcv" does not occur inside "gccv" -- so without their
+    # own entries a product_name of "GCCV" fell through to the raw key and the
+    # export could not resolve its RTO bucket.
+    ("gccv", "Commercial Vehicle"),
+    ("pccv", "Commercial Vehicle"),
+    ("msv", "Commercial Vehicle"),
     ("gcv", "Commercial Vehicle"),
     ("goods carrying", "Commercial Vehicle"),
     ("pcv", "Commercial Vehicle"),
     ("passenger carrying", "Commercial Vehicle"),
     ("commercial vehicle", "Commercial Vehicle"),
     ("misc d", "Commercial Vehicle"),
+    ("misc-d", "Commercial Vehicle"),
     ("miscd", "Commercial Vehicle"),
     # Private Car variants
     ("four wheeler", "Private Car"),
@@ -525,6 +535,41 @@ STATE_NAME_MAPPINGS = {
     "ua": "uttarakhand",  # RTO data uses both UK and UA for Uttarakhand
     "wb": "west-bengal",
     "dn": "dadra-and-nagar-haveli-and-daman-and-diu",
+    # "Rest of <state>" zone columns. Chola's CV grids pair an explicit metro
+    # zone column with a "rest of" remainder column -- "TN-Chennai" beside
+    # "ROTN", "Mumbai/GA/Pune/Central MH" beside "ROM". Both halves name the
+    # same STATE; what separates them is the RTO set, and the export already
+    # models that: the metro rule carries an explicit conditions.rto (seeded
+    # from CarrierRTOZoneMaster) and the export's claimed-RTO complement
+    # subtracts those codes from the remainder rule's state-derived fill. This
+    # is the same shape as the already-shipped "UP" / "UP- East" pair.
+    #
+    # Deliberately NOT here: "ROK" (Rest of Karnataka, in the Two-Wheeler
+    # grid). Its sibling "KA (Bangalore)" resolves to plain karnataka with NO
+    # explicit rto, because chola_rto_zone.csv seeds no bangalore zone -- so
+    # mapping ROK would produce two identical karnataka rules at different
+    # rates rather than a complement. Seed the zone first.
+    "rom": "maharashtra",
+    "rotn": "tamil-nadu",
+}
+
+# Tokens naming a GROUP of states rather than one. Consulted by
+# _expand_state_names alongside STATE_NAME_MAPPINGS, with the same
+# boundary-matching rules, but contributing several canonical names at once.
+STATE_GROUP_MAPPINGS = {
+    # Chola's Two-Wheeler grid spells the north-east block "AS/ML/TR/ AR/NL" in
+    # one table and bare "NE" in the next table of the SAME sheet (same six
+    # NOP/SOD/ANNUAL/ACT tiers, same key column) -- so NE is that group's
+    # abbreviation, not a separate geography. Membership is taken verbatim from
+    # the spelled-out sibling: Chola's north-east block excludes Manipur and
+    # Mizoram, and this must not "helpfully" add them.
+    "ne": [
+        "assam",
+        "meghalaya",
+        "tripura",
+        "arunachal-pradesh",
+        "nagaland",
+    ],
 }
 
 
@@ -560,6 +605,10 @@ class RawToCICSTransformer:
         # failures and dragged the confidence score down for correct work.
         self.notices: List[str] = []
         self.errors: List[str] = []
+        # NCB bands recovered from a label this run, collected so the notice is
+        # emitted ONCE per document instead of once per rule (a large grid has
+        # hundreds of NCB rows and notices reach the UI unfiltered).
+        self._ncb_bands_parsed: List[Tuple[int, int]] = []
         self._trace_counter = 0
         # Short carrier code (e.g. "Chola") for carrier-scoped transforms.
         # Set per-document in transform(); empty until then.
@@ -634,6 +683,19 @@ class RawToCICSTransformer:
 
         # Generate source traces
         source_traces = self._generate_source_traces(raw.commission_entries, products)
+
+        # One aggregated NCB-band notice for the whole document. Emitted here
+        # rather than per rule in _transform_conditions: notices reach the DB and
+        # the detail page unfiltered, so a per-rule append floods the panel and
+        # buries the notices that matter. The distinct band list is the useful
+        # part — it shows at a glance which tiers a document produced.
+        if self._ncb_bands_parsed:
+            distinct = sorted(set(self._ncb_bands_parsed))
+            bands = ", ".join(f"{lo}-{hi}" for lo, hi in distinct)
+            self.notices.append(
+                f"NCB band parsed from label on {len(self._ncb_bands_parsed)} "
+                f"rule(s); bands: {bands}"
+            )
 
         # Build change reference if inheritance detected
         change_ref = self._transform_change_reference(raw)
@@ -1696,6 +1758,8 @@ class RawToCICSTransformer:
                 conditions.booking_mode,
                 conditions.zero_dep is not None,
                 conditions.ncb is not None,
+                conditions.ncb_start_range is not None,
+                conditions.ncb_end_range is not None,
                 conditions.cpa is not None,
                 conditions.fuel_type,
                 conditions.vehicle_age is not None,
@@ -1737,15 +1801,56 @@ class RawToCICSTransformer:
             "vehicle_sub_class",
         )
 
+        # Extract domain-specific fields from entry.conditions dict. Read before
+        # the state block below, which needs it for the conditions fallback.
+        entry_conditions = getattr(entry, "conditions", None) or {}
+
         # Normalize states
         location_text = entry.state_text or getattr(raw, "global_state_text", None)
+        if not location_text:
+            # Fallback: recover a state the codegen filed under the conditions
+            # dict instead of the top-level state_text field. `conditions` is a
+            # free-form Dict[str, str], so such a key survives on the entry and
+            # was simply never read -- the blank State (and, downstream, blank
+            # RTO) column on Chola's Two-Wheeler and commercial rows. That grid
+            # carries its state in a per-row leading cell ("State (RTO) > AP")
+            # rather than a column header, which is exactly where a generated
+            # parser routes it into the row's base conditions.
+            #
+            # Mirrors the RTO alias list further down: accept the spellings a
+            # generated parser plausibly picks, not just one.
+            for key in ("state", "states", "state_group", "region"):
+                candidate = entry_conditions.get(key)
+                # Must be a string: `conditions` is codegen output, and a
+                # plural alias ("states") is exactly the shape a generated
+                # parser emits as a list. _expand_state_names calls .lower()
+                # on this, so a non-string would crash the whole transform.
+                if isinstance(candidate, (list, tuple)):
+                    candidate = ", ".join(str(v) for v in candidate if v)
+                elif candidate is not None and not isinstance(candidate, str):
+                    candidate = str(candidate)
+                if candidate:
+                    location_text = candidate
+                    # Warn ONCE per alias key, not once per rule: this fires on
+                    # every row of the grid it targets, and warnings are
+                    # persisted into the document's validation_notes.
+                    warning = (
+                        f"State recovered from conditions['{key}']: the "
+                        f"extraction should emit it as the top-level "
+                        f"state_text field"
+                    )
+                    if warning not in self.warnings:
+                        self.warnings.append(warning)
+                    break
         state = self._expand_state_names(location_text, master_data)
 
         # Extract/expand RTO codes from location_text
         rto = self._expand_rto_codes(location_text, master_data)
 
-        # Extract domain-specific fields from entry.conditions dict
-        entry_conditions = getattr(entry, "conditions", None) or {}
+        # Built once and threaded through the probe-based recoveries below.
+        # _segment_probe re-joins and re-lowercases four fields on every call,
+        # and this function consults it more than once per entry.
+        probe = self._segment_probe(entry_conditions, entry)
 
         # Fuel type — expand grid-group tokens to their component fuels.
         fuel_type = self._normalize_list_field(
@@ -1783,7 +1888,7 @@ class RawToCICSTransformer:
         # this also accepts a bare "renewal" word (the marker survives without
         # brackets in some section labels).
         if not business_type:
-            if "renewal" in self._segment_probe(entry_conditions, entry):
+            if "renewal" in probe:
                 business_type = ["renewal"]
 
         # Number of wheels
@@ -1834,19 +1939,35 @@ class RawToCICSTransformer:
             if cond_vehicle_sub_class:
                 vehicle_sub_class = cond_vehicle_sub_class
 
-        # NCB (boolean)
-        ncb = self._parse_bool_field(entry_conditions.get("ncb"))
-        # NCB > 25% parallel-table marker. Chola PC ships a base grid and a
-        # "… - NCB GT 25%" grid at higher rates; both land ncb=None and would
-        # collide on an identical condition key. Mark the NCB>25% rows True (the
-        # tier the client's prod system encodes as NCB=Yes); _pair_ncb_tiers
-        # then flips their base twins to False. Follows the [Electric] probe
-        # pattern; the marker survives in source_section / rule_text on codegen.
-        if ncb is None and self._NCB_GT25_RE.search(
-            self._segment_probe(entry_conditions, entry)
-        ):
-            ncb = True
-            self.notices.append("NCB tier: ncb=True from 'NCB > 25%' marker")
+        # NCB percentage band (+ the derived legacy boolean).
+        #
+        # Chola PC ships a base grid and a "… - NCB GT 25%" grid at higher rates;
+        # left alone both land with no NCB dimension and collide on an identical
+        # condition key. Parse the band from the raw value first, then from the
+        # marker in source_section / rule_text (which is where it survives after
+        # codegen). _pair_ncb_tiers then gives the base twin the complement.
+        #
+        # Absent NCB stays (None, None) — deliberately NOT the open (0, 100) used
+        # by gvw/cc/seating. _is_range_constrained and _has_conditions both key
+        # off null-ness, so an open sentinel would make ncb a constrained
+        # dimension on every rule of every document and shift the overlap
+        # checker's complete-overlap verdict globally.
+        raw_ncb = entry_conditions.get("ncb")
+        ncb = self._parse_bool_field(raw_ncb)
+        ncb_start = ncb_end = None
+        parsed = self._parse_ncb_range(raw_ncb) or self._parse_ncb_range(probe)
+        if parsed is not None:
+            ncb_start, ncb_end = parsed
+            self._ncb_bands_parsed.append((ncb_start, ncb_end))
+        elif ncb is True:
+            # Legacy raw "Yes" with no numeric label — reconstruct the historic
+            # split so pre-band behaviour is preserved bit-for-bit.
+            ncb_start = self._NCB_LEGACY_THRESHOLD + 1
+            ncb_end = self._NCB_MAX
+        elif ncb is False:
+            ncb_start = self._NCB_MIN
+            ncb_end = self._NCB_LEGACY_THRESHOLD
+        ncb = self._ncb_bool_from_range(ncb_start, ncb_end, fallback=ncb)
 
         # CPA
         cpa = self._normalize_single_field(
@@ -2152,6 +2273,8 @@ class RawToCICSTransformer:
             booking_mode=booking_mode,
             zero_dep=zero_dep,
             ncb=ncb,
+            ncb_start_range=ncb_start,
+            ncb_end_range=ncb_end,
             cpa=cpa,
             fuel_type=fuel_type,
             vehicle_age=vehicle_age,
@@ -2487,6 +2610,15 @@ class RawToCICSTransformer:
         "zero_dep",
         "cpa",
         "ncb",
+        # The NCB band joins the GROUP KEY only — deliberately not
+        # _DEDUPE_RANGES, which would let the boundary walk rewrite bands parsed
+        # verbatim from the grid. Without them here, a THREE-tier ladder breaks:
+        # bands 25-45 and 45+ both derive ncb=True, so the bool alone cannot
+        # separate them, they share a group key, and the CC boundary-bump walk
+        # fuses two distinct NCB bands' ladders. (A two-tier ladder is saved by
+        # the bool being True vs False — which is why it is still here.)
+        "ncb_start_range",
+        "ncb_end_range",
         "vehicle_age",
         "od_term",
         "tp_term",
@@ -2671,19 +2803,170 @@ class RawToCICSTransformer:
     # legit make/model that merely ends in "…brothers" is NOT matched.
     _SENTINEL_MAKE_MODEL_RE = re.compile(r"\ball other\b|\bothers?$", re.IGNORECASE)
 
-    # Chola PC "NCB > 25%" parallel-table marker. Matches the table title
-    # ("... - NCB GT 25%") and the row-label suffix ("[ NCB GT 25%]") in the
-    # lower-cased _segment_probe blob. Encoded into the ncb boolean as True;
-    # its paired base twin becomes False (see _pair_ncb_tiers).
-    # Tolerates the label variants across grid months: Apr'26 ships
-    # "[ NCB GT 25%]" while May'26 ships "[ NCB GT OR Equal to 25%]" — the
-    # "OR Equal to" infix between GT and 25 broke the old regex, so May PC rows
-    # stayed ncb=None and base/>25% tiers collapsed onto one key. Also accept
-    # >=, ≥, GTE, and "greater than or equal to".
-    _NCB_GT25_RE = re.compile(
-        r"ncb\s*(?:>=|≥|g\.?t\.?e|(?:gt|>|greater\s*than)(?:\s*or\s*equal\s*to)?)\s*25",
-        re.IGNORECASE,
-    )
+    # ==================== NCB PERCENTAGE BAND ====================
+    #
+    # Chola PC grids ship parallel table sets split on a No Claim Bonus
+    # threshold: a base set and a "… - NCB GT 25%" set at higher rates. The
+    # marker survives into source_section / rule_text on codegen, so it is
+    # recovered from the lower-cased _segment_probe blob.
+    #
+    # This replaces the old _NCB_GT25_RE, whose 25 was hardcoded: any grid split
+    # at another threshold (20/35/45/50%) left BOTH tiers ncb=None, so they
+    # collided on an identical condition key and collapsed onto one rate.
+    #
+    # Parsed into an inclusive (start, end) band, clamped to 0-100:
+    #
+    #   form                            example                    band
+    #   ------------------------------  -------------------------  ----------
+    #   prefix GTE  >= ≥ GTE            "NCB GT OR Equal to 25%"   (25, 100)
+    #   prefix GT   >  GT above over    "NCB GT 25%"               (26, 100)
+    #   prefix LTE  <= ≤ LTE UPTO max   "NCB UPTO 20%"             (0,  20)
+    #   prefix LT   <  LT below under   "NCB LESS THAN 20%"        (0,  19)
+    #   postfix ABOVE                   "NCB 25% AND ABOVE"        (25, 100)
+    #   postfix BELOW                   "NCB 20% OR LESS"          (0,  20)
+    #   band                            "NCB 25%-45%"              (25, 45)
+    #   bare                            "NCB 20%"                  (20, 20)
+    #
+    # The GT/GTE distinction is why _parse_range_field is NOT reused: it cannot
+    # tell ">" from ">=", and for NCB that one-off decides the band AND the
+    # complement handed to the base twin in _pair_ncb_tiers.
+    #
+    # Two guards, both load-bearing (this parser runs against the probe of EVERY
+    # rule of EVERY carrier, not just Chola):
+    #   1. The bare arm requires a trailing "%" — "NCB Yes 2024" cannot stamp a
+    #      band.
+    #   2. The bare arm declines (returns None) when an alphabetic word follows
+    #      the percentage, so an unknown future phrasing becomes a VISIBLE MISS
+    #      instead of the silently-wrong point band (25, 25). Learned from
+    #      _parse_range_field, whose above-regex needs the qualifier BEFORE the
+    #      number: "ABOVE 6" parses, "6 AND ABOVE" falls to a sentinel. NCB's
+    #      version of that bug would be worse — a point band is well-formed, in
+    #      range, and passes every validator while matching almost no policy.
+    _NCB_MIN = 0
+    _NCB_MAX = 100
+    # The historic Chola split. Only used to reconstruct a band for a legacy raw
+    # ``"ncb": "Yes"``/``"No"`` that carries no numeric label; never used to
+    # decide whether a parsed band is the high tier.
+    _NCB_LEGACY_THRESHOLD = 25
+
+    # Anchor: the literal token, then optional separator punctuation.
+    _NCB_ANCHOR = r"ncb\b[\s:\-–—]*"
+    # % optional once an operator has anchored the match; mandatory for the bare
+    # arm (see guard 1 above).
+    _NCB_NUM = r"(\d{1,3})\s*%?"
+    _NCB_NUM_PCT = r"(\d{1,3})\s*%"
+
+    # Ordered — FIRST MATCH WINS. Digit-first arms (band, postfix) precede the
+    # bare arm; GTE precedes GT so "GT OR EQUAL TO 25" is not read as strict GT.
+    _NCB_ARMS = [
+        # band: "25%-45%", "25 to 45"
+        (
+            rf"{_NCB_ANCHOR}{_NCB_NUM}\s*(?:-|–|—|to)\s*{_NCB_NUM}",
+            lambda a, b: (min(a, b), max(a, b)),
+        ),
+        # postfix ABOVE: "25% AND ABOVE", "25% & above", "25%+", "25% OR MORE"
+        (
+            rf"{_NCB_ANCHOR}{_NCB_NUM}\s*(?:\+|(?:and|or|&)?\s*"
+            r"(?:above|over|more|plus|upward|upwards|onward|onwards|beyond))",
+            lambda a: (a, None),  # None -> _NCB_MAX
+        ),
+        # postfix BELOW: "20% AND BELOW", "20% OR LESS", "20% AND UNDER"
+        (
+            rf"{_NCB_ANCHOR}{_NCB_NUM}\s*(?:and|or|&)?\s*"
+            r"(?:below|less|under|lower)",
+            lambda a: (None, a),  # None -> _NCB_MIN
+        ),
+        # prefix GTE
+        (
+            rf"{_NCB_ANCHOR}(?:>=|≥|g\.?t\.?e\.?|(?:gt|>|greater\s*than)"
+            rf"\s*or\s*equal\s*to|greater\s*than\s*or\s*equal\s*to|"
+            rf"not\s*less\s*than|at\s*least|minimum\s*(?:of)?)\s*{_NCB_NUM}",
+            lambda a: (a, None),
+        ),
+        # prefix GT (strict)
+        (
+            rf"{_NCB_ANCHOR}(?:>|gt|above|over|greater\s*than|more\s*than|"
+            rf"exceeding)\s*{_NCB_NUM}",
+            lambda a: (a + 1, None),
+        ),
+        # prefix LTE
+        (
+            rf"{_NCB_ANCHOR}(?:<=|≤|l\.?t\.?e\.?|upto|up\s*to|"
+            rf"less\s*than\s*or\s*equal\s*to|not\s*more\s*than|at\s*most|"
+            rf"max(?:imum)?\s*(?:of)?)\s*{_NCB_NUM}",
+            lambda a: (None, a),
+        ),
+        # prefix LT (strict)
+        (
+            rf"{_NCB_ANCHOR}(?:<|lt|below|under|less\s*than)\s*{_NCB_NUM}",
+            lambda a: (None, a - 1),
+        ),
+        # bare: mandatory %, and no alphabetic word may follow (guard 2).
+        # The lookahead skips whitespace first — a trailing " SOMETHING" must
+        # decline, not just a directly-adjacent letter.
+        (
+            rf"{_NCB_ANCHOR}{_NCB_NUM_PCT}(?!\s*[^\W\d_])",
+            lambda a: (a, a),
+        ),
+    ]
+    _NCB_ARMS_COMPILED = [
+        (re.compile(pattern, re.IGNORECASE), band_fn) for pattern, band_fn in _NCB_ARMS
+    ]
+
+    @classmethod
+    def _parse_ncb_range(cls, text: Any) -> Optional[Tuple[int, int]]:
+        """Parse an NCB percentage expression into an inclusive (start, end)
+        band clamped to 0-100. Returns None when no NCB expression is present.
+
+        See the operator table above _NCB_ARMS for the full mapping. Returns
+        None rather than guessing — a miss is recoverable, a wrong band is not.
+        """
+        if text is None:
+            return None
+        s = str(text).replace("_", " ")
+        if not s.strip():
+            return None
+        for pattern, band_fn in cls._NCB_ARMS_COMPILED:
+            match = pattern.search(s)
+            if match is None:
+                continue
+            nums = [int(g) for g in match.groups() if g is not None]
+            lo, hi = band_fn(*nums)
+            lo = cls._NCB_MIN if lo is None else lo
+            hi = cls._NCB_MAX if hi is None else hi
+            lo = max(cls._NCB_MIN, min(cls._NCB_MAX, lo))
+            hi = max(cls._NCB_MIN, min(cls._NCB_MAX, hi))
+            if lo > hi:
+                lo, hi = hi, lo
+            return lo, hi
+        return None
+
+    @classmethod
+    def _ncb_bool_from_range(
+        cls,
+        start: Optional[int],
+        end: Optional[int],
+        fallback: Optional[bool] = None,
+    ) -> Optional[bool]:
+        """Derive the legacy ``ncb`` boolean from the numeric band.
+
+        ``start > 0`` means "constrained ABOVE THE BASE FLOOR" — it does NOT
+        mean "above 25". The 25 in _NCB_LEGACY_THRESHOLD reconstructs a band for
+        a legacy label; it plays no part in this derivation, so the two cannot
+        drift apart when a carrier ships a different threshold.
+
+            (25, 100) -> True    a band above the base floor
+            (0,   24) -> False   the base band
+            (0,  100) -> fallback   unconstrained: not a tier at all
+            (None, None) -> fallback   no NCB dimension
+        """
+        if start is None and end is None:
+            return fallback
+        if (start or cls._NCB_MIN) > cls._NCB_MIN:
+            return True
+        if end is not None and end < cls._NCB_MAX:
+            return False
+        return fallback
 
     @classmethod
     def _is_make_model_sentinel(cls, rule: CommissionRule) -> bool:
@@ -2768,14 +3051,15 @@ class RawToCICSTransformer:
         return json.dumps(cond_dump, sort_keys=True, default=str)
 
     def _ncb_tier_pair_key(self, rule: CommissionRule) -> str:
-        """Conditions-only key with ``ncb`` excluded, for NCB-tier twin pairing.
-        Outcome is deliberately excluded — the twins differ only in rate, which
-        is the entire reason they must be distinguished (an NCB>25% rule and its
-        base twin share every condition except ncb)."""
+        """Conditions-only key with every NCB field excluded, for NCB-tier twin
+        pairing. Outcome is deliberately excluded — the twins differ only in
+        rate, which is the entire reason they must be distinguished (a marked
+        NCB rule and its base twin share every condition except NCB)."""
         cond_dump: Dict[str, Any] = {}
         if rule.conditions is not None:
             cond_dump = rule.conditions.model_dump(exclude_none=False)
-            cond_dump.pop("ncb", None)
+            for field in ("ncb", "ncb_start_range", "ncb_end_range"):
+                cond_dump.pop(field, None)
             for k, v in list(cond_dump.items()):
                 if isinstance(v, list):
                     cond_dump[k] = sorted(v, key=str)
@@ -2856,35 +3140,79 @@ class RawToCICSTransformer:
             )
 
     def _pair_ncb_tiers(self, rules: List[CommissionRule]) -> None:
-        """Flip the ncb=None base twin of an NCB>25% (ncb=True) rule to False.
+        """Give the unbanded base twin of a marked NCB rule the complement band.
 
-        Chola PC grids ship two parallel table sets: a base set and a
-        '… - NCB GT 25%' set at higher rates. The NCB>25% rows are marked
-        ncb=True in _transform_conditions; their base twin lands ncb=None. Both
-        would collide on an identical condition key and become ambiguous. Group
-        by a conditions-only key with ncb excluded; in any group containing a
-        True, the None members are the base twins → set them False. Groups with
-        no marked member keep None (no NCB dimension).
+        Chola PC grids ship parallel table sets: a base set and one or more
+        marked sets ('… - NCB GT 25%') at higher rates. The marked rows get a
+        band in _transform_conditions; their base twin has none. Both would
+        collide on an identical condition key and become ambiguous. Group by a
+        conditions-only key with every NCB field excluded; in any group holding
+        a marked member, the unbanded members are the base twins.
+
+            group (same conditions except NCB)
+            ├── marked   NCB >= 25%  ->  (25, 100)   ncb=True   ─┐
+            ├── marked   NCB >= 45%  ->  (45, 100)   ncb=True    │ min start = 25
+            └── unbanded (base grid) ->  (0,  24)    ncb=False  ─┘ base_end = 24
+
+        base_end is min(marked starts) - 1, NOT max: the base grid is everything
+        below the LOWEST marked tier, so a three-tier ladder complements to
+        (0, 24) here, not (0, 44).
 
         Scoped by condition collision, NOT by product: a marked Package rule
-        must not stamp ncb=False on unrelated SOD rules with a different
-        condition key (that would under-match in prod). Runs before dedupe so
-        the True/False ladders normalize their CC boundaries independently."""
+        must not stamp a band on unrelated SOD rules with a different condition
+        key (that would under-match in prod). Runs before dedupe so the tier
+        ladders normalize their CC boundaries independently."""
         groups: Dict[str, List[CommissionRule]] = {}
         for rule in rules:
             groups.setdefault(self._ncb_tier_pair_key(rule), []).append(rule)
+
+        n_paired = 0
+        n_backfilled = 0
+        base_ends: Set[int] = set()
         for group in groups.values():
-            if not any(
-                r.conditions is not None and r.conditions.ncb is True for r in group
-            ):
-                continue
+            # A rule is "marked" if it carries a band above the base floor OR,
+            # for a rule that predates the band (a legacy blob, or a bool set
+            # directly), if ncb is True. The legacy case has no start of its
+            # own, so it contributes the historic threshold + 1.
+            marked_starts = []
             for r in group:
-                if r.conditions is not None and r.conditions.ncb is None:
-                    r.conditions.ncb = False
-                    self.notices.append(
-                        "NCB tier: base twin ncb None -> False "
-                        "(paired with an NCB>25% rule)"
-                    )
+                cond = r.conditions
+                if cond is None:
+                    continue
+                if (cond.ncb_start_range or self._NCB_MIN) > self._NCB_MIN:
+                    marked_starts.append(cond.ncb_start_range)
+                elif cond.ncb is True and cond.ncb_start_range is None:
+                    marked_starts.append(self._NCB_LEGACY_THRESHOLD + 1)
+            if not marked_starts:
+                continue
+            base_end = min(marked_starts) - 1
+
+            for r in group:
+                cond = r.conditions
+                if cond is None:
+                    continue
+                if cond.ncb_start_range is not None or cond.ncb_end_range is not None:
+                    continue
+                if cond.ncb is True:
+                    # Marked but band-less (legacy bool): backfill its implied
+                    # band rather than mistaking it for a base twin.
+                    cond.ncb_start_range = self._NCB_LEGACY_THRESHOLD + 1
+                    cond.ncb_end_range = self._NCB_MAX
+                    n_backfilled += 1
+                    continue
+                cond.ncb_start_range = self._NCB_MIN
+                cond.ncb_end_range = base_end
+                cond.ncb = False
+                n_paired += 1
+                base_ends.add(base_end)
+        if n_paired:
+            # One aggregated line, not one per rule: notices flow unfiltered to
+            # the DB and the detail page, and a large grid has hundreds of twins.
+            bands = ", ".join(f"0-{e}" for e in sorted(base_ends))
+            self.notices.append(
+                f"NCB tier: {n_paired} base twin(s) given the complement band "
+                f"{bands} (ncb=False), paired with a marked NCB rule"
+            )
 
     def _bifurcate_make_buckets(
         self, rules: List[CommissionRule]
@@ -3893,15 +4221,23 @@ class RawToCICSTransformer:
                         if names:
                             discovered_names.extend(names)
 
-        # Standard state name/abbreviation mapping
-        for name, canonical in STATE_NAME_MAPPINGS.items():
+        # Standard state name/abbreviation mapping, then the multi-state group
+        # tokens ("NE" -> the north-east block). One loop over both tables: the
+        # boundary rule is the load-bearing part and must not drift between
+        # them. A short key is boundary-matched so it cannot fire inside a word
+        # -- "NE" must not match the "NEW(100-500 NOP)" tier label sitting in
+        # the very next cell of the grid that token comes from.
+        for name, canonicals in chain(
+            ((k, [v]) for k, v in STATE_NAME_MAPPINGS.items()),
+            STATE_GROUP_MAPPINGS.items(),
+        ):
             if len(name) <= 3:
                 pattern = rf"(?:^|[\s,_\-\/]){re.escape(name)}(?=$|[\s,_\-\/])"
             else:
                 pattern = rf"{re.escape(name)}"
 
             if re.search(pattern, text, re.IGNORECASE):
-                discovered_names.append(canonical)
+                discovered_names.extend(canonicals)
 
         # Chola UW-zone label -> state expansion (scoped query built once in
         # transform()). Only at _top: recursive calls process master-data
