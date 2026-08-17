@@ -101,13 +101,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
+import { classifyDocumentKind } from '~/composables/useDocumentKind'
 
 interface PageDims {
   cssWidth: number
   cssHeight: number
 }
 
-const props = defineProps<{ url: string | null; filename: string }>()
+const props = defineProps<{ url: string | null; filename: string; contentType?: string | null }>()
 
 const containerRef = ref<HTMLElement | null>(null)
 const canvasEls = ref<(HTMLCanvasElement | null)[]>([])
@@ -124,12 +125,7 @@ let resizeTimer: ReturnType<typeof setTimeout> | null = null
 // stale so a slow load for a closed/previous document can't paint over a newer one.
 let loadToken = 0
 
-const kind = computed<'pdf' | 'image' | 'other'>(() => {
-  const name = props.filename.toLowerCase()
-  if (name.endsWith('.pdf')) return 'pdf'
-  if (/\.(png|jpe?g|webp|gif|bmp|svg)$/.test(name)) return 'image'
-  return 'other'
-})
+const kind = computed(() => classifyDocumentKind(props.filename, props.contentType))
 
 // Show the skeleton while a PDF url is set but pages haven't rendered yet (and no error).
 const showSkeleton = computed(
