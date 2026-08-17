@@ -191,7 +191,7 @@
        <div class="flex h-full">
         <!-- Left: source document -->
         <div class="w-3/5 h-full border-r border-gray-200 dark:border-gray-700">
-          <DocumentPreview :url="documentUrl" :filename="selectedRequest?.original_filename ?? ''" />
+          <DocumentPreview :url="documentUrl" :filename="selectedRequest?.original_filename ?? ''" :content-type="selectedRequest?.content_type ?? null" />
         </div>
 
         <!-- Right: extracted response -->
@@ -346,6 +346,7 @@ interface ExtractionRequest {
   id: string
   status: 'initiated' | 'processing' | 'completed' | 'failed'
   original_filename: string
+  content_type: string | null
   metadata: Record<string, unknown> | null
   result: Record<string, unknown> | null
   error: string | null
