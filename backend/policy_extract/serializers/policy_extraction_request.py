@@ -52,6 +52,10 @@ class PolicyExtractionRequestLinkCreateSerializer(serializers.Serializer):
 
 
 class PolicyExtractionRequestSerializer(serializers.ModelSerializer):
+    # Best-guess MIME type so the frontend can pick a preview renderer even for
+    # extensionless filenames (resolved from name + metadata only — no storage IO).
+    content_type = serializers.SerializerMethodField()
+
     class Meta:
         model = PolicyExtractionRequest
         fields = [
@@ -59,6 +63,7 @@ class PolicyExtractionRequestSerializer(serializers.ModelSerializer):
             "policy_extraction_id",
             "status",
             "original_filename",
+            "content_type",
             "source_url",
             "metadata",
             "result",
@@ -72,6 +77,7 @@ class PolicyExtractionRequestSerializer(serializers.ModelSerializer):
             "policy_extraction_id",
             "status",
             "original_filename",
+            "content_type",
             "source_url",
             "result",
             "error",
@@ -79,6 +85,11 @@ class PolicyExtractionRequestSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+    def get_content_type(self, obj):
+        from policy_extract.services.content_type import resolve_content_type
+
+        return resolve_content_type(obj)
 
 
 class PolicyExtractResultSerializer(serializers.Serializer):

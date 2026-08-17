@@ -66,17 +66,83 @@ class DocumentActionTests(APITestCase):
         self.assertEqual(res["X-Content-Type-Options"], "nosniff")
 
     def test_unknown_extension_falls_back_to_octet_stream(self):
-        # B4: mimetypes can't guess the type → application/octet-stream (and,
-        # being non-preview-safe, it downloads).
+        # B4: mimetypes can't guess the type and the bytes match no known
+        # signature → application/octet-stream (and, being non-preview-safe, it
+        # downloads).
         self.req.original_filename = "policy.weirdext"
         self.req.save(update_fields=["original_filename"])
-        storage = self._mock_storage(exists=True)
+        storage = self._mock_storage(exists=True, contents=b"not a known format")
         with patch("django.core.files.storage.default_storage", storage):
             res = self.client.get(self._url(self.req.id))
 
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res["Content-Type"], "application/octet-stream")
         self.assertTrue(res["Content-Disposition"].startswith("attachment"))
+
+    def test_extensionless_filename_uses_metadata_file_type(self):
+        # file_link uploads are named after the bare policy id (no extension);
+        # the MIME hint captured at submission serves them inline as a PDF.
+        self.req.original_filename = "PBP10356218"
+        self.req.metadata = {"file_type": "application/pdf"}
+        self.req.save(update_fields=["original_filename", "metadata"])
+        storage = self._mock_storage(exists=True, contents=b"%PDF-1.4 body")
+        with patch("django.core.files.storage.default_storage", storage):
+            res = self.client.get(self._url(self.req.id))
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res["Content-Type"], "application/pdf")
+        self.assertEqual(res["Content-Disposition"], 'inline; filename="PBP10356218"')
+        self.assertEqual(b"".join(res.streaming_content), b"%PDF-1.4 body")
+
+    def test_extensionless_filename_sniffs_pdf_magic_bytes(self):
+        # No extension and no metadata hint → the %PDF- signature is sniffed so
+        # the file still previews inline instead of downloading.
+        self.req.original_filename = "PBP10356432"
+        self.req.metadata = None
+        self.req.save(update_fields=["original_filename", "metadata"])
+        storage = self._mock_storage(exists=True, contents=b"%PDF-1.4 body")
+        with patch("django.core.files.storage.default_storage", storage):
+            res = self.client.get(self._url(self.req.id))
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res["Content-Type"], "application/pdf")
+        self.assertTrue(res["Content-Disposition"].startswith("inline"))
+
+    def test_dangerous_metadata_file_type_is_forced_to_download(self):
+        # metadata.file_type is user-controlled free text from the file_link
+        # submission. Even when it resolves the content type, a non-preview-safe
+        # value (e.g. HTML that could run script same-origin) must still download.
+        self.req.original_filename = "PBP10356218"
+        self.req.metadata = {"file_type": "text/html"}
+        self.req.save(update_fields=["original_filename", "metadata"])
+        storage = self._mock_storage(exists=True, contents=b"<script>alert(1)</script>")
+        with patch("django.core.files.storage.default_storage", storage):
+            res = self.client.get(self._url(self.req.id))
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res["Content-Type"], "text/html")
+        self.assertTrue(res["Content-Disposition"].startswith("attachment"))
+        self.assertEqual(res["X-Content-Type-Options"], "nosniff")
+
+    def test_head_is_sniffed_then_stream_is_rewound(self):
+        # The view reads the leading bytes to sniff the type, then must seek(0)
+        # so the response streams the whole file from the start — not a body
+        # truncated past the consumed header.
+        pdf_bytes = b"%PDF-1.4 full body content here"
+        fake_file = MagicMock(wraps=io.BytesIO(pdf_bytes))
+        self.req.original_filename = "PBP10356432"
+        self.req.metadata = None
+        self.req.save(update_fields=["original_filename", "metadata"])
+        storage = MagicMock()
+        storage.exists.return_value = True
+        storage.open.return_value = fake_file
+        with patch("django.core.files.storage.default_storage", storage):
+            res = self.client.get(self._url(self.req.id))
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res["Content-Type"], "application/pdf")
+        fake_file.seek.assert_any_call(0)
+        self.assertEqual(b"".join(res.streaming_content), pdf_bytes)
 
     def test_404_when_source_url_missing(self):
         # B1: link-based / never-uploaded request has no source_url → 404, and we
