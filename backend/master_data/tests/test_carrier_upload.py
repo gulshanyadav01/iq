@@ -10,7 +10,7 @@ import io
 
 import openpyxl
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APIClient
 
@@ -18,6 +18,18 @@ from master_data.models import (
     CarrierProductHierarchyMaster,
     CarrierRTOZoneMaster,
     MasterDataUpload,
+)
+
+# The endpoint persists the uploaded workbook to ``MasterDataUpload.file``, whose
+# default storage is S3/MinIO. CI has no object store, so keep the write in memory
+# — nothing here asserts on the stored bytes.
+in_memory_storage = override_settings(
+    STORAGES={
+        "default": {"BACKEND": "django.core.files.storage.InMemoryStorage"},
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"
+        },
+    }
 )
 
 
@@ -42,6 +54,7 @@ def _auth_client():
     return client
 
 
+@in_memory_storage
 class CarrierUploadRtoZoneTests(TestCase):
     def setUp(self):
         self.client = _auth_client()
@@ -98,6 +111,7 @@ class CarrierUploadRtoZoneTests(TestCase):
         self.assertEqual(CarrierRTOZoneMaster.objects.count(), 1)
 
 
+@in_memory_storage
 class CarrierUploadIciciRtoGridTests(TestCase):
     def setUp(self):
         self.client = _auth_client()
@@ -169,6 +183,7 @@ class CarrierUploadIciciRtoGridTests(TestCase):
         self.assertEqual(resp.status_code, 400)
 
 
+@in_memory_storage
 class CarrierUploadProductHierarchyTests(TestCase):
     def setUp(self):
         self.client = _auth_client()
@@ -193,6 +208,7 @@ class CarrierUploadProductHierarchyTests(TestCase):
         self.assertEqual(CarrierProductHierarchyMaster.objects.count(), 2)
 
 
+@in_memory_storage
 class CarrierUploadValidationTests(TestCase):
     def setUp(self):
         self.client = _auth_client()
@@ -220,6 +236,7 @@ class CarrierUploadValidationTests(TestCase):
         self.assertEqual(resp.status_code, 400)
 
 
+@in_memory_storage
 class CarrierUploadAuthTests(TestCase):
     """An unauthenticated caller must not be able to rewrite the master tables
     every Chola extraction reads."""
