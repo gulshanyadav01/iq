@@ -5,10 +5,19 @@ on:
   push:
     branches: [dev, master]
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service(s) to build & push (all, backend, web)"
+        default: all
+        required: false
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs for fast feedback, but let push/tag runs finish:
+  # push-ecr fans out into parallel image builds, and cancelling mid-flight
+  # could leave a mismatched set in ECR (e.g. web:dev new, backend:dev stale).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint:
@@ -163,32 +172,67 @@ jobs:
           pnpm --filter web install --frozen-lockfile=false
           pnpm --filter web test
 
+  prep:
+    name: Resolve build matrix
+    runs-on: ubuntu-latest
+    # Single gate for the whole ECR pipeline: only on push (branches/tags) or
+    # manual dispatch, never on PRs, never on master (prod images come from v*
+    # tags cut from master via `pnpm release`, not from master pushes), and only
+    # after lint + test pass — never push untested images. Stays dormant (no red
+    # X) until AWS is wired up: the AWS_REGION repo Variable gates it.
+    # push-ecr `needs: prep`, so skipping prep skips all legs.
+    # NOTE: the service filter lives HERE (a prep job emitting a fromJSON matrix),
+    # not in a `matrix.service` job-level `if:` — the `matrix` context is not
+    # available in `jobs.<id>.if`, so that would silently skip every leg on a
+    # single-service dispatch. See docs: contexts available in a job `if:` are
+    # github / needs / vars / inputs only.
+    needs: [lint, test]
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && vars.AWS_REGION != ''
+      && github.ref != 'refs/heads/master'
+    outputs:
+      services: ${{ steps.set.outputs.services }}
+    steps:
+      - name: Resolve service list
+        id: set
+        run: |
+          want='${{ github.event.inputs.service }}'   # empty on push; 'all' or a name on dispatch
+          [ -z "$want" ] && want=all
+          if [ "$want" = all ]; then
+            echo 'services=["backend","web"]' >> "$GITHUB_OUTPUT"
+          else
+            echo "services=[\"$want\"]" >> "$GITHUB_OUTPUT"
+          fi
+
   push-ecr:
     name: Build & push to ECR
     runs-on: ubuntu-latest
-    # Only on push events (branch pushes to dev/master + tag pushes), never on PRs,
-    # and only after lint/test pass. Skips cleanly on a copy that hasn't configured
-    # AWS yet (no red X).
-    needs: [lint, test]
-    if: github.event_name == 'push' && vars.AWS_REGION != ''
+    # One matrix leg per image, built in parallel. Reuses the repo's own
+    # build-and-push.sh per service (ECR login + git-sha / dev / semver tagging +
+    # registry cache, which is per-service so parallel legs don't collide).
+    # fail-fast: false so one image failing doesn't cancel the other.
+    needs: prep
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.prep.outputs.services) }}
     permissions:
       id-token: write # required for keyless OIDC
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # build-and-push.sh reads git tags for semver tagging
 
       - name: Preflight — verify required config is set
         env:
           AWS_REGION: ${{ vars.AWS_REGION }}
-          ECR_BACKEND_REPO: ${{ vars.ECR_BACKEND_REPO }}
-          ECR_WEB_REPO: ${{ vars.ECR_WEB_REPO }}
           ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
         run: |
           fail=0
-          [ -n "$AWS_REGION" ]      || { echo "::error::Repo Variable AWS_REGION is unset — gh variable set AWS_REGION --body <region>"; fail=1; }
-          [ -n "$ECR_BACKEND_REPO" ]|| { echo "::error::Repo Variable ECR_BACKEND_REPO is unset — gh variable set ECR_BACKEND_REPO --body <repo>"; fail=1; }
-          [ -n "$ECR_WEB_REPO" ]    || { echo "::error::Repo Variable ECR_WEB_REPO is unset — gh variable set ECR_WEB_REPO --body <repo>"; fail=1; }
-          [ -n "$ROLE_ARN" ]        || { echo "::error::Repo Secret AWS_ROLE_ARN is unset — gh secret set AWS_ROLE_ARN --body <role-arn>. See infra/aws/setup-aws.sh"; fail=1; }
+          [ -n "$AWS_REGION" ] || { echo "::error::Repo Variable AWS_REGION is unset — gh variable set AWS_REGION --body <region>"; fail=1; }
+          [ -n "$ROLE_ARN" ]   || { echo "::error::Repo Secret AWS_ROLE_ARN is unset — gh secret set AWS_ROLE_ARN --body <role-arn>. See infra/aws/setup-aws.sh"; fail=1; }
           exit $fail
 
       - name: Configure AWS credentials (OIDC)
@@ -197,72 +241,34 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Login to Amazon ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Ensure ECR repositories exist
+      - name: Ensure ECR repository exists
         env:
           AWS_REGION: ${{ vars.AWS_REGION }}
-          ECR_BACKEND_REPO: ${{ vars.ECR_BACKEND_REPO }}
-          ECR_WEB_REPO: ${{ vars.ECR_WEB_REPO }}
         run: |
-          for repo in "$ECR_BACKEND_REPO" "$ECR_WEB_REPO"; do
-            aws ecr describe-repositories --repository-names "$repo" --region "$AWS_REGION" >/dev/null 2>&1 \
-              || aws ecr create-repository \
-                   --repository-name "$repo" \
-                   --region "$AWS_REGION" \
-                   --image-scanning-configuration scanOnPush=true >/dev/null
-          done
+          # Repo name matches build-and-push.sh's SERVICES map: insur-iq/<service>
+          repo="insur-iq/${{ matrix.service }}"
+          aws ecr describe-repositories --repository-names "$repo" --region "$AWS_REGION" >/dev/null 2>&1 \
+            || aws ecr create-repository \
+                 --repository-name "$repo" \
+                 --region "$AWS_REGION" \
+                 --image-tag-mutability MUTABLE \
+                 --image-scanning-configuration scanOnPush=true >/dev/null
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Metadata — backend
-        id: meta-backend
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_BACKEND_REPO }}
-          tags: |
-            type=ref,event=branch
-            type=sha,prefix={{branch}}-,enable=${{ github.ref_type == 'branch' }}
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+      - name: Resolve image tag from ref
+        id: tag
+        run: |
+          case "${GITHUB_REF}" in
+            refs/heads/dev)    echo "image_tag=dev" >> "$GITHUB_OUTPUT" ;;
+            refs/tags/v*)      echo "image_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT" ;;
+            *)                 echo "image_tag=latest" >> "$GITHUB_OUTPUT" ;;
+          esac
 
-      - name: Build & push backend
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: backend/Dockerfile
-          push: true
-          platforms: linux/amd64
-          provenance: true
-          sbom: true
-          tags: ${{ steps.meta-backend.outputs.tags }}
-          labels: ${{ steps.meta-backend.outputs.labels }}
-          cache-from: type=gha,scope=backend
-          cache-to: type=gha,scope=backend,mode=max
-
-      - name: Metadata — web
-        id: meta-web
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_WEB_REPO }}
-          tags: |
-            type=ref,event=branch
-            type=sha,prefix={{branch}}-,enable=${{ github.ref_type == 'branch' }}
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-
-      - name: Build & push web
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: web/Dockerfile
-          push: true
-          platforms: linux/amd64
-          provenance: true
-          sbom: true
-          tags: ${{ steps.meta-web.outputs.tags }}
-          labels: ${{ steps.meta-web.outputs.labels }}
-          cache-from: type=gha,scope=web
-          cache-to: type=gha,scope=web,mode=max
+      - name: Build & push image to ECR
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
+          DOCKER_PLATFORMS: linux/amd64
+          CACHE_TYPE: registry
+        run: ./scripts/build-and-push.sh "${{ matrix.service }}"
