@@ -275,11 +275,17 @@ jobs:
       # going through docker/build-push-action, so nothing has exported the
       # runtime credentials BuildKit needs to reach the GitHub Actions cache.
       # These vars are present in the action runtime but not in the job env.
+      #
+      # ACTIONS_CACHE_URL is deliberately NOT exported. It points at the retired
+      # v1 cache service (artifactcache.actions.githubusercontent.com), and
+      # BuildKit prefers v1 whenever it is set — which fails the build with an
+      # Azure Front Door HTML page parsed as "failed to parse error response
+      # 400". With only ACTIONS_RESULTS_URL present BuildKit uses the v2 API.
       - name: Export Actions cache runtime for BuildKit (CACHE_TYPE=gha)
         uses: actions/github-script@v7
         with:
           script: |
-            for (const key of ['ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RESULTS_URL', 'ACTIONS_CACHE_URL']) {
+            for (const key of ['ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RESULTS_URL']) {
               if (process.env[key]) core.exportVariable(key, process.env[key])
             }
 
