@@ -90,8 +90,11 @@ jobs:
           pnpm --filter web install --frozen-lockfile=false
           cd web && pnpm exec eslint "${FILES[@]}"
 
-  test:
-    name: Test
+  # Backend and web tests are separate jobs so they run concurrently instead of
+  # serially in one runner, and so the web leg doesn't wait on (or pay for) the
+  # postgres/redis service containers it never touches.
+  test-backend:
+    name: Test (backend)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -141,6 +144,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          # Restores pip's HTTP cache keyed on requirements.txt, so wheels are
+          # not re-downloaded (and psycopg2 not re-compiled) on every run.
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
       - name: System deps (psycopg2 is a source build)
         run: sudo apt-get update && sudo apt-get install -y libpq-dev
       - name: Install backend deps
@@ -160,7 +167,15 @@ jobs:
         run: python manage.py check --deploy || true # informational; do not gate on warnings
       - name: Backend tests
         working-directory: backend
-        run: python manage.py test --verbosity 2
+        # --parallel auto shards across the runner's cores, each shard on its
+        # own test database.
+        run: python manage.py test --verbosity 2 --parallel auto
+
+  test-web:
+    name: Test (web)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - name: Enable pnpm (corepack reads version from package.json)
         run: corepack enable
       - uses: actions/setup-node@v4
@@ -186,7 +201,7 @@ jobs:
     # available in `jobs.<id>.if`, so that would silently skip every leg on a
     # single-service dispatch. See docs: contexts available in a job `if:` are
     # github / needs / vars / inputs only.
-    needs: [lint, test]
+    needs: [lint, test-backend, test-web]
     if: >-
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && vars.AWS_REGION != ''
@@ -256,6 +271,18 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # build-and-push.sh drives `docker buildx build` directly rather than
+      # going through docker/build-push-action, so nothing has exported the
+      # runtime credentials BuildKit needs to reach the GitHub Actions cache.
+      # These vars are present in the action runtime but not in the job env.
+      - name: Export Actions cache runtime for BuildKit (CACHE_TYPE=gha)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            for (const key of ['ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RESULTS_URL', 'ACTIONS_CACHE_URL']) {
+              if (process.env[key]) core.exportVariable(key, process.env[key])
+            }
+
       - name: Resolve image tag from ref
         id: tag
         run: |
@@ -270,5 +297,9 @@ jobs:
           AWS_REGION: ${{ vars.AWS_REGION }}
           IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
           DOCKER_PLATFORMS: linux/amd64
-          CACHE_TYPE: registry
+          # GitHub's own cache, co-located with the runner. The registry cache
+          # this replaced round-tripped a mode=max manifest to ECR in
+          # ap-south-1 on every build, which dominated the web image's time.
+          # Roll back with CACHE_TYPE=registry if the Actions cache misbehaves.
+          CACHE_TYPE: gha
         run: ./scripts/build-and-push.sh "${{ matrix.service }}"

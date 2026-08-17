@@ -1,0 +1,32 @@
+# Context filter for `docker buildx build --file web/Dockerfile .`
+# BuildKit prefers <dockerfile>.dockerignore over the root .dockerignore, so
+# this narrows the web image's context to the frontend without affecting the
+# backend image, which shares the same context (`.`).
+#
+# Why it matters: the web build's layer cache is keyed on the context it copies.
+# With the root .dockerignore, a backend-only commit changed the context and
+# busted the Nuxt build layer, forcing a full rebuild for no reason.
+**/node_modules
+**/.nuxt
+**/.output
+**/.turbo
+**/.next
+.git
+.github
+.husky
+.claude
+.conductor
+.ruff_cache
+**/.DS_Store
+**/*.log
+
+# Not part of the frontend build
+backend
+infra
+conf
+postgres
+scripts
+docker-compose*.yml
+*.md
+.env*
+setup.sh
