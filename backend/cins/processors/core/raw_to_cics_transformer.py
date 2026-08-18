@@ -457,6 +457,11 @@ STATE_NAME_MAPPINGS = {
     "jammu & kashmir": "jammu-and-kashmir",
     "jharkhand": "jharkhand",
     "karnataka": "karnataka",
+    # Misspelling seen in Chola's grids. Long enough to match as a bare
+    # substring, so no boundary risk; the correctly-spelled key cannot cover it
+    # because the 2-letter "ka" fallback is boundary-anchored and will not fire
+    # inside a word.
+    "karnatka": "karnataka",
     "kerala": "kerala",
     "ladakh": "ladakh",
     "lakshadweep": "lakshadweep",
@@ -544,11 +549,22 @@ STATE_NAME_MAPPINGS = {
     # subtracts those codes from the remainder rule's state-derived fill. This
     # is the same shape as the already-shipped "UP" / "UP- East" pair.
     #
-    # Deliberately NOT here: "ROK" (Rest of Karnataka, in the Two-Wheeler
-    # grid). Its sibling "KA (Bangalore)" resolves to plain karnataka with NO
-    # explicit rto, because chola_rto_zone.csv seeds no bangalore zone -- so
-    # mapping ROK would produce two identical karnataka rules at different
-    # rates rather than a complement. Seed the zone first.
+    # "rok" is the Two-Wheeler grid's remainder half, and its metro sibling is
+    # the row keyed "KA (Bangalore)". That pair was NOT safe to map until the
+    # metro row could claim an RTO set of its own: chola_rto_zone.csv seeds no
+    # bangalore zone, so the sibling resolved to plain karnataka with no
+    # explicit rto and mapping "rok" would have produced two identical
+    # karnataka rules at different rates instead of a complement. It is safe
+    # now -- _expand_rto_codes falls back to the GLOBAL RTO master's locality
+    # index when the carrier's own zone master has no entry, so "KA
+    # (Bangalore)" claims the 18 bangalore codes and the complement is real.
+    # Removing that fallback means removing "rok" again.
+    #
+    # Note "rok" travels in a MULTI-STATE cell: the grid keys the row "TN/ROK",
+    # i.e. all of Tamil Nadu plus the Karnataka remainder. Before this mapping
+    # existed only "tn" matched and the Karnataka half was dropped from the
+    # export entirely.
+    "rok": "karnataka",
     "rom": "maharashtra",
     "rotn": "tamil-nadu",
 }
@@ -622,6 +638,12 @@ class RawToCICSTransformer:
         # carrier is Chola; empty (and inert) for every other carrier or when
         # master_data is unavailable.
         self._carrier_zone_map: Dict[str, Dict[str, List[str]]] = {}
+        # Global RTO master locality index: state slug -> locality -> RTO codes.
+        # The fallback consulted when a carrier's own zone master has no entry
+        # for a metro the grid names (e.g. Chola's "KA (Bangalore)"). Built
+        # alongside _carrier_zone_map in transform(); empty (and inert)
+        # otherwise.
+        self._rto_locality_map: Dict[str, Dict[str, List[str]]] = {}
         # Dedup set for the "zone label not found in master" warning — one
         # warning per distinct unmatched text per document, not per rule.
         self._zone_warned: Set[str] = set()
@@ -664,6 +686,7 @@ class RawToCICSTransformer:
         # carrier). Guarded: DB-unavailable / unseeded degrades to an empty
         # map, i.e. today's behaviour (zone labels simply don't resolve).
         self._carrier_zone_map = {}
+        self._rto_locality_map = {}
         if self._carrier_code == "Chola":
             try:
                 from master_data.services.resolver import carrier_zone_expansions
@@ -672,6 +695,18 @@ class RawToCICSTransformer:
             except Exception as e:
                 logger.warning(f"Chola zone expansion map unavailable: {e}")
                 self._carrier_zone_map = {}
+            # Global-master locality index, the fallback for a metro label the
+            # carrier's own zone master does not cover ("KA (Bangalore)").
+            # Loaded separately so a failure on either side leaves the other
+            # working, and scoped to Chola for now because that is the only
+            # carrier whose grids key rows by a metro-vs-remainder pair.
+            try:
+                from master_data.services.resolver import rto_locality_expansions
+
+                self._rto_locality_map = rto_locality_expansions()
+            except Exception as e:
+                logger.warning(f"RTO locality index unavailable: {e}")
+                self._rto_locality_map = {}
 
         # Transform commission period
         period = self._transform_period(raw, document_date)
@@ -1849,8 +1884,11 @@ class RawToCICSTransformer:
                     break
         state = self._expand_state_names(location_text, master_data)
 
-        # Extract/expand RTO codes from location_text
-        rto = self._expand_rto_codes(location_text, master_data)
+        # Extract/expand RTO codes from location_text. `state` is threaded in so
+        # a metro label the carrier's zone master does not cover ("KA
+        # (Bangalore)") can still resolve against the global RTO master, scoped
+        # to the state this very text just produced.
+        rto = self._expand_rto_codes(location_text, master_data, state_slugs=state)
 
         # Built once and threaded through the probe-based recoveries below.
         # _segment_probe re-joins and re-lowercases four fields on every call,
@@ -4290,11 +4328,38 @@ class RawToCICSTransformer:
     def _match_carrier_zones(self, normalized_text: str) -> List[str]:
         """Zone slugs from ``self._carrier_zone_map`` whose label (slug with
         hyphens replaced by spaces, upper-cased) appears word-boundary
-        anchored in ``normalized_text``."""
+        anchored in ``normalized_text``.
+
+        A two-token label also matches with its tokens REVERSED. The same Chola
+        zone is spelled "UP- East" in the Private Car / CV headers and "East UP"
+        in the Two-Wheeler key column; only the forward order matched, so 115
+        Two-Wheeler rules resolved no zone, claimed no explicit RTO, and fell
+        back to a full Uttar Pradesh fill -- silently disabling the UP /
+        UP- East complement on that sheet.
+
+        Kept deliberately narrow. Only exactly-two-token labels are reversed
+        (full permutations of 3+ tokens are combinatorial and would start
+        matching text nobody wrote), the reversed form is still one adjacent
+        word-boundary-anchored phrase (so it can never match MORE text than the
+        forward form does -- it is an extra specific alternative, not a
+        loosening), and a reversal that collides with another zone's forward
+        label is dropped rather than allowed to claim that zone's rows.
+        """
+        forward_labels = {
+            slug.replace("-", " ").upper() for slug in self._carrier_zone_map
+        }
         matched = []
         for zone_slug in self._carrier_zone_map:
             label = zone_slug.replace("-", " ").upper()
-            if re.search(rf"\b{re.escape(label)}\b", normalized_text):
+            variants = [label]
+            parts = label.split(" ")
+            if len(parts) == 2:
+                flipped = f"{parts[1]} {parts[0]}"
+                if flipped not in forward_labels:
+                    variants.append(flipped)
+            if any(
+                re.search(rf"\b{re.escape(v)}\b", normalized_text) for v in variants
+            ):
                 matched.append(zone_slug)
         return matched
 
@@ -4311,7 +4376,10 @@ class RawToCICSTransformer:
         self.warnings.append(f"Chola zone label not found in master: {raw_text!r}")
 
     def _expand_rto_codes(
-        self, rto_text: Optional[str], master_data: Optional[List[RawMasterDataEntry]]
+        self,
+        rto_text: Optional[str],
+        master_data: Optional[List[RawMasterDataEntry]],
+        state_slugs: Optional[List[str]] = None,
     ) -> Optional[List[str]]:
         """
         Expand RTO text to canonical RTO codes.
@@ -4320,6 +4388,11 @@ class RawToCICSTransformer:
         Chola-gated: also resolves a configured UW-zone label (e.g. "Central
         MH", "UP- East") to the RTO codes it represents via a scoped
         ``CarrierRTOZoneMaster`` query built once in ``transform()``.
+
+        ``state_slugs`` — the states ``_expand_state_names`` resolved from the
+        SAME text — enables the last-resort global RTO master lookup described
+        below. Optional so the several call sites that have no state context
+        keep today's behaviour.
         """
         if not rto_text:
             return None
@@ -4346,7 +4419,32 @@ class RawToCICSTransformer:
             matched_zones = self._match_carrier_zones(normalized_zone_text)
             for zone_slug in matched_zones:
                 discovered.extend(self._carrier_zone_map[zone_slug].get("rto", []))
-            if not matched_zones:
+
+            # Last resort: the carrier's zone master had nothing, so ask the
+            # GLOBAL RTO master whether the label names a locality inside the
+            # state this rule already resolved. Chola's Two Wheeler grid keys a
+            # row "KA (Bangalore)" against a differently-priced "TN/ROK" row,
+            # but seeds no bangalore zone -- without this the metro row claims
+            # no RTO, the export fills it with all 71 Karnataka codes, and the
+            # two rows collide on identical geography.
+            #
+            # Ordering is the guard: this runs only when nothing else matched,
+            # so a seeded carrier zone always wins and this can only ever add
+            # geography where there was none. See ``match_rto_localities`` for
+            # why the state scope and the boundary rule are load-bearing.
+            fallback_codes: List[str] = []
+            if not discovered and state_slugs and self._rto_locality_map:
+                from master_data.services.resolver import match_rto_localities
+
+                fallback_codes = match_rto_localities(
+                    self._rto_locality_map, state_slugs, rto_text
+                )
+                discovered.extend(fallback_codes)
+
+            # Warn only if BOTH the carrier zone master and the global-master
+            # fallback came up empty -- a label the fallback resolved is not an
+            # unmatched zone label.
+            if not matched_zones and not fallback_codes:
                 self._warn_unmatched_zone(rto_text, normalized_zone_text)
 
         if not discovered:

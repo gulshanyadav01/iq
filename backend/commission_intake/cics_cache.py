@@ -103,7 +103,18 @@ def _env_int(name: str, default: int) -> int:
 #         into a duplicate Private Car / Taxi product (pcv_taxi_mirror). Cached
 #         documents must re-extract or they keep serving exports with the
 #         Private Car deal missing.
-CICS_PIPELINE_VERSION = "1.5.0"
+#   1.6.0 — Chola metro/remainder geography. "ROK" now maps to karnataka (the
+#         "TN/ROK" row previously dropped its Karnataka half entirely), the
+#         misspelling "Karnatka" resolves, and a metro label the carrier's own
+#         zone master does not cover ("KA (Bangalore)") falls back to the
+#         global RTO master's locality index for its explicit RTO set. A
+#         two-token zone label also matches with its tokens reversed, so the
+#         Two-Wheeler sheet's "East UP" resolves the same zone the Private Car
+#         / CV headers spell "UP- East" instead of falling back to a full
+#         Uttar Pradesh fill. Cached documents must re-extract or they keep
+#         serving the missing state, the over-broad all-of-Karnataka RTO fill
+#         and the un-complemented UP rows.
+CICS_PIPELINE_VERSION = "1.6.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"

@@ -40,6 +40,28 @@ _CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])")
 # "wheeler" ("Four Wheeler" is a car, "Three Wheeler" is a commercial carrier).
 _NON_TW_WHEELS_RE = re.compile(r"(?<![a-z])(four|4w|4|three|3w|3)(?![a-z])")
 
+# RTOMaster.value is a display string of the form
+# "KA01-Bangalore(Karnataka)(Group A)". The locality between the code and the
+# parenthesised state is what a carrier grid names when it writes a metro label
+# ("KA (Bangalore)"), so it is the join key for the global-master fallback in
+# ``rto_codes_for_locality``.
+#
+# The trailing "(Group X)" is OPTIONAL: two rows in the shipped master
+# ("UP29-Padrauna(Uttar Pradesh)", "UP99-Mahoba(Uttar Pradesh)") carry no group.
+# The code prefix allows a letter suffix because Delhi spells its RTOs "DL1A".
+# A value that does not match is skipped rather than guessed at — a wrong
+# locality would fill the export's RTO cell with another city's codes.
+_RTO_VALUE_RE = re.compile(
+    r"^[A-Z]{2}\d+[A-Z]*-(?P<locality>.+?)\((?P<state>[^()]+)\)"
+    r"(?:\(Group[^()]*\))?$"
+)
+
+# Shortest locality name eligible for the fallback match. Below this, a name
+# collides with the two-letter state abbreviations and "rest of" tokens that
+# share the same grid cell -- the identical reason
+# RawToCICSTransformer._expand_state_names boundary-anchors its short keys.
+_MIN_LOCALITY_LEN = 4
+
 # Product-name tokens that identify each bucket.
 #
 # GROUP order is load-bearing: the first group with any matching token wins, and
@@ -602,6 +624,79 @@ def carrier_zone_expansions(carrier: str) -> dict[str, dict[str, list[str]]]:
         zone: {"rto": sorted(v["rto"]), "state": sorted(v["state"])}
         for zone, v in zones.items()
     }
+
+
+def rto_locality_expansions() -> dict[str, dict[str, list[str]]]:
+    """state slug -> locality name (lowercased) -> the RTO codes in it.
+
+    The global-master counterpart to ``carrier_zone_expansions``, and built the
+    same way: ONE query, results held for a document, matching done in memory
+    by ``match_rto_localities``. Deliberately not a ``MasterDataResolver``
+    method — the eager resolver reloads every table, and the only caller (the
+    Chola-gated transformer path) needs just this one.
+
+    Localities shorter than ``_MIN_LOCALITY_LEN`` and values that do not parse
+    are dropped rather than guessed at; see ``_RTO_VALUE_RE``.
+    """
+    index: dict[str, dict[str, list[str]]] = {}
+    for row in RTOMaster.objects.values("code", "value", "state_slug"):
+        m = _RTO_VALUE_RE.match(row["value"] or "")
+        if m is None:
+            continue
+        locality = m.group("locality").strip().lower()
+        if len(locality) < _MIN_LOCALITY_LEN:
+            continue
+        index.setdefault(row["state_slug"], {}).setdefault(locality, []).append(
+            row["code"]
+        )
+    return {
+        slug: {loc: sorted(set(codes)) for loc, codes in localities.items()}
+        for slug, localities in index.items()
+    }
+
+
+def match_rto_localities(index, state_slugs, text) -> list[str]:
+    """RTO **codes** whose locality name appears in ``text``, restricted to
+    ``state_slugs``.
+
+    The global-master fallback for a carrier grid that names a metro the
+    carrier's OWN zone master does not cover: Chola's Two Wheeler grid keys a
+    row "KA (Bangalore)", but ``chola_rto_zone.csv`` seeds no bangalore zone,
+    so without this the row falls through to the export's state-derived fill
+    and renders all 71 Karnataka RTOs instead of Bangalore's 18 — colliding
+    with its sibling "TN/ROK" row, which is priced differently. The carrier's
+    zone master stays authoritative; callers consult this only after it misses.
+
+    Returns bare codes, not the display values ``rtos_for_states`` returns,
+    because the caller feeds ``conditions.rto`` and the export's claimed-RTO
+    complement matches siblings on ``code``.
+
+    Two guards keep a fallback match from inventing geography, and both are
+    load-bearing:
+
+    - **Scoping to ``state_slugs``** — the states already resolved for the same
+      rule. 48 locality names in the shipped master span more than one state
+      ("Hyderabad" is both Andhra Pradesh and Telangana), and the scope also
+      stops an unrelated word elsewhere in the label from matching some
+      far-away town that happens to share a name.
+    - **``_MIN_LOCALITY_LEN`` + word-boundary anchoring on ``[a-z]``** — the
+      same discipline ``RawToCICSTransformer._expand_state_names`` applies to
+      its short keys. This is why "TN/ROK", "KA", "ROM", "ROTN", "NE", "AP/TS"
+      and "UP- East" all yield nothing, while "KA (Bangalore)" yields exactly
+      the bangalore codes.
+
+    Returns ``[]`` when nothing matches — callers read that as "no explicit
+    RTO" and fall back to the state-derived fill, which is the safe direction.
+    """
+    if not index or not state_slugs or not text:
+        return []
+    lowered = str(text).lower()
+    out: set[str] = set()
+    for slug in state_slugs:
+        for locality, codes in index.get(slug, {}).items():
+            if re.search(rf"(?<![a-z]){re.escape(locality)}(?![a-z])", lowered):
+                out.update(codes)
+    return sorted(out)
 
 
 def carrier_product_hierarchy(carrier: str) -> list[dict]:

@@ -23,10 +23,22 @@ _ZONE_MAP = {
 }
 
 
-def _chola_transformer(zone_map=None):
+# Global RTO master locality index, in the shape ``rto_locality_expansions``
+# returns. Chola seeds no bangalore zone, so this is where "KA (Bangalore)"
+# has to find its codes.
+_LOCALITY_MAP = {
+    "karnataka": {"bangalore": ["KA01", "KA02"], "mysore": ["KA20"]},
+    "maharashtra": {"mumbai": ["MH01", "MH02", "MH99"]},
+}
+
+
+def _chola_transformer(zone_map=None, locality_map=None):
     t = RawToCICSTransformer()
     t._carrier_code = "Chola"
     t._carrier_zone_map = zone_map if zone_map is not None else dict(_ZONE_MAP)
+    t._rto_locality_map = (
+        locality_map if locality_map is not None else dict(_LOCALITY_MAP)
+    )
     t._zone_warned = set()
     t.warnings = []
     return t
@@ -56,6 +68,45 @@ class ZoneRtoExpansionTests(TestCase):
         self.assertEqual(t._expand_rto_codes("UP- East", None), ["UP28", "UP32"])
         t2 = _chola_transformer()
         self.assertEqual(t2._expand_state_names("UP- East", None), ["uttar-pradesh"])
+
+    def test_reversed_two_token_label_resolves(self):
+        """The SAME Chola zone is spelled "UP- East" in the Private Car / CV
+        headers and "East UP" in the Two-Wheeler key column. Only the forward
+        order used to match, so those rows claimed no RTO and fell back to a
+        full Uttar Pradesh fill -- disabling the UP / UP- East complement.
+        """
+        for variant in ("East UP", "EAST-UP", "east   up"):
+            t = _chola_transformer()
+            self.assertEqual(
+                t._expand_rto_codes(variant, None),
+                ["UP28", "UP32"],
+                f"variant={variant!r}",
+            )
+
+    def test_reversed_label_resolves_the_state_side_too(self):
+        """The two paths share ``_match_carrier_zones`` precisely so they
+        cannot drift; an earlier asymmetry here dropped the state silently."""
+        t = _chola_transformer()
+        self.assertEqual(t._expand_state_names("East UP", None), ["uttar-pradesh"])
+
+    def test_reversal_never_claims_another_zones_rows(self):
+        """A reversal colliding with a different zone's forward label is
+        dropped. Here "b a" is a real zone, so "a-b" must not answer for it.
+        """
+        t = _chola_transformer(
+            zone_map={
+                "a-b": {"rto": ["XX01"], "state": ["goa"]},
+                "b-a": {"rto": ["YY01"], "state": ["kerala"]},
+            }
+        )
+        self.assertEqual(t._expand_rto_codes("B A", None), ["YY01"])
+
+    def test_reversal_does_not_apply_to_three_token_labels(self):
+        t = _chola_transformer(
+            zone_map={"north-up-east": {"rto": ["UP77"], "state": ["uttar-pradesh"]}}
+        )
+        self.assertIsNone(t._expand_rto_codes("East UP North", None))
+        self.assertEqual(t._expand_rto_codes("North UP East", None), ["UP77"])
 
     def test_underscore_and_extra_whitespace_variants_also_resolve(self):
         for variant in ("UP_East", "up   east", "UP-EAST"):
@@ -110,6 +161,61 @@ class UnmatchedZoneWarningTests(TestCase):
         t._expand_rto_codes("Some Random Text", None)
         zone_warnings = [w for w in t.warnings if "not found in master" in w]
         self.assertEqual(zone_warnings, [])
+
+
+class GlobalMasterLocalityFallbackTests(TestCase):
+    """A metro the carrier's OWN zone master does not cover falls back to the
+    global RTO master's locality index -- Chola's Two-Wheeler grid keys a row
+    ``KA (Bangalore)`` but ``chola_rto_zone.csv`` seeds no bangalore zone.
+
+    Without the fallback the metro row claims no RTO, the export fills it with
+    every Karnataka code, and it collides with the differently-priced
+    ``TN/ROK`` remainder row.
+    """
+
+    def test_uncovered_metro_resolves_from_the_global_master(self):
+        t = _chola_transformer()
+        self.assertEqual(
+            t._expand_rto_codes("KA (Bangalore)", None, state_slugs=["karnataka"]),
+            ["KA01", "KA02"],
+        )
+
+    def test_carrier_zone_master_wins_over_the_global_fallback(self):
+        """Ordering is the guard: a seeded zone must never be overridden. The
+        locality map deliberately carries an extra MH99 that the Chola mumbai
+        zone does not -- if the fallback ran, it would show up here.
+        """
+        t = _chola_transformer()
+        self.assertEqual(
+            t._expand_rto_codes("Mumbai", None, state_slugs=["maharashtra"]),
+            ["MH01", "MH02"],
+        )
+
+    def test_remainder_half_of_a_multi_state_cell_claims_no_rto(self):
+        """``TN/ROK`` names no locality, so it stays on the export's
+        state-derived fill and the complement against its metro sibling works.
+        """
+        t = _chola_transformer()
+        self.assertIsNone(
+            t._expand_rto_codes("TN/ROK", None, state_slugs=["karnataka", "tamil-nadu"])
+        )
+
+    def test_fallback_is_inert_without_state_context(self):
+        """``state_slugs`` is the scope guard; with none, nothing may match."""
+        t = _chola_transformer()
+        self.assertIsNone(t._expand_rto_codes("KA (Bangalore)", None))
+
+    def test_non_chola_carrier_does_not_use_the_fallback(self):
+        t = _chola_transformer()
+        t._carrier_code = "Bajaj"
+        self.assertIsNone(
+            t._expand_rto_codes("KA (Bangalore)", None, state_slugs=["karnataka"])
+        )
+
+    def test_resolved_locality_does_not_warn_as_an_unmatched_zone(self):
+        t = _chola_transformer()
+        t._expand_rto_codes("Zone Bangalore", None, state_slugs=["karnataka"])
+        self.assertEqual([w for w in t.warnings if "not found in master" in w], [])
 
 
 class UpEastUpWestCriticalRegressionTests(TestCase):
