@@ -15,12 +15,12 @@ is gone.
 groups:
 
 | description token | rules |
-| --- | --- |
-| `Bajaj` | ~160 |
-| `Hero vs Bajaj` | ~145 |
+| ----------------- | ----- |
+| `Bajaj`           | ~160  |
+| `Hero vs Bajaj`   | ~145  |
 
 Plus 3 rules (×2 CPA variants = the 6 in the HIGH state finding) that still eat
-the merged title: `  TW Make Grid for the month of Apr 26 > Honda > 150cc` —
+the merged title: ` TW Make Grid for the month of Apr 26 > Honda > 150cc` —
 here the title lands in the STATE slot, so `conditions.state` is None.
 
 ## It is a Pass-3 codegen defect, not a transformer one
