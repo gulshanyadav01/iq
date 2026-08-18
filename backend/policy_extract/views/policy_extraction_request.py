@@ -146,9 +146,13 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
     )
     @action(detail=True, methods=["get"], url_path="document")
     def document(self, request, *args, **kwargs):
-        import mimetypes
         from django.core.files.storage import default_storage
         from django.http import FileResponse
+
+        from policy_extract.services.content_type import (
+            PREVIEW_SAFE_TYPES,
+            resolve_content_type,
+        )
 
         instance = self.get_object()
         if not instance.source_url or not default_storage.exists(instance.source_url):
@@ -156,21 +160,17 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
                 {"detail": "No document available."}, status=status.HTTP_404_NOT_FOUND
             )
 
-        content_type = (
-            mimetypes.guess_type(instance.original_filename)[0]
-            or "application/octet-stream"
-        )
+        file = default_storage.open(instance.source_url, "rb")
+        # Sniff the leading bytes so extensionless files (e.g. file_link uploads
+        # named after the bare policy id) still get their real type; rewind so the
+        # response streams from the start.
+        head = file.read(16)
+        file.seek(0)
+        content_type = resolve_content_type(instance, head=head)
         # Only preview types the browser renders safely inline; anything else
         # (e.g. HTML/SVG that could carry script and run same-origin) is forced
         # to download. nosniff stops the browser second-guessing the type.
-        inline_safe = {
-            "application/pdf",
-            "image/png",
-            "image/jpeg",
-            "image/gif",
-            "image/webp",
-        }
-        file = default_storage.open(instance.source_url, "rb")
+        inline_safe = PREVIEW_SAFE_TYPES
         response = FileResponse(
             file,
             content_type=content_type,

@@ -1,0 +1,26 @@
+# Context filter for `docker buildx build --file backend/Dockerfile .`
+# Mirrors web/Dockerfile.dockerignore: keeps frontend churn out of the backend
+# image's context so a web-only commit doesn't invalidate its layer cache.
+**/node_modules
+**/__pycache__
+**/*.pyc
+.git
+.github
+.husky
+.claude
+.conductor
+.ruff_cache
+**/.DS_Store
+
+# Not part of the backend build (Dockerfile copies ./backend only)
+web
+infra
+conf
+postgres
+package.json
+pnpm-lock.yaml
+pnpm-workspace.yaml
+docker-compose*.yml
+*.md
+.env*
+setup.sh

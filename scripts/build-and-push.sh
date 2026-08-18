@@ -328,20 +328,22 @@ build_service() {
   build_cmd="$build_cmd --file $dockerfile"
   build_cmd="$build_cmd $tags"
 
-  # Add build cache
+  # Add build cache. cache-to always carries ignore-error=true: a cache backend
+  # outage (the Actions cache returned a 400 HTML error page on 2026-08-17) must
+  # not fail a build whose image was already built and pushed.
   if [[ "$CACHE_TYPE" == "gha" ]]; then
     local cache_from="type=gha,scope=${service}"
-    local cache_to="type=gha,scope=${service},mode=max"
+    local cache_to="type=gha,scope=${service},mode=max,ignore-error=true"
   elif [[ "$CACHE_TYPE" == "local" ]]; then
     local cache_dir="/tmp/buildkit-cache/${service}"
     mkdir -p "$cache_dir"
     local cache_from="type=local,src=${cache_dir}"
-    local cache_to="type=local,dest=${cache_dir},mode=max"
+    local cache_to="type=local,dest=${cache_dir},mode=max,ignore-error=true"
   else
     local repo
     repo=$(get_repo_name "$service")
     local cache_from="type=registry,ref=${ECR_REGISTRY}/${repo}:buildcache"
-    local cache_to="type=registry,ref=${ECR_REGISTRY}/${repo}:buildcache,mode=max"
+    local cache_to="type=registry,ref=${ECR_REGISTRY}/${repo}:buildcache,mode=max,ignore-error=true"
   fi
   build_cmd="$build_cmd --cache-from $cache_from"
   build_cmd="$build_cmd --cache-to $cache_to"
