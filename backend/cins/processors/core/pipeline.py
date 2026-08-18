@@ -30,6 +30,7 @@ from cins.processors.content.indexer import (
     sanitize_sheet_key,
 )
 from cins.processors.core.cpa_split import materialize_cpa_split
+from cins.processors.core.pcv_taxi_mirror import materialize_pcv_taxi_mirror
 from cins.processors.core.rule_priority import normalize_rule_priorities
 from cins.processors.core.sheet_visibility import (
     all_hidden_error,
@@ -870,6 +871,9 @@ class Pipeline:
         # Materialize CPA-deduction rules into With/Without-CPA variants so the
         # canonical document, the validators, and every consumer see the split.
         cics_json = materialize_cpa_split(cics_json)
+        # Duplicate CV/PCV taxi rules under Private Car / Taxi. Runs after the
+        # CPA split so each mirrored row copies an already-split rule verbatim.
+        cics_json = materialize_pcv_taxi_mirror(cics_json)
         # Every fan-out above (wheel/make/subclass bifurcation, cpa split) clones
         # rules with the parent's priority, so renumber once the rule list is final.
         cics_json = normalize_rule_priorities(cics_json)
@@ -1018,6 +1022,7 @@ class Pipeline:
                 parsed_result = {}
 
         parsed_result = materialize_cpa_split(parsed_result)
+        parsed_result = materialize_pcv_taxi_mirror(parsed_result)
         parsed_result = normalize_rule_priorities(parsed_result)
         json_result = json.dumps(parsed_result, indent=2)
         output_path.write_text(json_result, encoding="utf-8")
@@ -1474,6 +1479,7 @@ class Pipeline:
                 successful_results, base_name, output_dir
             )
             combined_data = materialize_cpa_split(combined_data)
+            combined_data = materialize_pcv_taxi_mirror(combined_data)
             # _merge_products concatenates rule sets that each numbered themselves
             # from 10, so the merge itself is a collision source — renumber after it.
             combined_data = normalize_rule_priorities(combined_data)

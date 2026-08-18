@@ -1083,6 +1083,7 @@ def rerun_transform(document_id: str):
     from cins.schema.raw_extraction import RawExtraction
     from cins.processors.core.raw_to_cics_transformer import RawToCICSTransformer
     from cins.processors.core.cpa_split import materialize_cpa_split
+    from cins.processors.core.pcv_taxi_mirror import materialize_pcv_taxi_mirror
     from cins.processors.core.rule_priority import normalize_rule_priorities
 
     try:
@@ -1138,6 +1139,10 @@ def rerun_transform(document_id: str):
         # so re-transform must too or the rebuilt document silently loses the
         # CPA dimension (every rule collapses to cpa=None, halving CV counts).
         cics_json = materialize_cpa_split(cics_json)
+        # Duplicate CV/PCV taxi rules under Private Car / Taxi — the full
+        # pipeline applies this right after the CPA split, so re-transform must
+        # too or the rebuilt document loses every mirrored Private Car deal.
+        cics_json = materialize_pcv_taxi_mirror(cics_json)
         # Rule fan-out and cpa split clone the parent's priority; renumber once
         # the rule list is final (pipeline.py does the same after transform).
         cics_json = normalize_rule_priorities(cics_json)

@@ -276,6 +276,28 @@ class RtoPresenceTests(DjangoTestCase):
 
         self.assertTrue(should_cache(_PipelineResult()))
 
+    def test_mirrored_private_car_taxi_product_resolves_to_the_car_bucket(self):
+        """The pcv_taxi_mirror clone exports under Product="Private Car", so its
+        RTO fill must come from the CAR zone table, not CV. A product_name the
+        bucketer rejected would blank the cell AND raise a MEDIUM."""
+        self.assertEqual(product_bucket("Private Car"), "CAR")
+        RTOMaster.objects.create(
+            rto_id=3,
+            code="AP02",
+            value="AP-02",
+            state_slug="andhra-pradesh",
+            car_zone=1,
+        )
+        result = _validate(
+            _doc(
+                [_rule("r1", state=["andhra-pradesh"], vehicle_sub_class=["taxi"])],
+                product_name="Private Car",
+                sub_category="Taxi",
+            )
+        )
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.warnings, [])
+
     def test_state_with_no_product_active_rtos_is_high(self):
         result = _validate(_doc([_rule("r1", state=["karnataka"])]))
         self.assertEqual(len(result.errors), 1)

@@ -85,6 +85,10 @@ _HIERARCHY = [
     {"product": "CV", "sub_product": "GCV", "vehicle_subclass": "Tipper"},
     {"product": "CV", "sub_product": "PCV", "vehicle_subclass": "Taxi"},
     {"product": "Car", "sub_product": "", "vehicle_subclass": "PrivateCar"},
+    # Taxi is seeded under BOTH buckets in the real master
+    # (chola_product_hierarchy.csv rows 3 and 26) — that dual listing is what
+    # makes the pcv_taxi_mirror clone legal on the Car side.
+    {"product": "Car", "sub_product": "", "vehicle_subclass": "Taxi"},
     {"product": "TW", "sub_product": "", "vehicle_subclass": "Bike"},
 ]
 
@@ -111,6 +115,17 @@ class ValidCombosPassTests(TestCase):
         )
         result = v.validate(path)
         self.assertEqual(result.warnings, [])
+
+    def test_mirrored_private_car_taxi_product_passes(self):
+        """The pcv_taxi_mirror clone pins product_subproduct="car", so it is
+        validated against the master's ("Car", "") slot rather than CV/PCV. A
+        clone that kept the commercial pin would be checked against the wrong
+        row set and mis-flagged."""
+        v = _ValidatorWithSeededHierarchy(_HIERARCHY)
+        path = _write_doc(_doc("Chola", [_product("car", "Taxi", [_rule(["taxi"])])]))
+        result = v.validate(path)
+        self.assertEqual(result.warnings, [])
+        self.assertEqual(result.errors, [])
 
 
 class InvalidComboFindingTests(TestCase):

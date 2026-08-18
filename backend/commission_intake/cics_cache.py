@@ -99,7 +99,11 @@ def _env_int(name: str, default: int) -> int:
 #   1.4.0 — A two-wheeler product exports SubProduct "Two Wheeler" instead of
 #         the raw grid token ("2w"). Cached documents must re-extract or they
 #         keep serving the old value.
-CICS_PIPELINE_VERSION = "1.4.0"
+#   1.5.0 — CV/PCV rules whose vehicle_sub_class is exactly "taxi" are mirrored
+#         into a duplicate Private Car / Taxi product (pcv_taxi_mirror). Cached
+#         documents must re-extract or they keep serving exports with the
+#         Private Car deal missing.
+CICS_PIPELINE_VERSION = "1.5.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"
