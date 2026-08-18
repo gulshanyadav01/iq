@@ -136,6 +136,47 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
         return Response(serializer.data)
 
     @extend_schema(
+        summary="Retry an extraction request",
+        description="Re-enqueues a completed or failed request. Resets status to "
+        "initiated and clears the previous error/result before dispatching the "
+        "processing chain. Returns 409 if the request is still in flight.",
+        tags=["Policy Extract"],
+        responses={200: PolicyExtractionRequestSerializer},
+    )
+    @action(detail=True, methods=["post"], url_path="retry")
+    def retry(self, request, *args, **kwargs):
+        # Retry is allowed from a terminal status (completed/failed): reset the row
+        # and re-enqueue. In-flight requests (initiated/processing) are rejected so
+        # a second chain can't race the running one and double-fire the callback.
+        instance = self.get_object()
+        if instance.status in (
+            PolicyExtractionRequest.Status.INITIATED,
+            PolicyExtractionRequest.Status.PROCESSING,
+        ):
+            return Response(
+                {
+                    "detail": "Request is still processing; "
+                    "wait for it to finish before retrying."
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        instance.status = PolicyExtractionRequest.Status.INITIATED
+        instance.error = None
+        instance.result = None
+        instance.callback_response = None
+        instance.save(
+            update_fields=[
+                "status",
+                "error",
+                "result",
+                "callback_response",
+                "updated_at",
+            ]
+        )
+        enqueue_processing_chain(str(instance.id))
+        return Response(PolicyExtractionRequestSerializer(instance).data)
+
+    @extend_schema(
         summary="Stream the original uploaded document",
         description="Streams the original uploaded file so the browser can preview it. Preview-safe "
         "types (PDF/PNG/JPEG/GIF/WebP) are served inline; anything else is forced to "

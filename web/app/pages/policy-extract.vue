@@ -166,13 +166,23 @@
                   {{ formatDate(req.updated_at) }}
                 </td>
                 <td class="px-4 py-3 text-right" @click.stop>
-                  <button
-                    class="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition"
-                    title="View result"
-                    @click="openDetail(req)"
-                  >
-                    <UIcon name="i-lucide-eye" class="w-4 h-4" />
-                  </button>
+                  <div class="flex items-center justify-end gap-1">
+                    <button
+                      class="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="Retry extraction"
+                      :disabled="retryingIds.has(req.id)"
+                      @click="retryRequest(req.id)"
+                    >
+                      <UIcon name="i-lucide-refresh-cw" class="w-4 h-4" :class="{ 'animate-spin': retryingIds.has(req.id) }" />
+                    </button>
+                    <button
+                      class="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition"
+                      title="View result"
+                      @click="openDetail(req)"
+                    >
+                      <UIcon name="i-lucide-eye" class="w-4 h-4" />
+                    </button>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -196,6 +206,17 @@
 
         <!-- Right: extracted response -->
         <div class="w-2/5 h-full overflow-hidden flex flex-col">
+        <!-- Actions -->
+        <div v-if="selectedRequest" class="px-6 py-3 border-b border-gray-200 dark:border-gray-700 flex justify-end">
+          <button
+            class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium bg-primary-600 hover:bg-primary-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white transition duration-200"
+            :disabled="retryingIds.has(selectedRequest.id)"
+            @click="retryRequest(selectedRequest.id)"
+          >
+            <UIcon name="i-lucide-refresh-cw" class="w-4 h-4" :class="{ 'animate-spin': retryingIds.has(selectedRequest.id) }" />
+            Retry extraction
+          </button>
+        </div>
         <!-- In-flight -->
         <div v-if="selectedRequest?.status === 'initiated' || selectedRequest?.status === 'processing'" class="p-6 flex items-center gap-2 text-gray-500">
           <UIcon name="i-lucide-loader-circle" class="animate-spin" />
@@ -576,6 +597,29 @@ async function handleUpload() {
     uploadError.value = err instanceof Error ? err.message : 'Upload failed'
   } finally {
     uploading.value = false
+  }
+}
+
+const retryingIds = ref<Set<string>>(new Set())
+
+// The retry buttons render on every row. The backend re-enqueues completed and
+// failed requests; it rejects in-flight ones (409) so a retry can't race a
+// still-running extraction chain.
+async function retryRequest(id: string) {
+  retryingIds.value = new Set([...retryingIds.value, id])
+  try {
+    const headers = await getAuthHeaders()
+    const updated = await $fetch<ExtractionRequest>(
+      `${getBaseUrl()}/api/policy-extract/requests/${id}/retry/`,
+      { method: 'POST', headers },
+    )
+    if (selectedRequest.value?.id === id) selectedRequest.value = updated
+    // Reload to refresh both the row and the status counts (failed → in-progress).
+    await loadRequests()
+  } catch (err) {
+    console.error('Retry failed:', err)
+  } finally {
+    retryingIds.value = new Set([...retryingIds.value].filter(x => x !== id))
   }
 }
 
