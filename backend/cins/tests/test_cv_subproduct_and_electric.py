@@ -153,6 +153,47 @@ class CommercialSegmentSplitTests(TestCase):
         self.assertEqual(len({p.product_code for p in products}), 4)
 
 
+class TwoWheelerSubProductTests(TestCase):
+    """A two-wheeler group is never segment-split, so its SubProduct used to
+    fall through to the raw grid token and export "2w". It must export the
+    canonical "Two Wheeler" instead."""
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+
+    def _product(self, product_type):
+        entries = [
+            RawCommissionEntry(
+                rule_text=f"TW {product_type}",
+                commission_value="10%",
+                product_name="Two Wheeler",
+                product_type=product_type,
+                coverage_type_text="comprehensive",
+            )
+        ]
+        return self.t._transform_product("Two Wheeler", entries, None, _raw(entries))
+
+    def test_raw_2w_token_exports_canonical_sub_product(self):
+        for token in ("2W", "2w", "TW", "Two Wheeler"):
+            with self.subTest(product_type=token):
+                p = self._product(token)
+                self.assertEqual(p.product_name, "Two Wheeler")
+                self.assertEqual(p.product_subproduct, "two-wheeler")
+                self.assertEqual(p.sub_category, "Two Wheeler")
+
+    def test_non_two_wheeler_fallback_unchanged(self):
+        entries = [
+            RawCommissionEntry(
+                rule_text="Marine Cargo",
+                commission_value="10%",
+                product_name="Marine Cargo",
+                product_type="Marine",
+            )
+        ]
+        p = self.t._transform_product("Marine Cargo", entries, None, _raw(entries))
+        self.assertEqual(p.sub_category, "marine")
+
+
 class ElectricFuelRecoveryTests(TestCase):
     def setUp(self):
         self.t = RawToCICSTransformer()

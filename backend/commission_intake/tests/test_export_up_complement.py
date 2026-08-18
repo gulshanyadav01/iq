@@ -181,3 +181,78 @@ class ExportUpComplementTests(DjangoTestCase):
         cols = self._cols(ws)
         cell = ws.cell(row=2, column=cols["RTO"]).value
         self.assertEqual(cell, "UP28")  # explicit value rendered as-is, not expanded
+
+
+class ExportTnRokBangaloreComplementTests(DjangoTestCase):
+    """The Two-Wheeler shape the complement previously could not express.
+
+    Chola's grid keys two differently-priced rows: ``KA (Bangalore)`` and
+    ``TN/ROK`` (all of Tamil Nadu plus the Karnataka remainder). Bangalore is
+    absent from ``chola_rto_zone.csv``, so before the global-master locality
+    fallback the metro row claimed nothing, both rows rendered every Karnataka
+    code, and the remainder row silently lost Karnataka altogether because
+    ``rok`` was unmapped.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        for rto_id, code, value, slug in (
+            (1, "KA01", "KA01-Bangalore(Karnataka)(Group A)", "karnataka"),
+            (2, "KA02", "KA02-Bangalore(Karnataka)(Group A)", "karnataka"),
+            (3, "KA20", "KA20-Mysore(Karnataka)(Group C)", "karnataka"),
+            (4, "TN01", "TN01-Chennai(Tamil Nadu)(Group A)", "tamil-nadu"),
+        ):
+            RTOMaster.objects.create(
+                rto_id=rto_id,
+                code=code,
+                value=value,
+                state_slug=slug,
+                car_zone=1,
+                tw_zone=1,
+                cv_zone=1,
+            )
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            email="tw@example.com", password="x"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_remainder_row_gets_tn_plus_karnataka_minus_bangalore(self):
+        doc = CommissionDocument.objects.create(original_filename="tw.xlsx")
+        CICSResult.objects.create(
+            document=doc,
+            cics_doc=_doc(
+                "Chola",
+                [
+                    # "KA (Bangalore)": explicit rto from the global-master
+                    # locality fallback.
+                    _rule({"rto": ["KA01", "KA02"], "state": ["karnataka"]}),
+                    # "TN/ROK": multi-state, no explicit rto.
+                    _rule({"state": ["karnataka", "tamil-nadu"]}),
+                ],
+                product_name="Two Wheeler",
+            ),
+        )
+        url = reverse("commission-documents-export-excel", args=[doc.id])
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200, getattr(resp, "data", resp))
+        ws = load_workbook(io.BytesIO(b"".join(resp.streaming_content)))[
+            "Commission Rules"
+        ]
+        cols = {ws.cell(row=1, column=c).value: c for c in range(1, ws.max_column + 1)}
+
+        metro = ws.cell(row=2, column=cols["RTO"]).value
+        remainder = set(ws.cell(row=3, column=cols["RTO"]).value.split(","))
+
+        self.assertEqual(metro, "KA01,KA02")
+        # Karnataka minus the metro's claim, plus all of Tamil Nadu. Crucially
+        # Karnataka is present at all -- that is the half `rok` used to drop.
+        self.assertEqual(
+            remainder,
+            {
+                "KA20-Mysore(Karnataka)(Group C)",
+                "TN01-Chennai(Tamil Nadu)(Group A)",
+            },
+        )

@@ -16,7 +16,7 @@
 
 **gvwRange** – 1-2500, 2501-3500, 3501-7500, 7501-12000, 12001-16000, 16001-40000, 40001-999999
 
-**subproduct** – GCV, PCV, Buses, MISC-D
+**subproduct** – Private Car, Taxi, Two Wheeler, GCV, PCV, Buses, MISC-D
 
 **fileType** – IRDA Statement, Rewards Statement, Enhancement Statement, ORC Statement
 
