@@ -96,7 +96,10 @@ def _env_int(name: str, default: int) -> int:
 #         rate rows.
 #         Cached documents must re-extract or they keep serving the swapped
 #         segments and stay unpinnable.
-CICS_PIPELINE_VERSION = "1.3.0"
+#   1.4.0 — A two-wheeler product exports SubProduct "Two Wheeler" instead of
+#         the raw grid token ("2w"). Cached documents must re-extract or they
+#         keep serving the old value.
+CICS_PIPELINE_VERSION = "1.4.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"

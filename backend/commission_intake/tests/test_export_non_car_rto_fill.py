@@ -106,7 +106,7 @@ class ExportNonCarRtoFillTests(DjangoTestCase):
         self.assertIn("AP01", rto)
 
     def test_two_wheeler_fills_rto_from_state(self):
-        self._assert_filled("Two Wheeler", sub_category="2w")
+        self._assert_filled("Two Wheeler", sub_category="Two Wheeler")
 
     def test_commercial_vehicle_fills_rto_from_state(self):
         for sub in ("GCV", "PCV", "Buses", "MISC-D"):

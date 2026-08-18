@@ -1211,9 +1211,14 @@ class RawToCICSTransformer:
         # Determine sub-category. For a split commercial group the segment is
         # the canonical SubProduct (GCV / PCV / Buses / MISC-D) — use it
         # verbatim so the export SubProduct column matches PRODUCT_FIELD_VALUES.
+        # A two-wheeler group is never segment-split, so without an explicit pin
+        # it fell through to the raw grid token and exported "2w"; its canonical
+        # SubProduct is the product name itself.
         sub_category = None
         if segment:
             sub_category = segment
+        elif product_subproduct == "two-wheeler":
+            sub_category = "Two Wheeler"
         elif entries:
             first_entry = entries[0]
             if first_entry.product_type:
