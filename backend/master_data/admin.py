@@ -4,6 +4,7 @@ from master_data.models import (
     CarrierMaster,
     CarrierProductHierarchyMaster,
     CarrierRTOZoneMaster,
+    CarrierVehicleMMVMaster,
     FuelTypeMaster,
     InsurerMaster,
     MasterDataUpload,
@@ -109,6 +110,15 @@ class CarrierProductHierarchyMasterAdmin(admin.ModelAdmin):
     search_fields = ("vehicle_subclass", "canonical_subclass")
     readonly_fields = READONLY_TIMESTAMPS
     ordering = ("carrier", "product", "sub_product", "vehicle_subclass")
+
+
+@admin.register(CarrierVehicleMMVMaster)
+class CarrierVehicleMMVMasterAdmin(admin.ModelAdmin):
+    list_display = ("carrier", "product", "make", "model", "variant", "fuel")
+    list_filter = ("carrier", "product", "fuel", "vehicle_class")
+    search_fields = ("make", "model", "variant")
+    readonly_fields = READONLY_TIMESTAMPS
+    ordering = ("carrier", "product", "make", "model", "variant")
 
 
 @admin.register(MasterDataUpload)
