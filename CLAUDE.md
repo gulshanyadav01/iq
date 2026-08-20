@@ -72,6 +72,7 @@ and loader upserts, so both are idempotent and neither ever deletes a row:
 docker compose exec backend python manage.py load_master_data
 
 # Regenerate the derived Chola MMV seed CSV after replacing a source .xlsx, then commit it
+# (`--out PATH` writes elsewhere; `load_master_data --file PATH` overrides the workbook)
 docker compose exec backend python manage.py export_chola_mmv_csv
 ```
 
