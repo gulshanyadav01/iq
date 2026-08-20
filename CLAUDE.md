@@ -14,28 +14,28 @@ Domain: insurance commission intake and policy data extraction.
 
 ## Project Layout
 
-| Path                         | Purpose                                                                     |
-| ---------------------------- | --------------------------------------------------------------------------- |
-| `backend/`                   | Django project root                                                         |
-| `backend/config/`            | settings.py, urls.py, celery.py, authentication.py                          |
-| `backend/accounts/`          | User/auth models and views                                                  |
-| `backend/core/`              | Shared business logic                                                       |
-| `backend/commission_intake/` | Commission statement ingestion pipeline (models, tasks, serializers, views) |
-| `backend/policy_extract/`    | Policy data extraction app (models, services, tasks)                        |
-| `backend/cins/`              | CINS product field mapping, schema, prompts, processors, validators         |
-| `backend/master_data/`       | Carrier master tables + `services/resolver.py` (RTO/product bucket lookups) |
-| `backend/system/`            | System-level models and views                                               |
-| `web/`                       | Nuxt frontend                                                               |
-| `web/app/pages/`             | Nuxt file-based routes (incl. `commission-intake/`, `policy-extract.vue`)   |
-| `web/app/components/`        | Vue components                                                              |
-| `web/app/composables/`       | Vue 3 composables                                                           |
-| `web/app/stores/`            | Pinia stores                                                                |
-| `web/app/api/`               | Frontend HTTP client (`http.ts`)                                            |
-| `web/app/middleware/`        | Nuxt route middleware                                                       |
-| `web/app/layouts/`           | Nuxt layouts                                                                |
-| `conf/`                      | Nginx dev/prod configs                                                      |
-| `scripts/`                   | Helper shell scripts                                                        |
-| `postgres/`                  | DB init SQL scripts                                                         |
+| Path                         | Purpose                                                                                                                                                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `backend/`                   | Django project root                                                                                                                                                                                                            |
+| `backend/config/`            | settings.py, urls.py, celery.py, authentication.py                                                                                                                                                                             |
+| `backend/accounts/`          | User/auth models and views                                                                                                                                                                                                     |
+| `backend/core/`              | Shared business logic                                                                                                                                                                                                          |
+| `backend/commission_intake/` | Commission statement ingestion pipeline (models, tasks, serializers, views)                                                                                                                                                    |
+| `backend/policy_extract/`    | Policy data extraction app (models, services, tasks)                                                                                                                                                                           |
+| `backend/cins/`              | CINS product field mapping, schema, prompts, processors, validators                                                                                                                                                            |
+| `backend/master_data/`       | Carrier master tables (RTO zones, product hierarchy, vehicle MMV) + `services/resolver.py` (RTO/product bucket lookups), `services/mmv.py` (make/model matcher), seed CSVs in `data/`, carrier upload API in `views/upload.py` |
+| `backend/system/`            | System-level models and views                                                                                                                                                                                                  |
+| `web/`                       | Nuxt frontend                                                                                                                                                                                                                  |
+| `web/app/pages/`             | Nuxt file-based routes (incl. `commission-intake/`, `policy-extract.vue`)                                                                                                                                                      |
+| `web/app/components/`        | Vue components                                                                                                                                                                                                                 |
+| `web/app/composables/`       | Vue 3 composables                                                                                                                                                                                                              |
+| `web/app/stores/`            | Pinia stores                                                                                                                                                                                                                   |
+| `web/app/api/`               | Frontend HTTP client (`http.ts`)                                                                                                                                                                                               |
+| `web/app/middleware/`        | Nuxt route middleware                                                                                                                                                                                                          |
+| `web/app/layouts/`           | Nuxt layouts                                                                                                                                                                                                                   |
+| `conf/`                      | Nginx dev/prod configs                                                                                                                                                                                                         |
+| `scripts/`                   | Helper shell scripts                                                                                                                                                                                                           |
+| `postgres/`                  | DB init SQL scripts                                                                                                                                                                                                            |
 
 ## Dev Workflow
 
@@ -60,6 +60,25 @@ Services in dev:
 - Auth: `http://localhost:8080/auth`
 - MinIO console: `http://localhost:9090`
 - Postgres: port 5432, DB `insur_iq`
+
+## Master Data
+
+Reference tables (RTO zones, product hierarchy, vehicle Make/Model/Variant) live in
+`backend/master_data/`. Two ways in, sharing the same parsers (`services/chola_parsers.py`)
+and loader upserts, so both are idempotent and neither ever deletes a row:
+
+```bash
+# Seed / re-seed from the committed CSVs in master_data/data/ (the normal route)
+docker compose exec backend python manage.py load_master_data
+
+# Regenerate the derived Chola MMV seed CSV after replacing a source .xlsx, then commit it
+docker compose exec backend python manage.py export_chola_mmv_csv
+```
+
+The other route is the authenticated carrier upload API,
+`POST /api/master-data/carrier-uploads/` (multipart: `carrier`, `master_type` one of
+`rto_zone|product_hierarchy|mmv`, `file` .xlsx). The `mmv` type parses ~22k rows
+synchronously in the request thread — prefer the CSV seed path for full books.
 
 ## Environment Variables
 
