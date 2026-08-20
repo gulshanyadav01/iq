@@ -14,11 +14,13 @@ from typing import Any
 
 import openpyxl
 from django.db import transaction
+from django.utils import timezone
 
 from master_data.models import (
     CarrierMaster,
     CarrierProductHierarchyMaster,
     CarrierRTOZoneMaster,
+    CarrierVehicleMMVMaster,
     FuelTypeMaster,
     InsurerMaster,
     PlanTypeMaster,
@@ -28,6 +30,7 @@ from master_data.models import (
     VehicleMaster,
     VehicleSubClassMaster,
 )
+from master_data.services.mmv import mmv_slug
 from master_data.services.canonical import (
     VEHICLE_SUBCLASS_CANONICAL,
     normalize_insurer_name,
@@ -82,6 +85,23 @@ CHOLA_RTO_ZONE_CSV_PATH = (
 CHOLA_PRODUCT_HIERARCHY_CSV_PATH = (
     Path(__file__).resolve().parents[1] / "data" / "chola_product_hierarchy.csv"
 )
+# Chola's vehicle Make/Model/Variant catalogue, generated from BOTH source
+# books (chola_mmv_2w4w_source.xlsx + chola_mmv_cv_source.xlsx) via
+# parse_chola_mmv. Two orders of magnitude larger than the other seed CSVs
+# (~22k rows), which is why its upsert is batched rather than row-by-row.
+CHOLA_MMV_CSV_PATH = Path(__file__).resolve().parents[1] / "data" / "chola_mmv.csv"
+
+# The MMV columns a reseed may rewrite — everything outside the natural key.
+# Declared once rather than derived from an arbitrary payload row, so
+# bulk_update's field list cannot drift with the shape of the input dict.
+_MMV_MUTABLE_FIELDS = [
+    "make",
+    "model",
+    "variant",
+    "fuel",
+    "sub_class",
+    "vehicle_class",
+]
 
 # ICICI carrier-scoped RTO-grid master — same shape as Chola's RTO-zone CSV
 # (carrier,zone,rto_code), generated from the source xlsx via
@@ -115,6 +135,7 @@ class MasterDataLoader:
         self._load_rto()
         self._load_chola_rto_zone()
         self._load_chola_product_hierarchy()
+        self._load_chola_mmv()
         self._load_icici_rto_grid()
         return self.result
 
@@ -436,6 +457,131 @@ class MasterDataLoader:
                 defaults={"canonical_subclass": canonical},
             )
             self._track("CarrierProductHierarchy", created)
+
+    def _load_chola_mmv(self, path: Path | None = None) -> None:
+        """Load Chola's Make/Model/Variant catalogue from the committed CSV.
+
+        Tolerant of absence (a missing CSV is a no-op, not an error). The
+        ``*_slug`` match keys are NOT stored in the CSV — they are recomputed
+        here through ``mmv_slug``, the same function the transformer and
+        validator match with, so the seeded keys can never drift from the
+        code that queries them.
+        """
+        csv_path = path or CHOLA_MMV_CSV_PATH
+        if not csv_path.exists():
+            return
+        with open(csv_path, newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        self.upsert_chola_mmv_rows(rows)
+
+    def upsert_chola_mmv_rows(self, rows) -> None:
+        """Idempotent upsert of MMV rows, batched.
+
+        Shared by the CSV-seeding path and the carrier-scoped upload API.
+
+        Deliberately NOT the per-row ``update_or_create`` every other loader
+        uses: this table seeds ~22k rows, and 22k round trips inside
+        ``load_workbook``'s single transaction would add most of a minute to
+        every seed. Instead it reads the existing rows for the carriers being
+        loaded once, then splits into one ``bulk_create`` and one
+        ``bulk_update``. The created/updated/skipped accounting the command
+        prints is unchanged.
+
+        Rows colliding on the natural key within one payload keep the FIRST
+        occurrence's descriptive extras and are counted as skipped. On both
+        real paths that count is 0 — ``parse_chola_mmv`` already dedupes and
+        the committed CSV is generated from its output — but this method is
+        public, so the guard defends the DB constraint against any caller.
+
+        Never DELETES. A row dropped from the CSV or from a re-uploaded
+        workbook lingers until removed by hand — same contract as the sibling
+        carrier masters. It bites harder here: ``_keep_preferred`` picks the
+        SHORTEST spelling per slug, so one stale orphan carrying a shorter
+        make can keep winning canonicalization for that brand. To evict,
+        delete the carrier's rows then reseed.
+        """
+        key = "CarrierVehicleMMV"
+        prepared: dict[tuple, dict] = {}
+        carriers: set[str] = set()
+
+        for row in rows:
+            carrier = self._str(row.get("carrier"))
+            product = self._str(row.get("product"))
+            make = self._str(row.get("make"))
+            model = self._str(row.get("model"))
+            variant = self._str(row.get("variant"))
+            make_slug = mmv_slug(make)
+            model_slug = mmv_slug(model)
+            if not carrier or not product or not make_slug or not model_slug:
+                self._skip(key)
+                continue
+            variant_slug = mmv_slug(variant)
+            natural = (carrier, product, make_slug, model_slug, variant_slug)
+            if natural in prepared:
+                self._skip(key)
+                continue
+            carriers.add(carrier)
+            prepared[natural] = {
+                "make": make,
+                "model": model,
+                "variant": variant,
+                "fuel": self._str(row.get("fuel")),
+                "sub_class": self._str(row.get("sub_class")),
+                "vehicle_class": self._str(row.get("vehicle_class")),
+            }
+
+        if not prepared:
+            return
+
+        existing = {
+            (
+                obj.carrier,
+                obj.product,
+                obj.make_slug,
+                obj.model_slug,
+                obj.variant_slug,
+            ): obj
+            for obj in CarrierVehicleMMVMaster.objects.filter(carrier__in=carriers)
+        }
+
+        to_create: list[CarrierVehicleMMVMaster] = []
+        to_update: list[CarrierVehicleMMVMaster] = []
+        fields = _MMV_MUTABLE_FIELDS + ["updated_at"]
+
+        for natural, defaults in prepared.items():
+            carrier, product, make_slug, model_slug, variant_slug = natural
+            obj = existing.get(natural)
+            if obj is None:
+                to_create.append(
+                    CarrierVehicleMMVMaster(
+                        carrier=carrier,
+                        product=product,
+                        make_slug=make_slug,
+                        model_slug=model_slug,
+                        variant_slug=variant_slug,
+                        **defaults,
+                    )
+                )
+            else:
+                for name, value in defaults.items():
+                    setattr(obj, name, value)
+                # bulk_update skips pre_save, so TimeStampedUUIDModel's
+                # auto_now never fires — set it explicitly or a reseed leaves
+                # updated_at frozen and "what did the last seed touch?"
+                # becomes unanswerable.
+                obj.updated_at = timezone.now()
+                to_update.append(obj)
+
+        if to_create:
+            CarrierVehicleMMVMaster.objects.bulk_create(to_create, batch_size=2000)
+        if to_update:
+            CarrierVehicleMMVMaster.objects.bulk_update(
+                to_update, fields, batch_size=2000
+            )
+
+        bucket = self.result.sheets.setdefault(key, SheetResult())
+        bucket.created += len(to_create)
+        bucket.updated += len(to_update)
 
     @staticmethod
     def _canonical_subclass(product: str, raw_name: str) -> str:

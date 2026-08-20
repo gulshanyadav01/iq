@@ -11,7 +11,11 @@ from django.test import TestCase
 
 from master_data.models import RTOMaster
 from master_data.services.loader import RTO_CSV_PATH, MasterDataLoader
-from master_data.services.resolver import MasterDataResolver
+from master_data.services.resolver import (
+    MasterDataResolver,
+    match_rto_localities,
+    rto_locality_expansions,
+)
 from master_data.services.rto import state_slug_for_code
 
 
@@ -123,6 +127,92 @@ class RtosForStatesTests(TestCase):
     def test_empty_or_unmapped_state_returns_empty(self):
         self.assertEqual(self.r.rtos_for_states([], "CAR"), [])
         self.assertEqual(self.r.rtos_for_states(["narnia"], "CAR"), [])
+
+
+class RtoLocalityFallbackTests(TestCase):
+    """The global-master fallback for a metro a carrier's own zone master does
+    not cover -- Chola keys a Two-Wheeler row ``KA (Bangalore)`` but
+    ``chola_rto_zone.csv`` seeds no bangalore zone.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        rows = [
+            # Bangalore: the metro the fallback exists for.
+            (1, "KA01", "KA01-Bangalore(Karnataka)(Group A)", "karnataka"),
+            (2, "KA02", "KA02-Bangalore(Karnataka)(Group A)", "karnataka"),
+            # Same state, different locality -- must NOT come along.
+            (3, "KA20", "KA20-Mysore(Karnataka)(Group C)", "karnataka"),
+            # Tamil Nadu, so a "TN/ROK" cell has a second state in scope.
+            (4, "TN01", "TN01-Chennai(Tamil Nadu)(Group A)", "tamil-nadu"),
+            # Same locality name in two states -- the scope is the disambiguator.
+            (5, "AP09", "AP09-Hyderabad(Andhra Pradesh)(Group A)", "andhra-pradesh"),
+            (6, "TS09", "TS09-Hyderabad(Telangana)(Group A)", "telangana"),
+            # No "(Group X)" suffix: two rows in the shipped master look like
+            # this, and they must still index.
+            (7, "UP29", "UP29-Padrauna(Uttar Pradesh)", "uttar-pradesh"),
+        ]
+        for rto_id, code, value, slug in rows:
+            RTOMaster.objects.create(
+                rto_id=rto_id,
+                code=code,
+                value=value,
+                state_slug=slug,
+                car_zone=1,
+                tw_zone=1,
+                cv_zone=1,
+            )
+
+    def setUp(self):
+        self.index = rto_locality_expansions()
+
+    def test_metro_label_resolves_only_that_localitys_codes(self):
+        self.assertEqual(
+            match_rto_localities(self.index, ["karnataka"], "KA (Bangalore)"),
+            ["KA01", "KA02"],
+        )
+
+    def test_state_scope_disambiguates_a_shared_locality_name(self):
+        """48 locality names in the shipped master span more than one state."""
+        self.assertEqual(
+            match_rto_localities(self.index, ["telangana"], "TS (Hyderabad)"),
+            ["TS09"],
+        )
+        self.assertEqual(
+            match_rto_localities(self.index, ["andhra-pradesh"], "AP (Hyderabad)"),
+            ["AP09"],
+        )
+
+    def test_state_scope_blocks_an_out_of_scope_locality(self):
+        self.assertEqual(
+            match_rto_localities(self.index, ["tamil-nadu"], "KA (Bangalore)"), []
+        )
+
+    def test_abbreviation_and_remainder_tokens_never_match(self):
+        """The ≥4-char + word-boundary rule is what keeps these inert. A false
+        hit here fills the export's RTO cell with another geography's codes.
+        """
+        for label in ("TN/ROK", "KA", "ROM", "ROTN", "NE", "AP/TS", "UP- East"):
+            with self.subTest(label=label):
+                self.assertEqual(
+                    match_rto_localities(
+                        self.index,
+                        ["karnataka", "tamil-nadu", "uttar-pradesh"],
+                        label,
+                    ),
+                    [],
+                )
+
+    def test_value_without_group_suffix_still_indexes(self):
+        self.assertEqual(
+            match_rto_localities(self.index, ["uttar-pradesh"], "UP (Padrauna)"),
+            ["UP29"],
+        )
+
+    def test_empty_inputs_return_empty(self):
+        self.assertEqual(match_rto_localities(self.index, [], "Bangalore"), [])
+        self.assertEqual(match_rto_localities(self.index, ["karnataka"], ""), [])
+        self.assertEqual(match_rto_localities({}, ["karnataka"], "Bangalore"), [])
 
 
 class LoadRtoCsvTests(TestCase):

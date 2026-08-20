@@ -13,6 +13,7 @@ This transformer handles all deterministic transformations:
 
 import json
 import logging
+import os
 import re
 import hashlib
 from collections import OrderedDict
@@ -457,6 +458,11 @@ STATE_NAME_MAPPINGS = {
     "jammu & kashmir": "jammu-and-kashmir",
     "jharkhand": "jharkhand",
     "karnataka": "karnataka",
+    # Misspelling seen in Chola's grids. Long enough to match as a bare
+    # substring, so no boundary risk; the correctly-spelled key cannot cover it
+    # because the 2-letter "ka" fallback is boundary-anchored and will not fire
+    # inside a word.
+    "karnatka": "karnataka",
     "kerala": "kerala",
     "ladakh": "ladakh",
     "lakshadweep": "lakshadweep",
@@ -544,11 +550,22 @@ STATE_NAME_MAPPINGS = {
     # subtracts those codes from the remainder rule's state-derived fill. This
     # is the same shape as the already-shipped "UP" / "UP- East" pair.
     #
-    # Deliberately NOT here: "ROK" (Rest of Karnataka, in the Two-Wheeler
-    # grid). Its sibling "KA (Bangalore)" resolves to plain karnataka with NO
-    # explicit rto, because chola_rto_zone.csv seeds no bangalore zone -- so
-    # mapping ROK would produce two identical karnataka rules at different
-    # rates rather than a complement. Seed the zone first.
+    # "rok" is the Two-Wheeler grid's remainder half, and its metro sibling is
+    # the row keyed "KA (Bangalore)". That pair was NOT safe to map until the
+    # metro row could claim an RTO set of its own: chola_rto_zone.csv seeds no
+    # bangalore zone, so the sibling resolved to plain karnataka with no
+    # explicit rto and mapping "rok" would have produced two identical
+    # karnataka rules at different rates instead of a complement. It is safe
+    # now -- _expand_rto_codes falls back to the GLOBAL RTO master's locality
+    # index when the carrier's own zone master has no entry, so "KA
+    # (Bangalore)" claims the 18 bangalore codes and the complement is real.
+    # Removing that fallback means removing "rok" again.
+    #
+    # Note "rok" travels in a MULTI-STATE cell: the grid keys the row "TN/ROK",
+    # i.e. all of Tamil Nadu plus the Karnataka remainder. Before this mapping
+    # existed only "tn" matched and the Karnataka half was dropped from the
+    # export entirely.
+    "rok": "karnataka",
     "rom": "maharashtra",
     "rotn": "tamil-nadu",
 }
@@ -589,6 +606,58 @@ class _BoundaryKey(NamedTuple):
     ranges: Tuple
 
 
+# product_subproduct -> the MMV / product-hierarchy master's product bucket.
+# ONE definition, imported by both the transformer (which canonicalizes
+# make/model inside a bucket) and CholaProductHierarchyValidator /
+# CholaMMVValidator (which validate against the same buckets), for the same
+# reason ``product_bucket`` has exactly one definition in the resolver: two
+# call sites that disagree about what a product means would validate against a
+# different vocabulary than the one that was written.
+_SUBPRODUCT_TO_BUCKET = {
+    "car": "Car",
+    "two-wheeler": "TW",
+}
+
+
+def product_subproduct_bucket(product_subproduct: Optional[str]) -> Optional[str]:
+    """Map a ``product_subproduct`` to ``Car`` / ``TW`` / ``CV``, or None.
+
+    Commercial variants all collapse to CV; anything unrecognised returns
+    None, which every caller treats as "say nothing about this product"
+    rather than guessing a bucket.
+    """
+    if not product_subproduct:
+        return None
+    if product_subproduct in _SUBPRODUCT_TO_BUCKET:
+        return _SUBPRODUCT_TO_BUCKET[product_subproduct]
+    if product_subproduct.startswith("commercial"):
+        return "CV"
+    return None
+
+
+def mmv_enabled() -> bool:
+    """``CINS_CHOLA_MMV`` — gates BOTH the canonicalization here and
+    ``CholaMMVValidator``.
+
+    One switch on purpose: disabling only half would leave the validator
+    flagging spellings the transformer would have folded, turning a rollback
+    into a wall of findings.
+
+    **Defaults to OFF.** Measured against a dump of 2,237 live Chola deals, the
+    fold is now provably non-destructive (zero wrong make rewrites, against 93%
+    of deals corrupted before the matcher was fixed) — but it is also barely
+    worth its blast radius: it changes 737 of ~1.34M make values, all of them
+    corporate-suffix tidy-ups, while half the makes those deals use are absent
+    from the master entirely. Turning it on changes CICS output and so needs a
+    ``CICS_PIPELINE_VERSION`` bump; leaving it off keeps the cache intact. Opt
+    in once the master's coverage justifies it.
+    """
+    raw = os.environ.get("CINS_CHOLA_MMV")
+    if raw is None:
+        return False
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
 class RawToCICSTransformer:
     """
     Transforms RawExtraction to full CICS schema.
@@ -622,6 +691,17 @@ class RawToCICSTransformer:
         # carrier is Chola; empty (and inert) for every other carrier or when
         # master_data is unavailable.
         self._carrier_zone_map: Dict[str, Dict[str, List[str]]] = {}
+        # Global RTO master locality index: state slug -> locality -> RTO codes.
+        # The fallback consulted when a carrier's own zone master has no entry
+        # for a metro the grid names (e.g. Chola's "KA (Bangalore)"). Built
+        # alongside _carrier_zone_map in transform(); empty (and inert)
+        # otherwise.
+        self._rto_locality_map: Dict[str, Dict[str, List[str]]] = {}
+        # Chola Make/Model catalogue, keyed by product bucket. Built alongside
+        # _carrier_zone_map in transform(); empty (and inert) otherwise, which
+        # is what lets other modules instantiate this class purely to reuse a
+        # normalization helper without touching the DB.
+        self._mmv_index: Dict[str, dict] = {}
         # Dedup set for the "zone label not found in master" warning — one
         # warning per distinct unmatched text per document, not per rule.
         self._zone_warned: Set[str] = set()
@@ -664,6 +744,8 @@ class RawToCICSTransformer:
         # carrier). Guarded: DB-unavailable / unseeded degrades to an empty
         # map, i.e. today's behaviour (zone labels simply don't resolve).
         self._carrier_zone_map = {}
+        self._rto_locality_map = {}
+        self._mmv_index = {}
         if self._carrier_code == "Chola":
             try:
                 from master_data.services.resolver import carrier_zone_expansions
@@ -672,6 +754,31 @@ class RawToCICSTransformer:
             except Exception as e:
                 logger.warning(f"Chola zone expansion map unavailable: {e}")
                 self._carrier_zone_map = {}
+            # Global-master locality index, the fallback for a metro label the
+            # carrier's own zone master does not cover ("KA (Bangalore)").
+            # Loaded separately so a failure on either side leaves the other
+            # working, and scoped to Chola for now because that is the only
+            # carrier whose grids key rows by a metro-vs-remainder pair.
+            try:
+                from master_data.services.resolver import rto_locality_expansions
+
+                self._rto_locality_map = rto_locality_expansions()
+            except Exception as e:
+                logger.warning(f"RTO locality index unavailable: {e}")
+                self._rto_locality_map = {}
+            # Make/Model catalogue, used to fold a rule's free-text make/model
+            # onto one spelling. Same shape of guard as the two above: a
+            # DB-unavailable or unseeded master leaves the map empty, which
+            # means every make/model passes through verbatim — today's
+            # behaviour.
+            if mmv_enabled():
+                try:
+                    from master_data.services.mmv import build_mmv_index
+
+                    self._mmv_index = build_mmv_index("Chola")
+                except Exception as e:
+                    logger.warning(f"Chola MMV index unavailable: {e}")
+                    self._mmv_index = {}
 
         # Transform commission period
         period = self._transform_period(raw, document_date)
@@ -1211,9 +1318,14 @@ class RawToCICSTransformer:
         # Determine sub-category. For a split commercial group the segment is
         # the canonical SubProduct (GCV / PCV / Buses / MISC-D) — use it
         # verbatim so the export SubProduct column matches PRODUCT_FIELD_VALUES.
+        # A two-wheeler group is never segment-split, so without an explicit pin
+        # it fell through to the raw grid token and exported "2w"; its canonical
+        # SubProduct is the product name itself.
         sub_category = None
         if segment:
             sub_category = segment
+        elif product_subproduct == "two-wheeler":
+            sub_category = "Two Wheeler"
         elif entries:
             first_entry = entries[0]
             if first_entry.product_type:
@@ -1844,8 +1956,11 @@ class RawToCICSTransformer:
                     break
         state = self._expand_state_names(location_text, master_data)
 
-        # Extract/expand RTO codes from location_text
-        rto = self._expand_rto_codes(location_text, master_data)
+        # Extract/expand RTO codes from location_text. `state` is threaded in so
+        # a metro label the carrier's zone master does not cover ("KA
+        # (Bangalore)") can still resolve against the global RTO master, scoped
+        # to the state this very text just produced.
+        rto = self._expand_rto_codes(location_text, master_data, state_slugs=state)
 
         # Built once and threaded through the probe-based recoveries below.
         # _segment_probe re-joins and re-lowercases four fields on every call,
@@ -2054,6 +2169,19 @@ class RawToCICSTransformer:
         # model cell is usually part of the variant name.
         vehicle_make = self._split_composite_makes(vehicle_make)
         vehicle_make_exclude = self._split_composite_makes(vehicle_make_exclude)
+
+        # Fold each make/model onto the master's spelling. Runs AFTER the
+        # composite split — a cell holding three makes has to become three
+        # entries before any of them can be looked up. Include and exclude
+        # lists get identical treatment: an exclusion names real vehicles too,
+        # and leaving one side un-canonicalized would mean the same
+        # manufacturer is spelled two ways within one document.
+        vehicle_make, vehicle_model = self._canonicalize_make_model(
+            vehicle_make, vehicle_model
+        )
+        vehicle_make_exclude, vehicle_model_exclude = self._canonicalize_make_model(
+            vehicle_make_exclude, vehicle_model_exclude
+        )
 
         # RTO from conditions dict — expand categories via master data.
         # The LLM may use "rto", "rto_category", "rto_zone", or similar — accept any.
@@ -2501,6 +2629,77 @@ class RawToCICSTransformer:
                     seen.add(key)
                     out.append(s)
         return out or None
+
+    def _canonicalize_make_model(
+        self,
+        makes: Optional[List[str]],
+        models: Optional[List[str]],
+    ) -> Tuple[Optional[List[str]], Optional[List[str]]]:
+        """Fold a rule's make/model lists onto the seeded master's spelling.
+
+        SPELLING ONLY. Every entry is either replaced by its canonical string
+        or left exactly as it was: list lengths never change, entries are
+        never added, dropped or reordered. That invariant is what keeps this
+        out of the rule-count and coverage machinery — it can shift a dedupe
+        group key (see below), but it can never make a rule appear or vanish.
+
+        Inert unless the document is Chola AND the master seeded AND
+        ``CINS_CHOLA_MMV`` is on — ``self._mmv_index`` is empty in every other
+        case, and an empty index returns the inputs unchanged.
+
+        Sentinels ("All Other Make/Models") pass through verbatim: the bucket
+        fan-out in ``_clone_make_bucket`` matches on that literal text.
+
+        Note for the exclude lists: ``vehicle_make_exclude`` /
+        ``vehicle_model_exclude`` ARE part of ``_DEDUPE_SCALAR_FIELDS``, so
+        canonicalizing them can merge two dedupe groups that previously
+        differed only by spelling. That is the intended effect — they name the
+        same excluded vehicles — but it is a real behaviour change, which is
+        why ``CICS_PIPELINE_VERSION`` moves with it.
+        """
+        if not self._mmv_index:
+            return makes, models
+
+        bucket = product_subproduct_bucket(self._product_subproduct)
+        if bucket is None:
+            return makes, models
+
+        from master_data.services.mmv import match_make, match_model, scope_make
+
+        canonical_makes = None
+        matched_makes = []
+        if makes:
+            canonical_makes = []
+            for item in makes:
+                text = str(item)
+                if self._SENTINEL_MAKE_MODEL_RE.search(text):
+                    canonical_makes.append(item)
+                    continue
+                hit = match_make(self._mmv_index, bucket, text)
+                matched_makes.append(hit)
+                # Unmatched text stays verbatim in the OUTPUT, but must not
+                # become the model lookup's scope — see scope_make's docstring.
+                canonical_makes.append(hit or item)
+
+        if not models:
+            return canonical_makes if makes else makes, models
+
+        # Scope model lookups by the rule's make when exactly one RESOLVED —
+        # a model name is only unique within its manufacturer. Shared with
+        # CholaMMVValidator so the two cannot disagree about what "unknown"
+        # means for a model.
+        scope = scope_make(matched_makes)
+        canonical_models = []
+        for item in models:
+            text = str(item)
+            if self._SENTINEL_MAKE_MODEL_RE.search(text):
+                canonical_models.append(item)
+                continue
+            canonical_models.append(
+                match_model(self._mmv_index, bucket, scope, text) or item
+            )
+
+        return (canonical_makes if makes else makes), canonical_models
 
     def _parse_range_field(
         self, text: Optional[str]
@@ -4285,11 +4484,38 @@ class RawToCICSTransformer:
     def _match_carrier_zones(self, normalized_text: str) -> List[str]:
         """Zone slugs from ``self._carrier_zone_map`` whose label (slug with
         hyphens replaced by spaces, upper-cased) appears word-boundary
-        anchored in ``normalized_text``."""
+        anchored in ``normalized_text``.
+
+        A two-token label also matches with its tokens REVERSED. The same Chola
+        zone is spelled "UP- East" in the Private Car / CV headers and "East UP"
+        in the Two-Wheeler key column; only the forward order matched, so 115
+        Two-Wheeler rules resolved no zone, claimed no explicit RTO, and fell
+        back to a full Uttar Pradesh fill -- silently disabling the UP /
+        UP- East complement on that sheet.
+
+        Kept deliberately narrow. Only exactly-two-token labels are reversed
+        (full permutations of 3+ tokens are combinatorial and would start
+        matching text nobody wrote), the reversed form is still one adjacent
+        word-boundary-anchored phrase (so it can never match MORE text than the
+        forward form does -- it is an extra specific alternative, not a
+        loosening), and a reversal that collides with another zone's forward
+        label is dropped rather than allowed to claim that zone's rows.
+        """
+        forward_labels = {
+            slug.replace("-", " ").upper() for slug in self._carrier_zone_map
+        }
         matched = []
         for zone_slug in self._carrier_zone_map:
             label = zone_slug.replace("-", " ").upper()
-            if re.search(rf"\b{re.escape(label)}\b", normalized_text):
+            variants = [label]
+            parts = label.split(" ")
+            if len(parts) == 2:
+                flipped = f"{parts[1]} {parts[0]}"
+                if flipped not in forward_labels:
+                    variants.append(flipped)
+            if any(
+                re.search(rf"\b{re.escape(v)}\b", normalized_text) for v in variants
+            ):
                 matched.append(zone_slug)
         return matched
 
@@ -4306,7 +4532,10 @@ class RawToCICSTransformer:
         self.warnings.append(f"Chola zone label not found in master: {raw_text!r}")
 
     def _expand_rto_codes(
-        self, rto_text: Optional[str], master_data: Optional[List[RawMasterDataEntry]]
+        self,
+        rto_text: Optional[str],
+        master_data: Optional[List[RawMasterDataEntry]],
+        state_slugs: Optional[List[str]] = None,
     ) -> Optional[List[str]]:
         """
         Expand RTO text to canonical RTO codes.
@@ -4315,6 +4544,11 @@ class RawToCICSTransformer:
         Chola-gated: also resolves a configured UW-zone label (e.g. "Central
         MH", "UP- East") to the RTO codes it represents via a scoped
         ``CarrierRTOZoneMaster`` query built once in ``transform()``.
+
+        ``state_slugs`` — the states ``_expand_state_names`` resolved from the
+        SAME text — enables the last-resort global RTO master lookup described
+        below. Optional so the several call sites that have no state context
+        keep today's behaviour.
         """
         if not rto_text:
             return None
@@ -4341,7 +4575,32 @@ class RawToCICSTransformer:
             matched_zones = self._match_carrier_zones(normalized_zone_text)
             for zone_slug in matched_zones:
                 discovered.extend(self._carrier_zone_map[zone_slug].get("rto", []))
-            if not matched_zones:
+
+            # Last resort: the carrier's zone master had nothing, so ask the
+            # GLOBAL RTO master whether the label names a locality inside the
+            # state this rule already resolved. Chola's Two Wheeler grid keys a
+            # row "KA (Bangalore)" against a differently-priced "TN/ROK" row,
+            # but seeds no bangalore zone -- without this the metro row claims
+            # no RTO, the export fills it with all 71 Karnataka codes, and the
+            # two rows collide on identical geography.
+            #
+            # Ordering is the guard: this runs only when nothing else matched,
+            # so a seeded carrier zone always wins and this can only ever add
+            # geography where there was none. See ``match_rto_localities`` for
+            # why the state scope and the boundary rule are load-bearing.
+            fallback_codes: List[str] = []
+            if not discovered and state_slugs and self._rto_locality_map:
+                from master_data.services.resolver import match_rto_localities
+
+                fallback_codes = match_rto_localities(
+                    self._rto_locality_map, state_slugs, rto_text
+                )
+                discovered.extend(fallback_codes)
+
+            # Warn only if BOTH the carrier zone master and the global-master
+            # fallback came up empty -- a label the fallback resolved is not an
+            # unmatched zone label.
+            if not matched_zones and not fallback_codes:
                 self._warn_unmatched_zone(rto_text, normalized_zone_text)
 
         if not discovered:

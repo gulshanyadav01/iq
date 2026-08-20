@@ -19,6 +19,7 @@ date exactly, `period_label` empty.
    header (`Wed, 02 Jul 2025`) was in `primary_content`.
 
 **Fixes applied:**
+
 - `prompts/pass1_metadata_prompt.md` §3: added explicit fallback — when no
   period is stated in an email body, use the email's own `Date:` header as
   `start_date`; never use today/processing date. (lru_cached → **restart celery**
@@ -32,10 +33,11 @@ and uses it before `datetime.utcnow()`. Order: extracted `start_date` →
 `parse_document_date(content)` (module fn in `raw_to_cics_transformer.py`) which
 reads the email `Date:` header (RFC 2822 → ISO). Computed in `extract_multi_pass`
 from the Pass-1 content and passed to both `transform()` calls there.
+
 - **Gap:** `rerun_pass3` (pipeline.py) re-transform path passes no `document_date`
   (email header not persisted in pass1/2/3 files) → still relies on Pass 1's own
   `start_date`, else today. Acceptable for that LLM-free re-run.
 - Non-email docs (PDF/excel) have no `Date:` header → `document_date=None` →
   today last resort unchanged.
 - Tests: `cins/tests/test_period_document_date_fallback.py`.
-See [[architecture_email_primary_content]].
+  See [[architecture_email_primary_content]].

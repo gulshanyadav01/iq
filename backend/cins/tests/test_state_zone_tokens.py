@@ -66,16 +66,31 @@ class RestOfStateTokenTests(TestCase):
         """
         self.assertIsNone(self.t._expand_state_names("ROMG", None))
 
-    def test_rok_is_not_mapped(self):
-        """Rest-of-Karnataka is deliberately unmapped until a bangalore zone exists.
+    def test_rok_resolves_to_karnataka(self):
+        self.assertEqual(self.t._expand_state_names("ROK", None), ["karnataka"])
 
-        Its sibling ``KA (Bangalore)`` resolves to plain karnataka with no
-        explicit rto (chola_rto_zone.csv seeds no bangalore zone), so mapping
-        ROK would produce two identical karnataka rules at different rates
-        rather than the complement pair ROM/ROTN get. ``TN/ROK`` still yields
-        tamil-nadu from its other half.
+    def test_tn_rok_is_a_multi_state_cell(self):
+        """The Two-Wheeler grid keys a row ``TN/ROK`` -- all of Tamil Nadu PLUS
+        the Karnataka remainder. Before ``rok`` was mapped only ``tn`` matched
+        and the Karnataka half was dropped from the export entirely.
         """
-        self.assertEqual(self.t._expand_state_names("TN/ROK", None), ["tamil-nadu"])
+        self.assertEqual(
+            self.t._expand_state_names("TN/ROK", None),
+            ["karnataka", "tamil-nadu"],
+        )
+
+    def test_rok_does_not_fire_inside_a_longer_token(self):
+        """3 characters, so it takes the boundary-matched arm -- same protection
+        ``rom`` gets in the test above."""
+        self.assertIsNone(self.t._expand_state_names("ROKX", None))
+
+    def test_karnatka_misspelling_resolves(self):
+        """Chola spells it without the second 'a' in places. The 2-letter ``ka``
+        fallback is boundary-anchored and cannot rescue it from inside a word.
+        """
+        self.assertEqual(
+            self.t._expand_state_names("Karnatka (Bangalore)", None), ["karnataka"]
+        )
 
 
 class NorthEastGroupTokenTests(TestCase):

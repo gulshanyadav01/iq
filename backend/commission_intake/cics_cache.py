@@ -96,7 +96,34 @@ def _env_int(name: str, default: int) -> int:
 #         rate rows.
 #         Cached documents must re-extract or they keep serving the swapped
 #         segments and stay unpinnable.
-CICS_PIPELINE_VERSION = "1.3.0"
+#   1.4.0 — A two-wheeler product exports SubProduct "Two Wheeler" instead of
+#         the raw grid token ("2w"). Cached documents must re-extract or they
+#         keep serving the old value.
+#   1.5.0 — CV/PCV rules whose vehicle_sub_class is exactly "taxi" are mirrored
+#         into a duplicate Private Car / Taxi product (pcv_taxi_mirror). Cached
+#         documents must re-extract or they keep serving exports with the
+#         Private Car deal missing.
+#   1.6.0 — Chola metro/remainder geography. "ROK" now maps to karnataka (the
+#         "TN/ROK" row previously dropped its Karnataka half entirely), the
+#         misspelling "Karnatka" resolves, and a metro label the carrier's own
+#         zone master does not cover ("KA (Bangalore)") falls back to the
+#         global RTO master's locality index for its explicit RTO set. A
+#         two-token zone label also matches with its tokens reversed, so the
+#         Two-Wheeler sheet's "East UP" resolves the same zone the Private Car
+#         / CV headers spell "UP- East" instead of falling back to a full
+#         Uttar Pradesh fill. Cached documents must re-extract or they keep
+#         serving the missing state, the over-broad all-of-Karnataka RTO fill
+#         and the un-complemented UP rows.
+#         NOTE: a 1.7.0 was briefly prepared for Chola make/model
+#         canonicalization and then withdrawn before release. The fold now
+#         ships behind CINS_CHOLA_MMV, which defaults to FALSE, so the
+#         transformer's output is byte-identical to 1.6.0 and no cache entry
+#         needs to be invalidated. **Enabling that flag in any environment is a
+#         pipeline-version change**: the fold rewrites vehicle_make /
+#         vehicle_model and their _exclude twins, and the _exclude fields are
+#         part of _DEDUPE_SCALAR_FIELDS, so two groups that differed only by
+#         spelling would merge. Bump to 1.7.0 at that point, not before.
+CICS_PIPELINE_VERSION = "1.6.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"

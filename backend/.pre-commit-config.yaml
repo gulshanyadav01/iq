@@ -13,6 +13,13 @@ repos:
       - id: detect-private-key
       - id: check-added-large-files
         args: ["--maxkb=750"]
+        # master_data/data/ holds carrier-supplied seed masters and the source
+        # workbooks they derive from — data, not source. The Chola MMV books
+        # are ~1.5MB each and cannot be split or shrunk without losing either
+        # the CSV's reviewability or the ability to regenerate it via
+        # `manage.py export_chola_mmv_csv`. The 750KB guard stays on for every
+        # other path, which is where it earns its keep.
+        exclude: "master_data/data/"
       - id: debug-statements
   # Ruff replaces black + isort + flake8 + autoflake (lint, import-sort, format,
   # unused-import removal) in one fast tool. Do not re-add those — they were
@@ -57,6 +64,11 @@ repos:
       - id: codespell
         additional_dependencies:
           - tomli
+        # Seed masters are transcribed VERBATIM from carrier-supplied
+        # workbooks. Real vehicle names (ATHER, TORK, SXL, LOEV) and the
+        # sources' own typos read as misspellings, and "correcting" one would
+        # stop the row matching a grid that spells it the same way.
+        exclude: "master_data/data/.*\\.csv$"
         args:
           [
             "--skip",

@@ -17,4 +17,4 @@ Date: {email_data.date}
 
 **Why:** The pipeline assumes the body has all extractable info. Headers were intentionally minimized to avoid noise — but Subject and recipient often carry the only carrier signal in broker-forwarded emails (e.g., subject `[External]FG March & April Grid Confirmation`, To: `Derryl.George2@futuregenerali.in`).
 
-**How to apply:** When provider extraction looks wrong on an .eml doc, look at the *full* email (S3 file or `email_context` column) — not just `primary_content`. The signal may be in the subject or recipient that Pass 1 never saw.
+**How to apply:** When provider extraction looks wrong on an .eml doc, look at the _full_ email (S3 file or `email_context` column) — not just `primary_content`. The signal may be in the subject or recipient that Pass 1 never saw.

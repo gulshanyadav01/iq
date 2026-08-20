@@ -16,7 +16,7 @@
 
 **gvwRange** – 1-2500, 2501-3500, 3501-7500, 7501-12000, 12001-16000, 16001-40000, 40001-999999
 
-**subproduct** – GCV, PCV, Buses, MISC-D
+**subproduct** – Private Car, Taxi, Two Wheeler, GCV, PCV, Buses, MISC-D
 
 **fileType** – IRDA Statement, Rewards Statement, Enhancement Statement, ORC Statement
 
@@ -44,6 +44,12 @@ grid's verbatim label: `NCB GT OR Equal to 25%` → 25-100, `NCB GT 25%` → 26-
 tier's paired base grid gets the complement (0 to lowest-marked-start minus 1). Both null
 means the rule has no NCB dimension — NOT 0-100. The legacy `NCB` Yes/No column is derived
 from this band and retained for backward compatibility.
+
+**vehicleMake / vehicleModel** – open text, not an enum. For Chola the allowed spellings are
+whatever `CarrierVehicleMMVMaster` carries (seeded from `master_data/data/chola_mmv.csv`): the
+transformer folds a rule's free-text value onto the master's spelling, and `CholaMMVValidator`
+raises a MEDIUM finding for anything no vehicle matches. `All Other Make/Models` is a bucket
+sentinel, never canonicalized or flagged. Exclusions export as `exclude(A, B)`.
 
 **buParameters** – Motor
 
