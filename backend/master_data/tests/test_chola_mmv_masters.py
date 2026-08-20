@@ -70,8 +70,8 @@ class CholaMMVLoaderTests(TestCase):
         loader = MasterDataLoader()
         loader.upsert_chola_mmv_rows(
             [
-                _row(make="TATA MOTORS LTD", model="407", fuel="diesel"),
-                _row(make="Tata", model="407", fuel="cng"),
+                _row(make="TATA MOTORS PVT LTD", model="407", fuel="diesel"),
+                _row(make="Tata Motors", model="407", fuel="cng"),
             ]
         )
         self.assertEqual(CarrierVehicleMMVMaster.objects.count(), 1)
@@ -151,15 +151,19 @@ class CholaMMVIndexTests(TestCase):
     def test_index_is_built_from_the_seeded_rows(self):
         MasterDataLoader().upsert_chola_mmv_rows(
             [
-                _row(product="CV", make="TATA MOTORS LTD", model="407"),
+                _row(product="CV", make="TATA MOTORS PVT LTD", model="407"),
                 _row(product="Car", make="TATA", model="NEXON"),
             ]
         )
         index = build_mmv_index("Chola")
-        # Carrier-wide preferred spelling: one brand, one name, regardless of
-        # which book the rule's product came from.
-        self.assertEqual(match_make(index, "CV", "TATA MOTORS LTD"), "TATA")
-        self.assertEqual(match_make(index, "Car", "Tata"), "TATA")
+        # Makes match CARRIER-WIDE, so a make seeded only on Car resolves for
+        # a CV rule and vice versa. Note the two spellings are NOT folded
+        # together: "TATA MOTORS" is a different slug from "TATA" now that
+        # industry words count as identity.
+        self.assertEqual(
+            match_make(index, "Car", "Tata Motors Pvt Ltd"), "TATA MOTORS PVT LTD"
+        )
+        self.assertEqual(match_make(index, "CV", "Tata"), "TATA")
 
     def test_index_for_an_unseeded_carrier_is_empty(self):
         self.assertEqual(build_mmv_index("ICICI"), {"_makes": {}})

@@ -11,6 +11,7 @@ Run from the backend container:
     python manage.py test master_data.tests.test_chola_mmv_parsers -v 2
 """
 
+import re
 import unittest
 from unittest import mock
 
@@ -337,9 +338,92 @@ class ParseCholaMMVCommercialTests(unittest.TestCase):
 class MMVSlugTests(unittest.TestCase):
     def test_corporate_boilerplate_and_conjunctions_are_dropped(self):
         self.assertEqual(mmv_slug("MAHINDRA AND MAHINDRA"), "mahindra")
-        self.assertEqual(mmv_slug("TATA MOTORS LTD"), "tata")
+        self.assertEqual(mmv_slug("TATA MOTORS PVT LTD"), "tata motors")
         self.assertEqual(mmv_slug("Tata"), "tata")
-        self.assertEqual(mmv_slug("A V AUTOMOTIVES PVT LTD"), "a v")
+        self.assertEqual(mmv_slug("A V AUTOMOTIVES PVT LTD"), "a v automotives")
+
+    def test_industry_words_are_identity_and_survive_slugging(self):
+        """Regression, measured on 2,237 live Chola deals.
+
+        These words were once treated as noise, which collapsed unrelated
+        firms onto one slug and let the matcher rewrite each into the other.
+        They must keep the names apart.
+        """
+        self.assertNotEqual(mmv_slug("OM INDUSTRIES"), mmv_slug("OM MOTORS"))
+        self.assertNotEqual(mmv_slug("STAR INDUSTRIES"), mmv_slug("STAR AUTO"))
+        self.assertNotEqual(
+            mmv_slug("NIKHIL ENTERPRISES"), mmv_slug("NIKHIL FURNITURE")
+        )
+
+
+class ProductionMakeRegressionTests(unittest.TestCase):
+    """The matcher against the REAL committed master, using make names taken
+    verbatim from a dump of 2,237 live Chola deals (``Chola_Dump_AMJJ.xlsx``).
+
+    Every name below was silently rewritten into a DIFFERENT real company by
+    the first cut of this matcher, on 93% of those deals. Fixture-sized tests
+    did not catch any of them — the fixtures were too small for two makes to
+    collide — so this reads the 22k-row seed CSV the pipeline actually uses.
+
+    The invariant is not "these must match"; it is **never a different
+    company**. A canonical spelling must name the same thing the grid did,
+    ignoring case, punctuation and corporate forms.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import csv
+
+        from master_data.services.loader import CHOLA_MMV_CSV_PATH
+
+        with open(CHOLA_MMV_CSV_PATH, encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        for row in rows:
+            row["make_slug"] = mmv_slug(row["make"])
+            row["model_slug"] = mmv_slug(row["model"])
+        cls.index = _index(rows)
+
+    @staticmethod
+    def _ident(text):
+        return " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+
+    def test_names_that_used_to_be_rewritten_into_other_companies(self):
+        for product, text in (
+            ("Car", "EICHER"),  # -> "Eicher Polaris"
+            ("CV", "HYUNDAI"),  # -> "HYUNDAI CONSTRUCTION CO"
+            ("CV", "SUPREME"),  # -> "AUTO SUPREME INDUSTRIES"
+            ("CV", "INTERNATIONAL"),  # -> "INTERNATIONAL TRACTORS LIMITED"
+            ("CV", "OM INDUSTRIES"),  # -> "OM MOTORS"
+            ("CV", "STAR INDUSTRIES"),  # -> "STAR AUTO"
+            ("CV", "NIKHIL ENTERPRISES"),  # -> "NIKHIL FURNITURE"
+            ("CV", "SHIVA ENTERPRISES"),  # -> "SHIVA SHAKTI TRADERS"
+            ("CV", "KPT INDUSTRIES LTD"),  # -> "KPT MOTORS"
+            ("CV", "CLASSIC (INDIA) MOTORS"),  # -> "Classic Engineers And ..."
+            ("CV", "SUPER POWER INDUSTRIES"),  # -> "SUPER POWER MOTORS"
+            ("CV", "MLR AUTO LTD"),  # -> "MLR MOTOR PVT LTD"
+        ):
+            matched = match_make(self.index, product, text)
+            if matched is None:
+                continue  # left verbatim — always safe
+            self.assertEqual(
+                self._ident(matched),
+                self._ident(text),
+                f"{text!r} was rewritten to {matched!r}",
+            )
+
+    def test_the_fold_never_pads_a_correct_name_with_boilerplate(self):
+        """The master carries only "SML ISUZU LTD"; the grid's "SML ISUZU" is
+        equally correct and must not grow a corporate suffix."""
+        self.assertIsNone(match_make(self.index, "Car", "SML ISUZU"))
+
+    def test_ordinary_spellings_still_fold(self):
+        """The narrowing must not have made the matcher inert."""
+        for product, text in (
+            ("Car", "maruti suzuki"),
+            ("CV", "Tata Motors Ltd."),
+            ("CV", "tata"),
+        ):
+            self.assertIsNotNone(match_make(self.index, product, text), text)
 
     def test_punctuation_and_case_are_folded(self):
         self.assertEqual(mmv_slug("Maruti-Suzuki"), mmv_slug("MARUTI SUZUKI"))
@@ -392,25 +476,28 @@ class MMVMatchTests(unittest.TestCase):
             ]
         )
 
-    def test_exact_and_boilerplate_variants_resolve_to_one_spelling(self):
-        """The point is convergence, not a particular string: whichever
-        spelling the master carries, both inputs must land on the SAME one."""
+    def test_corporate_boilerplate_is_dropped_but_never_added(self):
+        """The fold's whole remaining job: "PVT LTD" comes off, and does not
+        go back on when the master is the one carrying it."""
+        index = _index([_row("CV", "ACME MOTORS PVT LTD", "T1")])
         self.assertEqual(
-            match_make(self.index, "CV", "Mahindra"),
-            match_make(self.index, "CV", "MAHINDRA AND MAHINDRA"),
+            match_make(index, "CV", "Acme Motors Pvt Ltd"), "ACME MOTORS PVT LTD"
         )
-        self.assertEqual(
-            match_make(self.index, "CV", "Mahindra"), "MAHINDRA AND MAHINDRA"
-        )
+        # The master's spelling is LONGER than the grid's, so the grid's own
+        # correct name is left alone rather than padded with boilerplate.
+        self.assertIsNone(match_make(index, "CV", "ACME MOTORS"))
 
-    def test_shortest_spelling_wins_when_the_master_carries_several(self):
+    def test_two_companies_sharing_a_slug_are_both_declined(self):
+        """Measured on 2,237 live deals: this is the guard that stops
+        "OM INDUSTRIES" being rewritten to "OM MOTORS"."""
         index = _index(
             [
                 _row("CV", "MAHINDRA AND MAHINDRA", "BOLERO"),
                 _row("Car", "MAHINDRA", "XUV"),
             ]
         )
-        self.assertEqual(match_make(index, "CV", "Mahindra"), "MAHINDRA")
+        self.assertIsNone(match_make(index, "CV", "Mahindra"))
+        self.assertIsNone(match_make(index, "CV", "MAHINDRA AND MAHINDRA"))
 
     def test_make_spelling_is_resolved_carrier_wide_not_per_product(self):
         """A make is a brand: the commercial book only ever writes "TATA
@@ -419,27 +506,34 @@ class MMVMatchTests(unittest.TestCase):
         self.assertEqual(match_make(self.index, "CV", "TATA"), "TATA")
         self.assertEqual(match_make(self.index, "Car", "TATA"), "TATA")
 
-    def test_matching_stays_scoped_to_the_product_bucket(self):
-        self.assertIsNone(match_make(self.index, "Car", "SCOOTERS INDIA"))
-        self.assertIsNone(match_make(self.index, "TW", "TATA"))
+    def test_makes_match_carrier_wide_not_per_product_bucket(self):
+        """A make is a brand, and real Chola Car/Taxi deals enumerate
+        commercial brands the 614-row Car bucket does not hold. Scoping makes
+        by product left half the makes in a production dump unmatched for no
+        reason but which book listed them."""
+        # TATA and SCOOTERS INDIA are seeded on other products entirely.
+        self.assertEqual(match_make(self.index, "TW", "TATA"), "TATA")
+        self.assertEqual(
+            match_make(self.index, "Car", "Scooters India"), "SCOOTERS INDIA"
+        )
 
-    def test_unique_prefix_hit_resolves(self):
-        """The rung the docstring sells: a grid writing the bare brand
-        resolves to the master's single longer spelling.
+    def test_a_unique_prefix_is_NOT_a_hit(self):
+        """The removed rung, pinned so it cannot come back.
 
-        This is the ONLY rung that can invent a canonical spelling the input
-        did not contain, so it is pinned from three sides — here, the
-        ambiguity case, and the exact-wins case below.
+        It looked safe until it was measured against 2,237 live Chola deals,
+        where it fired on 93% of them: EICHER -> "Eicher Polaris",
+        HYUNDAI -> "HYUNDAI CONSTRUCTION CO". A complete, correct manufacturer
+        name is not a prefix of a longer one just because the master lists
+        only the longer one.
         """
         index = _index([_row("Car", "MARUTI SUZUKI", "SWIFT")])
-        self.assertEqual(match_make(index, "Car", "Maruti"), "MARUTI SUZUKI")
+        self.assertIsNone(match_make(index, "Car", "Maruti"))
+
+        index = _index([_row("Car", "Eicher Polaris", "MULTIX")])
+        self.assertIsNone(match_make(index, "Car", "EICHER"))
 
     def test_ambiguous_prefix_declines(self):
-        """Two makes share the prefix, so neither may be chosen.
-
-        The fixture deliberately carries NO bare "HERO": with one present the
-        exact rung answers first and this rung never runs.
-        """
+        """Two makes share the prefix, so neither may be chosen."""
         index = _index(
             [
                 _row("TW", "HERO ELECTRIC", "OPTIMA"),
@@ -486,7 +580,7 @@ class MMVMatchTests(unittest.TestCase):
         index = _index(
             [
                 _row("Car", "MARUTI", "SWIFT"),
-                _row("Car", "SUZUKI", "Swift"),
+                _row("Car", "SUZUKI", "Swift Ltd"),
             ]
         )
         self.assertIsNone(match_model(index, "Car", None, "swift"))
@@ -500,8 +594,9 @@ class MMVMatchTests(unittest.TestCase):
         deterministic or the exported spelling flaps between reseeds
         depending on which row the query returned first."""
         index = _index([_row("Car", "B-M-W", "X"), _row("CV", "B M W", "X")])
-        # Both spellings slug to "b m w"; "B M W" wins on the alphabetical
-        # tie-break (space sorts before hyphen), from either product.
+        # Punctuation is ignored when deciding whether two spellings name the
+        # same thing, so these are ONE make rather than an ambiguous pair.
+        # "B M W" then wins the alphabetical tie-break (space before hyphen).
         self.assertEqual(match_make(index, "Car", "B-M-W"), "B M W")
         self.assertEqual(match_make(index, "CV", "B M W"), "B M W")
 

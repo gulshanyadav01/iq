@@ -19,29 +19,31 @@ from __future__ import annotations
 import re
 from typing import Dict, Optional
 
-# Tokens carrying no identity — corporate-form boilerplate and the industry
-# words nearly every Indian manufacturer name repeats. Dropping them is what
-# folds "MAHINDRA AND MAHINDRA" onto "Mahindra" and "AMO MOBILITY" onto "amo
-# mobility" (kept: "mobility" is not in the list, so distinct makes stay
-# distinct). Order-independent — applied per token, not as a suffix strip, so
-# "TATA MOTORS LTD" and "Tata" land on the same slug.
+# Tokens carrying no identity: **corporate-form boilerplate only**.
+#
+# This list was once much wider — it also dropped the industry words
+# ("auto", "motors", "industries", "enterprises", "india"), which folded
+# "TATA MOTORS LTD" onto "Tata". Measured against a dump of 2,237 real Chola
+# deals, that was wrong on 93% of them: those words are not boilerplate in the
+# Indian commercial-vehicle market, they are the only thing distinguishing
+# genuinely unrelated firms. "OM INDUSTRIES" and "OM MOTORS" both collapsed to
+# "om", "STAR INDUSTRIES" onto "STAR AUTO", "NIKHIL ENTERPRISES" onto
+# "NIKHIL FURNITURE" — each rewriting a correct manufacturer into a different
+# real company.
+#
+# Narrowing to corporate-form words takes the wrong-rewrite count on that same
+# dump to ZERO. The cost is that "TATA MOTORS LTD" and "TATA" no longer fold
+# together; both are left as the grid spelled them, which is the conservative
+# outcome this module is built around. Do not re-add industry words here
+# without re-running the dump sweep.
 _NOISE_TOKENS = frozenset(
     {
         "and",
-        "auto",
-        "automobiles",
-        "automotive",
-        "automotives",
         "co",
         "company",
         "corporation",
-        "enterprises",
-        "india",
-        "industries",
         "limited",
         "ltd",
-        "motor",
-        "motors",
         "private",
         "pvt",
     }
@@ -97,52 +99,84 @@ def build_mmv_index(carrier: str) -> Dict[str, dict]:
     except Exception:
         return {}
 
-    index: Dict[str, dict] = {}
-    # Carrier-wide preferred make spelling, keyed by slug. Matching stays
-    # product-scoped (a CV-only make must not match a Private Car rule), but
-    # the spelling written back is resolved across products, because a make is
-    # a BRAND: the commercial book only ever writes "TATA MOTORS LTD" while
-    # the car book writes "TATA", and emitting a different string for the same
-    # manufacturer depending on the grid it came from is precisely the
-    # inconsistency this master exists to remove.
-    preferred_makes: Dict[str, str] = {}
-    index["_makes"] = preferred_makes
+    # Collect every source spelling per slug FIRST, then reduce (see
+    # ``_finalize``). Reducing as we go — the old ``_keep_preferred`` — could
+    # not tell "the same name written twice" from "two different companies
+    # that happen to share a slug", and silently picked one of the two.
+    make_spellings: Dict[str, set] = {}
+    model_spellings: Dict[str, Dict[str, set]] = {}
+    products: set = set()
 
     for row in rows:
         product = row.get("product") or ""
         make_slug = row.get("make_slug") or ""
         if not product or not make_slug:
             continue
-        bucket = index.setdefault(product, {"makes": {}, "models": {}})
-        _keep_preferred(preferred_makes, make_slug, row.get("make") or "")
-        _keep_preferred(bucket["makes"], make_slug, row.get("make") or "")
+        products.add(product)
+        make_spellings.setdefault(make_slug, set()).add(row.get("make") or "")
         model_slug = row.get("model_slug") or ""
         if model_slug:
-            # Nested by make so a scoped lookup is one dict access rather than
-            # a filtering pass over every model in the bucket (the CV book has
+            # Nested by product then make so a scoped lookup is one dict access
+            # rather than a filtering pass over every model (the CV book has
             # 5,215 of them, and this runs per rule per document).
-            by_make = bucket["models"].setdefault(make_slug, {})
-            _keep_preferred(by_make, model_slug, row.get("model") or "")
+            by_make = model_spellings.setdefault(product, {}).setdefault(make_slug, {})
+            by_make.setdefault(model_slug, set()).add(row.get("model") or "")
 
-    # Precompute the make-less lookup ONCE per bucket. It depends only on the
-    # master, never on the rule being matched, so rebuilding it per call was
-    # pure waste — measured at ~1ms a call against ~0.1ms for the scoped path.
-    # A model slug carrying more than one distinct spelling across makes is
-    # dropped: without a make to scope by it is not resolvable, and guessing
-    # would name a vehicle the grid never mentioned.
-    for key, bucket in index.items():
-        if key == "_makes":
-            continue
-        spellings: Dict[str, set] = {}
-        for by_make in bucket["models"].values():
-            for model_slug, canonical in by_make.items():
-                spellings.setdefault(model_slug, set()).add(canonical)
-        bucket["models_any"] = {
-            slug: next(iter(names))
-            for slug, names in spellings.items()
-            if len(names) == 1
+    index: Dict[str, dict] = {}
+    # Makes are matched CARRIER-WIDE, not per product. A make is a brand, and
+    # real Chola Car/Taxi deals enumerate commercial brands (Ashok Leyland,
+    # Bharat Benz, SML Isuzu) that the 614-row Car bucket does not hold — under
+    # product scoping half of the makes in a production dump went unmatched for
+    # no better reason than which book listed them. The per-product ``makes``
+    # map is kept as an alias so the shape stays stable for callers.
+    index["_makes"] = _finalize(make_spellings)
+
+    for product in products:
+        by_make = model_spellings.get(product, {})
+        bucket = {
+            "makes": index["_makes"],
+            "models": {ms: _finalize(models) for ms, models in by_make.items()},
         }
+        # Precompute the make-less lookup ONCE per bucket. It depends only on
+        # the master, never on the rule being matched, so rebuilding it per
+        # call was pure waste — measured at ~1ms a call against ~0.1ms for the
+        # scoped path.
+        pooled: Dict[str, set] = {}
+        for models in by_make.values():
+            for model_slug, names in models.items():
+                pooled.setdefault(model_slug, set()).update(names)
+        bucket["models_any"] = _finalize(pooled)
+        index[product] = bucket
+
     return index
+
+
+def _finalize(spellings: Dict[str, set]) -> Dict[str, str]:
+    """Reduce ``{slug: {source spellings}}`` to ``{slug: canonical}``.
+
+    A slug whose spellings differ by more than case, whitespace and
+    punctuation names more than one thing and is DROPPED — it is not
+    resolvable, and picking one would rewrite a rule to name a company the grid
+    never mentioned. This is the guard that stops "OM INDUSTRIES" becoming
+    "OM MOTORS" when the master happens to hold both.
+
+    Punctuation is ignored in that comparison but case and word order are not:
+    "B-M-W" and "B M W" are one manufacturer written twice, whereas
+    "OM INDUSTRIES" and "OM MOTORS" are two companies that merely share a slug
+    once the corporate forms come off.
+
+    Where the spellings agree, the shortest wins (alphabetical tie-break) so
+    the choice is deterministic across reseeds.
+    """
+    out: Dict[str, str] = {}
+    for slug, names in spellings.items():
+        found = [name for name in names if name]
+        if not slug or not found:
+            continue
+        if len({_ident(name) for name in found}) > 1:
+            continue  # ambiguous — say nothing
+        out[slug] = min(found, key=lambda name: (len(name), name))
+    return out
 
 
 def scope_make(matched_makes) -> Optional[str]:
@@ -164,68 +198,68 @@ def scope_make(matched_makes) -> Optional[str]:
     return found[0] if len(found) == 1 else None
 
 
-def _keep_preferred(target: dict, key, spelling: str) -> None:
-    """Keep the SHORTEST source spelling for a slug (ties: alphabetical).
+def _ident(text: str) -> str:
+    """Case-, punctuation- and whitespace-insensitive form of a spelling.
 
-    One slug routinely has several source spellings — the CV book writes
-    ``TATA MOTORS LTD`` where the car book writes ``TATA``, and ``MAHINDRA``
-    alongside ``MAHINDRA AND MAHINDRA``. Canonicalizing onto whichever row
-    happened to load first would make the same brand come out differently per
-    product, which is exactly the inconsistency this master exists to remove.
-    Shortest wins because the extra tokens are always corporate boilerplate,
-    never identity; alphabetical tie-break keeps the choice deterministic
-    across reseeds.
+    Used ONLY to decide whether two source spellings name the same thing (see
+    ``_finalize``). Unlike ``mmv_slug`` it keeps every token, so two names that
+    differ by a real word stay different.
     """
-    if not spelling:
-        return
-    current = target.get(key)
-    if current is None or (len(spelling), spelling) < (len(current), current):
-        target[key] = spelling
+    return " ".join(_PUNCT_RE.sub(" ", str(text or "").lower()).split())
 
 
-def _resolve(candidates: Dict[str, str], slug: str) -> Optional[str]:
-    """Run the match ladder for ``slug`` over ``{slug: canonical}``.
+def _norm(text: str) -> str:
+    """Case- and whitespace-insensitive form, for comparing two spellings."""
+    return " ".join(str(text or "").split()).casefold()
 
-    1. exact slug hit;
-    2. unique leading-token-prefix hit ("maruti" -> the sole "maruti suzuki") —
-       rejected when more than one master entry starts with it, so a partial
-       make shared by two manufacturers stays unmatched.
 
-    There is deliberately NO fuzzy/edit-distance rung. One was tried and
-    removed: at any cutoff loose enough to catch a real typo, ``SCOOTER`` — a
-    sub-class word the extractor is known to mis-land in ``vehicle_make`` —
-    matched the manufacturer ``SCOOTERS INDIA``, which would rewrite a bogus
-    rule into one naming a real vehicle and hide it from the validator that
-    exists to catch exactly that. An unmatched spelling is reported, not
-    guessed at.
+def _resolve(candidates: Dict[str, str], text: str) -> Optional[str]:
+    """Exact-slug lookup for ``text`` over ``{slug: canonical}``.
+
+    **One rung, exact match, nothing else.** Two looser rungs were tried and
+    both were removed for the same reason — each invented a vehicle the grid
+    never mentioned:
+
+    - a fuzzy/edit-distance rung, at any cutoff loose enough to catch a real
+      typo, matched ``SCOOTER`` (a sub-class word the extractor is known to
+      mis-land in ``vehicle_make``) onto the manufacturer ``SCOOTERS INDIA``;
+    - a unique-leading-prefix rung ("maruti" -> the sole "maruti suzuki")
+      looked safe until it was measured against 2,237 real Chola deals, where
+      it fired on 93% of them and produced ``EICHER`` -> ``Eicher Polaris``,
+      ``HYUNDAI`` -> ``HYUNDAI CONSTRUCTION CO`` and ``SUPREME`` ->
+      ``AUTO SUPREME INDUSTRIES``. A complete, correct manufacturer name is
+      not a prefix of a longer one just because the master lists only the
+      longer one.
+
+    Canonicalization also NEVER lengthens. Because the slug drops corporate
+    forms, a master holding only ``SML ISUZU LTD`` would otherwise rewrite the
+    grid's correct ``SML ISUZU`` into the longer boilerplate spelling. Dropping
+    ``PVT LTD`` is a tidy-up; adding it is noise.
     """
-    if not slug or not candidates:
+    if not candidates:
+        return None
+    slug = mmv_slug(text)
+    if not slug:
         return None
 
-    exact = candidates.get(slug)
-    if exact:
-        return exact
-
-    prefix = f"{slug} "
-    hits = {key: value for key, value in candidates.items() if key.startswith(prefix)}
-    if len(hits) == 1:
-        return next(iter(hits.values()))
-    return None  # absent, or genuinely ambiguous — do not guess
+    canonical = candidates.get(slug)
+    if not canonical:
+        return None  # absent, or dropped as ambiguous — do not guess
+    if len(_norm(canonical)) > len(_norm(text)):
+        return None
+    return canonical
 
 
 def match_make(index: Dict[str, dict], product: str, text: str) -> Optional[str]:
-    """Canonical make for ``text`` within ``product``, or None.
+    """Canonical make for ``text``, or None.
 
-    Matched inside the product bucket, then spelled from the carrier-wide
-    preferred map (see ``build_mmv_index``).
+    ``product`` is accepted for signature stability and to keep the call sites
+    symmetrical with ``match_model``, but makes are matched CARRIER-WIDE — see
+    ``build_mmv_index`` for why product scoping was wrong here.
     """
-    bucket = index.get(product) if index else None
-    if not bucket:
+    if not index:
         return None
-    matched = _resolve(bucket["makes"], mmv_slug(text))
-    if matched is None:
-        return None
-    return index.get("_makes", {}).get(mmv_slug(matched), matched)
+    return _resolve(index.get("_makes", {}), text)
 
 
 def match_model(
@@ -245,13 +279,9 @@ def match_model(
     if not bucket:
         return None
 
-    slug = mmv_slug(text)
-    if not slug:
-        return None
-
     if make_canonical:
-        return _resolve(bucket["models"].get(mmv_slug(make_canonical), {}), slug)
+        return _resolve(bucket["models"].get(mmv_slug(make_canonical), {}), text)
 
     # No make to scope by: only a model name unambiguous across the whole
     # bucket can be canonicalized. Precomputed in build_mmv_index.
-    return _resolve(bucket.get("models_any", {}), slug)
+    return _resolve(bucket.get("models_any", {}), text)
