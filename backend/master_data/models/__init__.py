@@ -7,6 +7,7 @@ from .lookups import (
     PolicyTypeMaster,
     RTOMaster,
 )
+from .mmv import CarrierVehicleMMVMaster
 from .upload import MasterDataUpload
 from .vehicle import VehicleClassMaster, VehicleMaster, VehicleSubClassMaster
 
@@ -23,4 +24,5 @@ __all__ = [
     "MasterDataUpload",
     "CarrierRTOZoneMaster",
     "CarrierProductHierarchyMaster",
+    "CarrierVehicleMMVMaster",
 ]

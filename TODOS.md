@@ -216,6 +216,51 @@
       and `_rto_resolver` is None (the import guard is deliberately outside
       the `try`, so the bucket pre-pass still works).
 
+## master_data
+
+- [ ] **Carrier-master upload hardening** — the `POST /carrier-uploads/`
+      endpoint parses untrusted `.xlsx` with `openpyxl.load_workbook(...)`
+      (no `read_only=True`) and has no size/extension validator on the file
+      field, so an authenticated caller can exhaust worker memory with a
+      compressed bomb.
+      **Priority:** P2
+      **Context:** Raised by the security specialist during `/ship` of branch
+      `ravipiplani/mmv-mandatory-validation` (2026-08-19). Not fixed inline
+      because a naive size cap would reject the legitimate 1.5MB Chola MMV
+      workbook the same PR added — the cap has to be chosen against real
+      book sizes, not guessed. Fix together with `read_only=True` and a row
+      cap in the parsers.
+
+- [ ] **Route the `mmv` carrier upload through Celery** — the MMV master_type
+      parses ~22k rows and bulk-upserts them synchronously inside the request
+      thread and a single `transaction.atomic`, violating the project rule
+      that long operations go through Celery. A proxy timeout leaves the
+      `MasterDataUpload` row stuck in `PENDING` (the FAILED path only runs on
+      a Python exception, not a killed worker).
+      **Priority:** P2
+      **Context:** Raised by the data-migration specialist during `/ship` of
+      `ravipiplani/mmv-mandatory-validation` (2026-08-19). The sibling
+      master_types are hundreds of rows; MMV is two orders larger. The
+      committed-CSV seed path (management command) is unaffected.
+
+- [ ] **`MasterDataUploadViewSet` is `AllowAny`** — an unauthenticated caller
+      can POST a workbook that rewrites every master table the extraction
+      pipeline reads. Pre-existing; the newer `CarrierMasterUploadViewSet`
+      correctly requires authentication.
+      **Priority:** P1
+      **Context:** Re-surfaced by the security specialist during `/ship` of
+      `ravipiplani/mmv-mandatory-validation` (2026-08-19). Both viewsets
+      mutate the same tables, so the weaker one sets the real bar.
+
+- [ ] **Consider Git LFS for `master_data/data/`** — the Chola MMV seed adds
+      ~3.5MB (1.55MB CSV + two source workbooks) permanently to git history,
+      and every reseed rewrites the whole CSV blob.
+      **Priority:** P4
+      **Context:** Raised by the data-migration specialist during `/ship` of
+      `ravipiplani/mmv-mandatory-validation` (2026-08-19). Existing
+      `*_source.xlsx` precedent is 10-80KB; this is ~40x larger. Regenerate
+      with `manage.py export_chola_mmv_csv`.
+
 ## Completed
 
 - [x] **Extract CPA bifurcation into a pure transform over `cics_doc`** (eng F4).

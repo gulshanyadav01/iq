@@ -45,6 +45,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from cins.processors.core.raw_to_cics_transformer import (
     VEHICLE_SUB_CLASS_MAPPINGS,
     RawToCICSTransformer,
+    product_subproduct_bucket,
 )
 from cins.validators.schema_validator import (
     Severity,
@@ -55,22 +56,12 @@ from cins.validators.schema_validator import (
 _CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])")
 
 # Product-subproduct (Product.product_subproduct) -> the master's product
-# bucket. Commercial variants all map to CV; everything else is looked up
-# directly.
-_SUBPRODUCT_TO_BUCKET = {
-    "car": "Car",
-    "two-wheeler": "TW",
-}
-
-
-def _bucket_for(product_subproduct: Optional[str]) -> Optional[str]:
-    if not product_subproduct:
-        return None
-    if product_subproduct in _SUBPRODUCT_TO_BUCKET:
-        return _SUBPRODUCT_TO_BUCKET[product_subproduct]
-    if product_subproduct.startswith("commercial"):
-        return "CV"
-    return None
+# bucket. The mapping itself lives in raw_to_cics_transformer as
+# ``product_subproduct_bucket`` — ONE definition shared with the transformer
+# (which canonicalizes make/model inside a bucket) and CholaMMVValidator, so
+# no two call sites can disagree about what a product means. Kept as a local
+# alias because this module refers to it in several places.
+_bucket_for = product_subproduct_bucket
 
 
 class CholaProductHierarchyValidator:

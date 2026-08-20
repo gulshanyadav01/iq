@@ -22,4 +22,4 @@ edits, no cross-carrier bleed. Prompt loaders are `@lru_cache`'d → restart
 Gotcha: the overlay only fires when Pass-1 resolves `provider_name`. If provider is empty
 (common — Pass-1 LLM may not extract it), the overlay is dormant and only the generic base
 patterns apply. Keep genuinely-portable structural hints (e.g. the "value-in-cell" detector)
-in the base, carrier-specific *semantics* in the overlay.
+in the base, carrier-specific _semantics_ in the overlay.

@@ -13,6 +13,7 @@ This transformer handles all deterministic transformations:
 
 import json
 import logging
+import os
 import re
 import hashlib
 from collections import OrderedDict
@@ -605,6 +606,58 @@ class _BoundaryKey(NamedTuple):
     ranges: Tuple
 
 
+# product_subproduct -> the MMV / product-hierarchy master's product bucket.
+# ONE definition, imported by both the transformer (which canonicalizes
+# make/model inside a bucket) and CholaProductHierarchyValidator /
+# CholaMMVValidator (which validate against the same buckets), for the same
+# reason ``product_bucket`` has exactly one definition in the resolver: two
+# call sites that disagree about what a product means would validate against a
+# different vocabulary than the one that was written.
+_SUBPRODUCT_TO_BUCKET = {
+    "car": "Car",
+    "two-wheeler": "TW",
+}
+
+
+def product_subproduct_bucket(product_subproduct: Optional[str]) -> Optional[str]:
+    """Map a ``product_subproduct`` to ``Car`` / ``TW`` / ``CV``, or None.
+
+    Commercial variants all collapse to CV; anything unrecognised returns
+    None, which every caller treats as "say nothing about this product"
+    rather than guessing a bucket.
+    """
+    if not product_subproduct:
+        return None
+    if product_subproduct in _SUBPRODUCT_TO_BUCKET:
+        return _SUBPRODUCT_TO_BUCKET[product_subproduct]
+    if product_subproduct.startswith("commercial"):
+        return "CV"
+    return None
+
+
+def mmv_enabled() -> bool:
+    """``CINS_CHOLA_MMV`` — gates BOTH the canonicalization here and
+    ``CholaMMVValidator``.
+
+    One switch on purpose: disabling only half would leave the validator
+    flagging spellings the transformer would have folded, turning a rollback
+    into a wall of findings.
+
+    **Defaults to OFF.** Measured against a dump of 2,237 live Chola deals, the
+    fold is now provably non-destructive (zero wrong make rewrites, against 93%
+    of deals corrupted before the matcher was fixed) — but it is also barely
+    worth its blast radius: it changes 737 of ~1.34M make values, all of them
+    corporate-suffix tidy-ups, while half the makes those deals use are absent
+    from the master entirely. Turning it on changes CICS output and so needs a
+    ``CICS_PIPELINE_VERSION`` bump; leaving it off keeps the cache intact. Opt
+    in once the master's coverage justifies it.
+    """
+    raw = os.environ.get("CINS_CHOLA_MMV")
+    if raw is None:
+        return False
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
 class RawToCICSTransformer:
     """
     Transforms RawExtraction to full CICS schema.
@@ -644,6 +697,11 @@ class RawToCICSTransformer:
         # alongside _carrier_zone_map in transform(); empty (and inert)
         # otherwise.
         self._rto_locality_map: Dict[str, Dict[str, List[str]]] = {}
+        # Chola Make/Model catalogue, keyed by product bucket. Built alongside
+        # _carrier_zone_map in transform(); empty (and inert) otherwise, which
+        # is what lets other modules instantiate this class purely to reuse a
+        # normalization helper without touching the DB.
+        self._mmv_index: Dict[str, dict] = {}
         # Dedup set for the "zone label not found in master" warning — one
         # warning per distinct unmatched text per document, not per rule.
         self._zone_warned: Set[str] = set()
@@ -687,6 +745,7 @@ class RawToCICSTransformer:
         # map, i.e. today's behaviour (zone labels simply don't resolve).
         self._carrier_zone_map = {}
         self._rto_locality_map = {}
+        self._mmv_index = {}
         if self._carrier_code == "Chola":
             try:
                 from master_data.services.resolver import carrier_zone_expansions
@@ -707,6 +766,19 @@ class RawToCICSTransformer:
             except Exception as e:
                 logger.warning(f"RTO locality index unavailable: {e}")
                 self._rto_locality_map = {}
+            # Make/Model catalogue, used to fold a rule's free-text make/model
+            # onto one spelling. Same shape of guard as the two above: a
+            # DB-unavailable or unseeded master leaves the map empty, which
+            # means every make/model passes through verbatim — today's
+            # behaviour.
+            if mmv_enabled():
+                try:
+                    from master_data.services.mmv import build_mmv_index
+
+                    self._mmv_index = build_mmv_index("Chola")
+                except Exception as e:
+                    logger.warning(f"Chola MMV index unavailable: {e}")
+                    self._mmv_index = {}
 
         # Transform commission period
         period = self._transform_period(raw, document_date)
@@ -2098,6 +2170,19 @@ class RawToCICSTransformer:
         vehicle_make = self._split_composite_makes(vehicle_make)
         vehicle_make_exclude = self._split_composite_makes(vehicle_make_exclude)
 
+        # Fold each make/model onto the master's spelling. Runs AFTER the
+        # composite split — a cell holding three makes has to become three
+        # entries before any of them can be looked up. Include and exclude
+        # lists get identical treatment: an exclusion names real vehicles too,
+        # and leaving one side un-canonicalized would mean the same
+        # manufacturer is spelled two ways within one document.
+        vehicle_make, vehicle_model = self._canonicalize_make_model(
+            vehicle_make, vehicle_model
+        )
+        vehicle_make_exclude, vehicle_model_exclude = self._canonicalize_make_model(
+            vehicle_make_exclude, vehicle_model_exclude
+        )
+
         # RTO from conditions dict — expand categories via master data.
         # The LLM may use "rto", "rto_category", "rto_zone", or similar — accept any.
         cond_rto_text = None
@@ -2544,6 +2629,77 @@ class RawToCICSTransformer:
                     seen.add(key)
                     out.append(s)
         return out or None
+
+    def _canonicalize_make_model(
+        self,
+        makes: Optional[List[str]],
+        models: Optional[List[str]],
+    ) -> Tuple[Optional[List[str]], Optional[List[str]]]:
+        """Fold a rule's make/model lists onto the seeded master's spelling.
+
+        SPELLING ONLY. Every entry is either replaced by its canonical string
+        or left exactly as it was: list lengths never change, entries are
+        never added, dropped or reordered. That invariant is what keeps this
+        out of the rule-count and coverage machinery — it can shift a dedupe
+        group key (see below), but it can never make a rule appear or vanish.
+
+        Inert unless the document is Chola AND the master seeded AND
+        ``CINS_CHOLA_MMV`` is on — ``self._mmv_index`` is empty in every other
+        case, and an empty index returns the inputs unchanged.
+
+        Sentinels ("All Other Make/Models") pass through verbatim: the bucket
+        fan-out in ``_clone_make_bucket`` matches on that literal text.
+
+        Note for the exclude lists: ``vehicle_make_exclude`` /
+        ``vehicle_model_exclude`` ARE part of ``_DEDUPE_SCALAR_FIELDS``, so
+        canonicalizing them can merge two dedupe groups that previously
+        differed only by spelling. That is the intended effect — they name the
+        same excluded vehicles — but it is a real behaviour change, which is
+        why ``CICS_PIPELINE_VERSION`` moves with it.
+        """
+        if not self._mmv_index:
+            return makes, models
+
+        bucket = product_subproduct_bucket(self._product_subproduct)
+        if bucket is None:
+            return makes, models
+
+        from master_data.services.mmv import match_make, match_model, scope_make
+
+        canonical_makes = None
+        matched_makes = []
+        if makes:
+            canonical_makes = []
+            for item in makes:
+                text = str(item)
+                if self._SENTINEL_MAKE_MODEL_RE.search(text):
+                    canonical_makes.append(item)
+                    continue
+                hit = match_make(self._mmv_index, bucket, text)
+                matched_makes.append(hit)
+                # Unmatched text stays verbatim in the OUTPUT, but must not
+                # become the model lookup's scope — see scope_make's docstring.
+                canonical_makes.append(hit or item)
+
+        if not models:
+            return canonical_makes if makes else makes, models
+
+        # Scope model lookups by the rule's make when exactly one RESOLVED —
+        # a model name is only unique within its manufacturer. Shared with
+        # CholaMMVValidator so the two cannot disagree about what "unknown"
+        # means for a model.
+        scope = scope_make(matched_makes)
+        canonical_models = []
+        for item in models:
+            text = str(item)
+            if self._SENTINEL_MAKE_MODEL_RE.search(text):
+                canonical_models.append(item)
+                continue
+            canonical_models.append(
+                match_model(self._mmv_index, bucket, scope, text) or item
+            )
+
+        return (canonical_makes if makes else makes), canonical_models
 
     def _parse_range_field(
         self, text: Optional[str]

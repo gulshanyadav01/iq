@@ -17,6 +17,7 @@ from rest_framework.test import APIClient
 from master_data.models import (
     CarrierProductHierarchyMaster,
     CarrierRTOZoneMaster,
+    CarrierVehicleMMVMaster,
     MasterDataUpload,
 )
 
@@ -259,3 +260,98 @@ class CarrierUploadAuthTests(TestCase):
 
     def test_anonymous_list_rejected(self):
         self.assertIn(self.client.get(self.url).status_code, (401, 403))
+
+
+def _mmv_xlsx_bytes(tw_rows, fw_rows):
+    """Two-and-four-wheeler MMV workbook — the TW/FW sheet-name shape
+    ``parse_chola_mmv`` dispatches on."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "TW"
+    ws.append(
+        (
+            "VariantId",
+            "MakeName",
+            "makeid",
+            "modelname",
+            "ModelId",
+            "variantname",
+            "CubicCapacity",
+            "KiloWatt",
+            "fueltype",
+            "segmenttype",
+        )
+    )
+    for row in tw_rows:
+        ws.append(row)
+    fw = wb.create_sheet("FW")
+    fw.append(("MAKEID", "MakeName", "modelname", "ModelId"))
+    for row in fw_rows:
+        fw.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@in_memory_storage
+class CarrierUploadMMVTests(TestCase):
+    """The ``mmv`` master_type. Exercises the one path that reads a workbook
+    from a FILE rather than an in-memory openpyxl object, so it covers
+    ``open_workbook``'s opened/close branch that the parser unit tests
+    (which pass a live Workbook) never reach."""
+
+    def setUp(self):
+        self.client = _auth_client()
+        self.url = reverse("master-data-carrier-uploads-list")
+
+    def _post(self):
+        f = _mmv_xlsx_bytes(
+            tw_rows=[
+                (1, "BAJAJ", 6, "AVENGER", 10, "STD (180 CC)", 180, None, "P ", "BIKE")
+            ],
+            fw_rows=[(1, "MARUTI", "SWIFT", 20)],
+        )
+        f.name = "chola_mmv.xlsx"
+        return self.client.post(
+            self.url,
+            {"carrier": "Chola", "master_type": "mmv", "file": f},
+            format="multipart",
+        )
+
+    def test_uploads_and_upserts_mmv(self):
+        resp = self._post()
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["status"], "success")
+        self.assertEqual(resp.data["summary"]["CarrierVehicleMMV"]["created"], 2)
+        self.assertEqual(CarrierVehicleMMVMaster.objects.count(), 2)
+        self.assertEqual(
+            set(CarrierVehicleMMVMaster.objects.values_list("product", flat=True)),
+            {"TW", "Car"},
+        )
+
+    def test_reupload_updates_not_duplicates(self):
+        self._post()
+        self._post()
+        self.assertEqual(CarrierVehicleMMVMaster.objects.count(), 2)
+        upload = MasterDataUpload.objects.latest("created_at")
+        self.assertEqual(upload.summary["CarrierVehicleMMV"]["updated"], 2)
+
+    def test_audit_row_written(self):
+        self._post()
+        upload = MasterDataUpload.objects.latest("created_at")
+        self.assertEqual(upload.status, MasterDataUpload.Status.SUCCESS)
+        self.assertIn("CarrierVehicleMMV", upload.summary)
+
+    def test_mmv_is_scoped_to_chola(self):
+        """No parser is registered for another carrier's MMV book, so the
+        request is rejected before the file is read."""
+        f = _mmv_xlsx_bytes([], [(1, "MARUTI", "SWIFT", 20)])
+        f.name = "icici_mmv.xlsx"
+        resp = self.client.post(
+            self.url,
+            {"carrier": "ICICI", "master_type": "mmv", "file": f},
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(CarrierVehicleMMVMaster.objects.count(), 0)

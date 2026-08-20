@@ -114,6 +114,15 @@ def _env_int(name: str, default: int) -> int:
 #         Uttar Pradesh fill. Cached documents must re-extract or they keep
 #         serving the missing state, the over-broad all-of-Karnataka RTO fill
 #         and the un-complemented UP rows.
+#         NOTE: a 1.7.0 was briefly prepared for Chola make/model
+#         canonicalization and then withdrawn before release. The fold now
+#         ships behind CINS_CHOLA_MMV, which defaults to FALSE, so the
+#         transformer's output is byte-identical to 1.6.0 and no cache entry
+#         needs to be invalidated. **Enabling that flag in any environment is a
+#         pipeline-version change**: the fold rewrites vehicle_make /
+#         vehicle_model and their _exclude twins, and the _exclude fields are
+#         part of _DEDUPE_SCALAR_FIELDS, so two groups that differed only by
+#         spelling would merge. Bump to 1.7.0 at that point, not before.
 CICS_PIPELINE_VERSION = "1.6.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).

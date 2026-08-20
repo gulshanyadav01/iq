@@ -45,6 +45,12 @@ tier's paired base grid gets the complement (0 to lowest-marked-start minus 1). 
 means the rule has no NCB dimension — NOT 0-100. The legacy `NCB` Yes/No column is derived
 from this band and retained for backward compatibility.
 
+**vehicleMake / vehicleModel** – open text, not an enum. For Chola the allowed spellings are
+whatever `CarrierVehicleMMVMaster` carries (seeded from `master_data/data/chola_mmv.csv`): the
+transformer folds a rule's free-text value onto the master's spelling, and `CholaMMVValidator`
+raises a MEDIUM finding for anything no vehicle matches. `All Other Make/Models` is a bucket
+sentinel, never canonicalized or flagged. Exclusions export as `exclude(A, B)`.
+
 **buParameters** – Motor
 
 **zone** – North, South, East, West

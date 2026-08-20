@@ -16,6 +16,7 @@ from master_data.models import (
     CarrierMaster,
     CarrierProductHierarchyMaster,
     CarrierRTOZoneMaster,
+    CarrierVehicleMMVMaster,
     FuelTypeMaster,
     InsurerMaster,
     PlanTypeMaster,
@@ -707,5 +708,23 @@ def carrier_product_hierarchy(carrier: str) -> list[dict]:
     return list(
         CarrierProductHierarchyMaster.objects.filter(carrier=carrier).values(
             "product", "sub_product", "vehicle_subclass", "canonical_subclass"
+        )
+    )
+
+
+def carrier_vehicle_mmv(carrier: str) -> list[dict]:
+    """(product, make, model, make_slug, model_slug) rows for a carrier.
+
+    Module-level and scoped for the same reason the other carrier lookups
+    here are: ``MasterDataResolver._reload`` is eager, and this table is ~22k
+    rows per carrier — loading it for every document of every carrier would
+    be pure waste. Only the columns the matcher needs are selected; the
+    descriptive extras stay in the DB.
+    """
+    if not carrier:
+        return []
+    return list(
+        CarrierVehicleMMVMaster.objects.filter(carrier=carrier).values(
+            "product", "make", "model", "make_slug", "model_slug"
         )
     )
