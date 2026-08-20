@@ -551,8 +551,17 @@ class MsvDistinctRulesTests(TestCase):
             tuple(r.conditions.vehicle_sub_class or [])
             for r in product.commission_rules
         }
-        for expected in (("tractor",), ("excavators",), ("harvester",), ("others",)):
+        # "tractor" re-files as MISC-D's own body, "Agricultural Tractor" —
+        # the goods "Tractor" belongs to GCV in the carrier's hierarchy master.
+        # Distinctness, which is what this test guards, is unaffected.
+        for expected in (
+            ("agricultural-tractor",),
+            ("excavators",),
+            ("harvester",),
+            ("others",),
+        ):
             self.assertIn(expected, subclasses)
+        self.assertEqual(len(subclasses), 4)
         self.assertEqual(product.sub_category, "MISC-D")
 
     def test_trac_renewal_sets_business_type(self):

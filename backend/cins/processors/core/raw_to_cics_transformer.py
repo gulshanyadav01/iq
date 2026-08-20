@@ -1380,6 +1380,39 @@ class RawToCICSTransformer:
                 return [policy]
         return None
 
+    # A body word that names a DIFFERENT canonical sub-class depending on which
+    # sub-product's grid it appears in. The hint table below is shared across
+    # sub-products and matches bare tokens, so an abbreviated section key has no
+    # way to disambiguate on its own: Chola writes the MISC-D agricultural
+    # tractor as "1_TRAC", which falls through the table to the bare "trac" arm
+    # and lands on "tractor" — a GOODS body that the carrier's own hierarchy
+    # master files under GCV, not MISC-D (CV/GCV/Tractor vs
+    # CV/MISC-D/Agricultural Tractor). Two different vehicles at two different
+    # payouts. Applied AFTER the shared scan so a GCV "TRAC" row keeps
+    # resolving to "tractor" — this narrows a result, it never widens one.
+    _SUBPRODUCT_SUBCLASS_OVERRIDES = {
+        "commercial-miscd": {"tractor": "agricultural-tractor"},
+    }
+
+    def _apply_subproduct_subclass_override(self, values):
+        """Re-file a body word that means something else in this sub-product.
+
+        Called from BOTH routes a sub-class can arrive by — the product-key
+        hint table and the codegen segment slug in ``conditions`` — because
+        "1_TRAC" reaches the rule down the second one. Reads
+        ``self._product_subproduct``, which ``_transform_product`` sets before
+        either route runs.
+
+        Never widens: an unmapped value is returned untouched, and a
+        sub-product with no override table is a no-op.
+        """
+        overrides = self._SUBPRODUCT_SUBCLASS_OVERRIDES.get(
+            getattr(self, "_product_subproduct", "") or ""
+        )
+        if not overrides or not values:
+            return values
+        return [overrides.get(v, v) for v in values]
+
     def _extract_sub_class_from_key(self, product_key: str) -> Optional[List[str]]:
         """Extract vehicle sub-class hint encoded in a product key (e.g. 'Scooter', 'School Bus')."""
         key_lower = product_key.lower()
@@ -1417,7 +1450,7 @@ class RawToCICSTransformer:
         ]
         for pattern, sub_class in hints:
             if pattern in key_lower:
-                return [sub_class]
+                return self._apply_subproduct_subclass_override([sub_class])
         return None
 
     # Stems of special-purpose CV bodies that are always 4-Wheel-and-Above
@@ -2046,10 +2079,12 @@ class RawToCICSTransformer:
         # slugs that are really a weight/CC dimension rather than a body type.
         cond_sub_class_raw = entry_conditions.get("vehicle_sub_class")
         if not self._subclass_slug_is_dimension(cond_sub_class_raw):
-            cond_vehicle_sub_class = self._normalize_list_field(
-                self._normalize_subclass_slug(cond_sub_class_raw),
-                VEHICLE_SUB_CLASS_MAPPINGS,
-                "vehicle_sub_class",
+            cond_vehicle_sub_class = self._apply_subproduct_subclass_override(
+                self._normalize_list_field(
+                    self._normalize_subclass_slug(cond_sub_class_raw),
+                    VEHICLE_SUB_CLASS_MAPPINGS,
+                    "vehicle_sub_class",
+                )
             )
             if cond_vehicle_sub_class:
                 vehicle_sub_class = cond_vehicle_sub_class
