@@ -128,9 +128,10 @@ class ExportRendererTests(DjangoTestCase):
         od = {r[cols["CPA"] - 1]: r[cols["ODPercentage"] - 1] for r in self._rows(ws)}
         self.assertEqual(od["With CPA"], 30)
         self.assertEqual(od["Without CPA"], 28.5)
-        # Net column empty for OD-based rows.
+        # Net column is 0 for OD-based rows — the carrier's own deal records
+        # carry 0 in every column a deal does not pay on, never a blank.
         net = [r[cols["NetPercentage"] - 1] for r in self._rows(ws)]
-        self.assertTrue(all(v in (None, "") for v in net))
+        self.assertTrue(all(v == 0 for v in net), net)
 
     def test_third_party_routes_to_tp_column(self):
         wb = self._export(
