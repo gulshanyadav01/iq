@@ -169,6 +169,14 @@
                   <div class="flex items-center justify-end gap-1">
                     <button
                       class="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="Download document"
+                      :disabled="downloadingIds.has(req.id)"
+                      @click="downloadDocument(req)"
+                    >
+                      <UIcon name="i-lucide-download" class="w-4 h-4" :class="{ 'animate-pulse': downloadingIds.has(req.id) }" />
+                    </button>
+                    <button
+                      class="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition disabled:opacity-40 disabled:cursor-not-allowed"
                       title="Retry extraction"
                       :disabled="retryingIds.has(req.id)"
                       @click="retryRequest(req.id)"
@@ -601,6 +609,10 @@ async function handleUpload() {
 }
 
 const retryingIds = ref<Set<string>>(new Set())
+
+// Per-row download of the original uploaded document. Extracted into a composable
+// so its success/404/cleanup branches are unit-testable (see the composable's spec).
+const { downloadingIds, downloadDocument } = usePolicyExtractDownload()
 
 // The retry buttons render on every row. The backend re-enqueues completed and
 // failed requests; it rejects in-flight ones (409) so a retry can't race a
