@@ -114,7 +114,17 @@ def _env_int(name: str, default: int) -> int:
 #         Uttar Pradesh fill. Cached documents must re-extract or they keep
 #         serving the missing state, the over-broad all-of-Karnataka RTO fill
 #         and the un-complemented UP rows.
-CICS_PIPELINE_VERSION = "1.6.0"
+#   1.7.0 - Chola make/model canonicalization. A rule's free-text
+#         vehicle_make / vehicle_model (and their _exclude twins) are folded
+#         onto the spelling seeded in CarrierVehicleMMVMaster, so one
+#         manufacturer no longer exports under several names ("TATA" vs "TATA
+#         MOTORS LTD", "Mahindra" vs "MAHINDRA AND MAHINDRA"). Spelling only —
+#         no rule is added or dropped — but the _exclude fields are part of
+#         _DEDUPE_SCALAR_FIELDS, so two groups that differed only by spelling
+#         now merge. Cached documents must re-extract or they keep serving the
+#         un-folded spellings. Chola-only in effect; the bump is global
+#         because the cache key is.
+CICS_PIPELINE_VERSION = "1.7.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"
