@@ -4,7 +4,7 @@ from master_data.models import MasterDataUpload
 
 # Only Chola is seeded/parsed today (chola_parsers.py); the field exists so
 # the endpoint is shaped for future carriers without a breaking API change.
-CARRIER_MASTER_TYPE_CHOICES = ("rto_zone", "product_hierarchy")
+CARRIER_MASTER_TYPE_CHOICES = ("rto_zone", "product_hierarchy", "mmv")
 
 
 class MasterDataUploadCreateSerializer(serializers.Serializer):

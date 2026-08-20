@@ -13,6 +13,7 @@ from master_data.serializers import (
     MasterDataUploadSerializer,
 )
 from master_data.services.chola_parsers import (
+    parse_chola_mmv,
     parse_chola_product_hierarchy,
     parse_chola_rto_zone,
 )
@@ -120,6 +121,10 @@ _CARRIER_MASTER_HANDLERS = {
         parse_chola_product_hierarchy,
         "upsert_chola_product_hierarchy_rows",
     ),
+    # One handler for BOTH Chola MMV books — parse_chola_mmv dispatches on
+    # sheet name, so the two-and-four-wheeler and commercial-vehicle
+    # workbooks share a single master_type.
+    ("Chola", "mmv"): (parse_chola_mmv, "upsert_chola_mmv_rows"),
     ("ICICI", "rto_zone"): (parse_icici_rto_grid, "upsert_carrier_rto_zone_rows"),
 }
 
@@ -130,10 +135,17 @@ class CarrierMasterUploadViewSet(viewsets.GenericViewSet):
 
     POST /api/master-data/carrier-uploads/
         multipart/form-data with `carrier`, `master_type`
-        (rto_zone|product_hierarchy), `file` (.xlsx). Runs the SAME shared
+        (rto_zone|product_hierarchy|mmv), `file` (.xlsx). Runs the SAME shared
         parser (`chola_parsers.py`) and loader upsert methods as the
         committed-CSV seeding path, inside a single transaction, so a
         re-upload is idempotent (existing rows are updated, not duplicated).
+
+        NOTE on `mmv`: the Chola Make/Model/Variant books are ~22k rows,
+        two orders of magnitude larger than the other master types, and the
+        parse + upsert runs synchronously in the request thread. Re-uploading
+        a full book is slow; the committed-CSV seed path is the normal route.
+        Neither path ever DELETES — a row dropped from the source lingers
+        until removed by hand.
     """
 
     # Unlike MasterDataUploadViewSet (AllowAny, predates this endpoint), a
