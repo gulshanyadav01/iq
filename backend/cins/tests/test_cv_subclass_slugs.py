@@ -176,3 +176,64 @@ class GCVUnspecifiedSubclassTests(TestCase):
         from cins.schema.cics_model import RuleConditions
 
         RuleConditions(vehicle_sub_class=["not-available"])
+
+
+class SubproductSubclassOverrideTests(TestCase):
+    """A body word can name a different vehicle in a different sub-product.
+
+    Chola writes the MISC-D agricultural tractor as the segment slug "1_TRAC".
+    The shared VEHICLE_SUB_CLASS_MAPPINGS table maps the bare token "trac" to
+    "tractor", which the carrier's own hierarchy master files under GCV as a
+    goods body — a different vehicle at a different payout from MISC-D's
+    "Agricultural Tractor". Reconciled against prod deal 799822 (MISC-D / Third
+    Party / Bihar), which reads "Agricultural Tractor".
+    """
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+        self.t._carrier_code = "Chola"
+
+    def test_miscd_trac_becomes_agricultural_tractor(self):
+        self.t._product_subproduct = "commercial-miscd"
+        self.assertEqual(
+            self.t._apply_subproduct_subclass_override(["tractor"]),
+            ["agricultural-tractor"],
+        )
+
+    def test_gcv_trac_stays_the_goods_body(self):
+        self.t._product_subproduct = "commercial-gcv"
+        self.assertEqual(
+            self.t._apply_subproduct_subclass_override(["tractor"]), ["tractor"]
+        )
+
+    def test_override_never_widens_an_unmapped_value(self):
+        self.t._product_subproduct = "commercial-miscd"
+        self.assertEqual(
+            self.t._apply_subproduct_subclass_override(["tipper", "crane"]),
+            ["tipper", "crane"],
+        )
+
+    def test_no_subproduct_is_a_noop(self):
+        self.t._product_subproduct = ""
+        self.assertEqual(
+            self.t._apply_subproduct_subclass_override(["tractor"]), ["tractor"]
+        )
+        self.assertIsNone(self.t._apply_subproduct_subclass_override(None))
+
+    def test_key_hint_route_honours_the_override(self):
+        # The product-key hint table is the other route a sub-class arrives by.
+        self.t._product_subproduct = "commercial-miscd"
+        self.assertEqual(
+            self.t._extract_sub_class_from_key("MSV 1_TRAC BH ACT"),
+            ["agricultural-tractor"],
+        )
+        self.t._product_subproduct = "commercial-gcv"
+        self.assertEqual(
+            self.t._extract_sub_class_from_key("Commercial Vehicle 1_TRAC AP ACT"),
+            ["tractor"],
+        )
+
+    def test_agricultural_tractor_is_a_valid_enum_value(self):
+        from cins.schema.cics_model import RuleConditions
+
+        RuleConditions(vehicle_sub_class=["agricultural-tractor"])
