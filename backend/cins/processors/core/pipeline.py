@@ -572,6 +572,16 @@ def _run_validators(output_path: Path, indexed_doc=None):
             logger.warning(f"Chola product hierarchy validator failed: {e}")
 
         try:
+            from cins.validators.chola_mmv_validator import CholaMMVValidator
+
+            mmv_result = CholaMMVValidator().validate(str(output_path))
+            schema_result.errors.extend(mmv_result.errors)
+            schema_result.warnings.extend(mmv_result.warnings)
+            schema_result.info.extend(mmv_result.info)
+        except Exception as e:  # never let this validator break the pipeline
+            logger.warning(f"Chola MMV validator failed: {e}")
+
+        try:
             from cins.validators.state_rto_presence_validator import (
                 StateRtoPresenceValidator,
             )
