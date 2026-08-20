@@ -79,8 +79,10 @@ INDEX = _index(
         _row("Car", "TATA", "NEXON"),
         _row("Car", "MARUTI", "SWIFT"),
         _row("Car", "MARUTI", "SWIFT DZIRE"),
-        # Car spells it long, CV short: exercises the carrier-wide preferred
-        # spelling (one brand, one exported name) rather than the per-bucket one.
+        # Two spellings of one brand under a single slug. The matcher declines
+        # both rather than guessing (see mmv._finalize), so these makes are
+        # deliberately UNRESOLVABLE here — which is what the unknown-value half
+        # is supposed to report.
         _row("Car", "MAHINDRA AND MAHINDRA", "XUV"),
         _row("CV", "MAHINDRA", "BOLERO"),
         _row("CV", "TATA MOTORS LTD", "407"),
@@ -264,9 +266,19 @@ class CholaMMVValidatorTests(TestCase):
 
 
 class CholaMMVPresenceTests(TestCase):
-    """VehicleMake / VehicleModel are mandatory on the client's deal load, so
-    a rule carrying neither an include nor an exclude list exports a blank
-    cell."""
+    """The presence half, exercised with ``CINS_MAKE_MODEL_MANDATORY`` forced ON.
+
+    It defaults OFF — a dump of 2,237 live Chola deals carries no
+    VehicleModel on 93% of them, so blank is the shape the client's own
+    production system ships and the rule would fire on every document. These
+    tests pin what the rule DOES when an environment opts into it; without the
+    override every assertion below would pass vacuously.
+    """
+
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {"CINS_MAKE_MODEL_MANDATORY": "true"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_missing_make_and_model_are_both_flagged_with_counts(self):
         path = _write_doc(
@@ -367,9 +379,11 @@ class CholaMMVPresenceTests(TestCase):
         for value in ("1", "true", "yes", "on"):
             with mock.patch.dict(os.environ, {"CINS_MAKE_MODEL_MANDATORY": value}):
                 self.assertTrue(make_model_mandatory(), value)
+        # Unset defaults to OFF: the client's own deals leave model blank on
+        # 93% of rows, so this rule is opt-in per environment.
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CINS_MAKE_MODEL_MANDATORY", None)
-            self.assertTrue(make_model_mandatory())
+            self.assertFalse(make_model_mandatory())
 
     def test_a_scalar_condition_value_is_accepted_like_a_list(self):
         """RuleConditions coerces strings to lists, but a hand-built or
@@ -453,13 +467,14 @@ class CholaMMVValidatorFlagTests(TestCase):
         governs the MMV master, CINS_MAKE_MODEL_MANDATORY governs the export
         rule. Rolling the master back must not silently take the mandatory
         check with it."""
-        with mock.patch.dict(os.environ, {"CINS_CHOLA_MMV": "false"}):
+        env = {"CINS_CHOLA_MMV": "false", "CINS_MAKE_MODEL_MANDATORY": "true"}
+        with mock.patch.dict(os.environ, env):
             validator = CholaMMVValidator()
-        self.assertEqual(validator._index, {})
-        path = _write_doc(
-            _doc("Chola", [_product("car", [_rule(vehicle_make=["SCOOTER"])])])
-        )
-        result = validator.validate(path)
+            self.assertEqual(validator._index, {})
+            path = _write_doc(
+                _doc("Chola", [_product("car", [_rule(vehicle_make=["SCOOTER"])])])
+            )
+            result = validator.validate(path)
         self.assertEqual(_unknown(result), [])
         self.assertEqual(len(_issues(result, "Chola MMV Presence")), 1)
 

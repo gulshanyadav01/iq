@@ -68,11 +68,14 @@ INDEX = _index(
         _row("Car", "TATA", "NEXON"),
         _row("Car", "MARUTI", "SWIFT"),
         _row("Car", "MARUTI", "SWIFT DZIRE"),
-        # Car spells it long, CV short: exercises the carrier-wide preferred
-        # spelling (one brand, one exported name) rather than the per-bucket one.
-        _row("Car", "MAHINDRA AND MAHINDRA", "XUV"),
+        # One brand seeded on both books under the SAME spelling — the shape
+        # that folds. (A brand written two DIFFERENT ways is deliberately not
+        # folded any more; see AmbiguousSpellingTests.)
+        _row("Car", "MAHINDRA", "XUV"),
         _row("CV", "MAHINDRA", "BOLERO"),
-        _row("CV", "TATA MOTORS LTD", "407"),
+        # Carries corporate boilerplate the fold strips. NOT the same make as
+        # "TATA" above: industry words are identity, so these are two slugs.
+        _row("CV", "TATA MOTORS PVT LTD", "407"),
     ]
 )
 
@@ -86,19 +89,51 @@ def _transformer(product_subproduct="car", index=INDEX):
 
 
 class CanonicalizeMakeModelTests(TestCase):
-    def test_boilerplate_spellings_fold_onto_one_name(self):
+    def test_case_and_corporate_boilerplate_fold_onto_the_master_spelling(self):
+        """What the fold still does, after the matcher was narrowed against
+        2,237 live deals: case, whitespace, punctuation and corporate forms."""
         t = _transformer()
-        makes, _ = t._canonicalize_make_model(["MAHINDRA AND MAHINDRA"], None)
-        self.assertEqual(makes, ["MAHINDRA"])
         makes, _ = t._canonicalize_make_model(["mahindra"], None)
         self.assertEqual(makes, ["MAHINDRA"])
+        makes, _ = t._canonicalize_make_model(["Tata Motors Pvt. Ltd"], None)
+        self.assertEqual(makes, ["TATA MOTORS PVT LTD"])
 
-    def test_the_same_brand_spells_the_same_across_products(self):
-        car = _transformer("car")._canonicalize_make_model(["TATA"], None)[0]
-        cv = _transformer("commercial-gcv")._canonicalize_make_model(
-            ["TATA MOTORS LTD"], None
-        )[0]
-        self.assertEqual(car, cv)
+    def test_the_fold_never_adds_corporate_boilerplate(self):
+        """The master carries "TATA MOTORS PVT LTD"; a grid writing the
+        shorter, equally correct "TATA MOTORS" keeps its own spelling rather
+        than being padded out."""
+        t = _transformer()
+        makes, _ = t._canonicalize_make_model(["TATA MOTORS"], None)
+        self.assertEqual(makes, ["TATA MOTORS"])
+
+    def test_makes_resolve_carrier_wide_not_per_product_bucket(self):
+        """MARUTI is seeded only on Car, yet a CV rule still resolves it — a
+        make is a brand. Product-scoping makes left half the makes in a
+        production dump unmatched purely because of which book listed them."""
+        cv = _transformer("commercial-gcv")._canonicalize_make_model(["maruti"], None)[
+            0
+        ]
+        self.assertEqual(cv, ["MARUTI"])
+
+    def test_a_brand_the_master_spells_two_ways_is_left_verbatim(self):
+        """Regression, measured on 2,237 live Chola deals.
+
+        Two spellings under one slug are indistinguishable from two different
+        companies that happen to share one — which is exactly how
+        "OM INDUSTRIES" got rewritten to "OM MOTORS". Declining costs a missed
+        tidy-up; guessing names a company the grid never mentioned.
+        """
+        index = _index(
+            [
+                _row("Car", "MAHINDRA AND MAHINDRA", "XUV"),
+                _row("CV", "MAHINDRA", "BOLERO"),
+            ]
+        )
+        t = _transformer(index=index)
+        makes, _ = t._canonicalize_make_model(["MAHINDRA AND MAHINDRA"], None)
+        self.assertEqual(makes, ["MAHINDRA AND MAHINDRA"])
+        makes, _ = t._canonicalize_make_model(["mahindra"], None)
+        self.assertEqual(makes, ["mahindra"])
 
     def test_unmatched_values_pass_through_verbatim(self):
         """The extractor is known to mis-land sub-class words and CC bands in
@@ -155,10 +190,14 @@ class CanonicalizeMakeModelTests(TestCase):
         args = (["mahindra"], ["nexon"])
         self.assertEqual(t._canonicalize_make_model(*args), args)
 
-    def test_a_bucket_absent_from_the_index_is_a_no_op(self):
+    def test_a_bucket_absent_from_the_index_still_cannot_match_a_model(self):
+        """TW is not in this fixture, so no model can resolve. The MAKE still
+        does — makes are matched carrier-wide, models per product — so this
+        pins the model half only."""
         t = _transformer(product_subproduct="two-wheeler")
-        args = (["mahindra"], ["nexon"])
-        self.assertEqual(t._canonicalize_make_model(*args), args)
+        makes, models = t._canonicalize_make_model(["mahindra"], ["nexon"])
+        self.assertEqual(models, ["nexon"])
+        self.assertEqual(makes, ["MAHINDRA"])
 
 
 class TransformWiringTests(TestCase):
@@ -187,8 +226,14 @@ class TransformWiringTests(TestCase):
             ],
         )
 
-    def _transform(self, raw):
-        with mock.patch("master_data.services.mmv.build_mmv_index", return_value=INDEX):
+    def _transform(self, raw, flag="true"):
+        # CINS_CHOLA_MMV defaults OFF, so the fold has to be opted into here
+        # or every assertion below would pass vacuously against un-folded
+        # input. The flag-default itself is pinned by MMVFlagTests.
+        with (
+            mock.patch.dict(os.environ, {"CINS_CHOLA_MMV": flag}),
+            mock.patch("master_data.services.mmv.build_mmv_index", return_value=INDEX),
+        ):
             doc, _, _ = RawToCICSTransformer().transform(raw)
         return doc
 
@@ -219,10 +264,9 @@ class TransformWiringTests(TestCase):
             self.assertEqual(make, ["mahindra"])
 
     def test_the_env_flag_disables_it_end_to_end(self):
-        with mock.patch.dict(os.environ, {"CINS_CHOLA_MMV": "false"}):
-            doc = self._transform(
-                self._raw({"state": "GJ", "vehicle_make": "mahindra"})
-            )
+        doc = self._transform(
+            self._raw({"state": "GJ", "vehicle_make": "mahindra"}), flag="false"
+        )
         makes = [c.vehicle_make for c in self._conditions(doc) if c.vehicle_make]
         self.assertTrue(makes)
         for make in makes:
@@ -360,10 +404,14 @@ class ProductBucketTests(TestCase):
 
 
 class MMVFlagTests(TestCase):
-    def test_default_is_on(self):
+    def test_default_is_off(self):
+        """Opt-in. The fold is provably non-destructive on the production dump
+        but changes only 737 of ~1.34M make values, all corporate-suffix
+        tidy-ups — not worth invalidating every cached CICS for by default.
+        Enabling it is a CICS_PIPELINE_VERSION change."""
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CINS_CHOLA_MMV", None)
-            self.assertTrue(mmv_enabled())
+            self.assertFalse(mmv_enabled())
 
     def test_falsy_spellings_disable(self):
         for value in ("0", "false", "FALSE", "no", "off", ""):

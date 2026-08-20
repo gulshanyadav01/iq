@@ -642,10 +642,19 @@ def mmv_enabled() -> bool:
     One switch on purpose: disabling only half would leave the validator
     flagging spellings the transformer would have folded, turning a rollback
     into a wall of findings.
+
+    **Defaults to OFF.** Measured against a dump of 2,237 live Chola deals, the
+    fold is now provably non-destructive (zero wrong make rewrites, against 93%
+    of deals corrupted before the matcher was fixed) — but it is also barely
+    worth its blast radius: it changes 737 of ~1.34M make values, all of them
+    corporate-suffix tidy-ups, while half the makes those deals use are absent
+    from the master entirely. Turning it on changes CICS output and so needs a
+    ``CICS_PIPELINE_VERSION`` bump; leaving it off keeps the cache intact. Opt
+    in once the master's coverage justifies it.
     """
     raw = os.environ.get("CINS_CHOLA_MMV")
     if raw is None:
-        return True
+        return False
     return raw.strip().lower() not in ("0", "false", "no", "off", "")
 
 

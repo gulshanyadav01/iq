@@ -70,10 +70,18 @@ def make_model_mandatory() -> bool:
     this one governs a business rule about the EXPORT (every deal names a
     make and a model). Rolling the master back must not silently take the
     mandatory check with it, and vice versa.
+
+    **Defaults to OFF, and the reason is the client's own data.** A dump of
+    2,237 live Chola deals carries NO ``VehicleModel`` on 93% of them — 100% of
+    Car/Taxi and 84% of Commercial Vehicle — and no make on only 8. Blank
+    make/model is the shape their production system actually ships, so as a
+    default this rule would fire on essentially every Chola document and say
+    nothing a human could act on. Opt in per environment if a downstream
+    consumer genuinely requires both.
     """
     raw = os.environ.get("CINS_MAKE_MODEL_MANDATORY")
     if raw is None:
-        return True
+        return False
     return raw.strip().lower() not in ("0", "false", "no", "off", "")
 
 
