@@ -35,7 +35,7 @@ from master_data.services.canonical import (
     VEHICLE_SUBCLASS_CANONICAL,
     normalize_insurer_name,
 )
-from master_data.services.rto import state_slug_for_code
+from master_data.services.rto import state_slug_for_code, state_slug_for_rto
 
 
 @dataclass
@@ -317,10 +317,11 @@ class MasterDataLoader:
         """Load the RTO master from the committed CSV (``rto_master.csv``).
 
         Tolerant of absence (a missing CSV is a no-op, not an error). Derives
-        ``state_slug`` from the 2-letter code prefix and ``group`` from the
-        ``(Group X)`` suffix in the display value; rows whose prefix is unmapped
-        (or which lack a code / id / value) are skipped and counted so seeding
-        gaps surface in the command output.
+        ``state_slug`` via ``state_slug_for_rto`` (display-value parenthetical
+        first, 2-letter code prefix as fallback — see ``services/rto``) and
+        ``group`` from the ``(Group X)`` suffix in the display value; rows that
+        resolve by neither route (or which lack a code / id / value) are skipped
+        and counted so seeding gaps surface in the command output.
         """
         csv_path = path or RTO_CSV_PATH
         if not csv_path.exists():
@@ -333,9 +334,10 @@ class MasterDataLoader:
                 if rto_id is None or not code or not value:
                     self._skip("RTO")
                     continue
-                state_slug = state_slug_for_code(code)
+                state_slug = state_slug_for_rto(code, value)
                 if not state_slug:
-                    # Unmapped registration prefix — skip loudly via the count.
+                    # Neither the display value nor the registration prefix
+                    # named a known state — skip loudly via the count.
                     self._skip("RTO")
                     continue
                 group = ""
@@ -385,6 +387,12 @@ class MasterDataLoader:
         prefix; a prefix absent from ``RTO_PREFIX_TO_STATE_SLUG`` is skipped
         and counted so seeding gaps surface loudly instead of silently
         dropping the row.
+
+        Deliberately prefix-only, unlike ``_load_rto``: a zone row carries a
+        bare code with no display value, so there is no parenthetical to prefer.
+        These rows drive zone→code expansion in the transformer, not the
+        export's state→RTO fill, so the NCR/Chandigarh/Daman reassignments
+        ``state_slug_for_rto`` makes do not apply here.
         """
         for carrier, zone, rto_code in rows:
             carrier = self._str(carrier)

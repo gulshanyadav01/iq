@@ -16,7 +16,11 @@ from master_data.services.resolver import (
     match_rto_localities,
     rto_locality_expansions,
 )
-from master_data.services.rto import state_slug_for_code
+from master_data.services.rto import (
+    state_slug_for_code,
+    state_slug_for_rto,
+    state_slug_for_value,
+)
 
 
 class StateSlugForCodeTests(TestCase):
@@ -39,6 +43,86 @@ class StateSlugForCodeTests(TestCase):
         self.assertIsNone(state_slug_for_code("ZZ01"))  # no such prefix
         self.assertIsNone(state_slug_for_code("1234"))  # not alpha
         self.assertIsNone(state_slug_for_code("A"))  # too short
+
+
+class StateSlugForValueTests(TestCase):
+    """The display value's parenthetical wins over the registration prefix.
+
+    21 seeded RTOs register under one state but are zoned under another; the
+    export fills its RTO column by state, so the prefix handed them the wrong
+    carrier's payout. See ``services/rto``'s module docstring.
+    """
+
+    def test_parenthetical_names_the_state(self):
+        self.assertEqual(
+            state_slug_for_value("AP01-Adilabad(Andhra Pradesh)(Group B)"),
+            "andhra-pradesh",
+        )
+        self.assertEqual(
+            state_slug_for_value("UP15-Meerut(Uttar Pradesh)(Group B)"),
+            "uttar-pradesh",
+        )
+
+    def test_ampersand_becomes_and(self):
+        self.assertEqual(
+            state_slug_for_value("AN01-Port Blair(Andaman & Nicobar)(Group D)"),
+            "andaman-and-nicobar",
+        )
+
+    def test_group_suffix_is_not_the_state(self):
+        self.assertIsNone(state_slug_for_value("XX01-Somewhere(Group B)"))
+
+    def test_bracketed_locality_does_not_shadow_the_state(self):
+        # PB89's locality itself carries brackets — the LAST non-Group
+        # parenthetical is the state.
+        self.assertEqual(
+            state_slug_for_value("PB89-Amritsar (2)(Punjab)(Group B)"), "punjab"
+        )
+
+    def test_a_district_is_not_accepted_as_a_state(self):
+        # NL10's parenthetical is a district, not a state. Returning it would
+        # invent a geography, so the caller falls back to the prefix.
+        self.assertIsNone(state_slug_for_value("NL10-Peren(Peren)(Group C)"))
+        self.assertIsNone(state_slug_for_value("ZZ09-Nowhere(Atlantis)(Group A)"))
+
+    def test_empty_or_parenless_returns_none(self):
+        self.assertIsNone(state_slug_for_value(""))
+        self.assertIsNone(state_slug_for_value("AP01-Adilabad"))
+
+
+class StateSlugForRtoTests(TestCase):
+    def test_value_wins_over_prefix(self):
+        # The NCR ring: registered under UP/HR, zoned under Delhi NCR.
+        self.assertEqual(
+            state_slug_for_rto("UP14", "UP14-Ghaziabad(Delhi NCR)(Group B)"),
+            "delhi-ncr",
+        )
+        self.assertEqual(
+            state_slug_for_rto("HR26", "HR26-Gurgaon(Delhi NCR)(Group B)"),
+            "delhi-ncr",
+        )
+        # Daman/Diu/Silvassa: the carrier zones the combined UT under Gujarat.
+        self.assertEqual(
+            state_slug_for_rto("DD01", "DD01-Diu(Gujarat)(Group B)"), "gujarat"
+        )
+        # Chandigarh, reached from both its neighbours' prefixes.
+        self.assertEqual(
+            state_slug_for_rto("PB01", "PB01-Chandigarh(Chandigarh)(Group A)"),
+            "chandigarh",
+        )
+        self.assertEqual(
+            state_slug_for_rto("HR03", "HR03-Panchkula(Chandigarh)(Group A)"),
+            "chandigarh",
+        )
+
+    def test_prefix_is_the_fallback(self):
+        self.assertEqual(
+            state_slug_for_rto("NL10", "NL10-Peren(Peren)(Group C)"), "nagaland"
+        )
+        self.assertEqual(state_slug_for_rto("AP01", ""), "andhra-pradesh")
+
+    def test_neither_route_resolves(self):
+        self.assertIsNone(state_slug_for_rto("ZZ09", "ZZ09-Nowhere(Atlantis)(Group A)"))
 
 
 class RtosForStatesTests(TestCase):
@@ -238,6 +322,24 @@ class LoadRtoCsvTests(TestCase):
         self.assertEqual(ap.car_zone, 2)
         self.assertIsNone(ap.tw_zone)
 
+    def test_csv_prefers_the_display_values_state(self):
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".csv", delete=False, newline=""
+        ) as f:
+            f.write("rto_id,code,value,car_zone,tw_zone,cv_zone\n")
+            f.write("1,UP14,UP14-Ghaziabad(Delhi NCR)(Group B),1,1,1\n")
+            f.write("2,UP15,UP15-Meerut(Uttar Pradesh)(Group B),1,1,1\n")
+            f.write("3,NL10,NL10-Peren(Peren)(Group C),1,1,1\n")
+            tmp = Path(f.name)
+        loader = MasterDataLoader()
+        loader._load_rto(tmp)
+        tmp.unlink()
+        self.assertEqual(RTOMaster.objects.get(code="UP14").state_slug, "delhi-ncr")
+        self.assertEqual(RTOMaster.objects.get(code="UP15").state_slug, "uttar-pradesh")
+        # District parenthetical -> prefix fallback, still seeded not skipped.
+        self.assertEqual(RTOMaster.objects.get(code="NL10").state_slug, "nagaland")
+        self.assertEqual(loader.result.sheets["RTO"].skipped, 0)
+
     def test_repo_csv_loads_all_rows(self):
         # The committed rto_master.csv seeds every mapped RTO.
         self.assertTrue(RTO_CSV_PATH.exists(), f"missing {RTO_CSV_PATH}")
@@ -247,3 +349,19 @@ class LoadRtoCsvTests(TestCase):
         self.assertEqual(RTOMaster.objects.count(), 1721)
         self.assertEqual(RTOMaster.objects.exclude(car_zone=None).count(), 1696)
         self.assertEqual(RTOMaster.objects.exclude(cv_zone=None).count(), 1696)
+
+    def test_repo_csv_zones_the_cross_state_rtos_by_display_value(self):
+        # 21 seeded RTOs register under one state and are zoned under another.
+        # These are the ones that carried the wrong carrier's payout.
+        self.assertTrue(RTO_CSV_PATH.exists(), f"missing {RTO_CSV_PATH}")
+        MasterDataLoader()._load_rto()
+        by_code = {r.code: r.state_slug for r in RTOMaster.objects.all()}
+        for code in ("UP14", "UP16", "UP18", "HR26", "HR29", "HR51", "HR55"):
+            self.assertEqual(by_code[code], "delhi-ncr", code)
+        for code in ("PB01", "HR03", "HR70", "HR78"):
+            self.assertEqual(by_code[code], "chandigarh", code)
+        for code in ("DD01", "DD03", "DN01"):
+            self.assertEqual(by_code[code], "gujarat", code)
+        # Unaffected neighbours keep their prefix-derived state.
+        self.assertEqual(by_code["UP15"], "uttar-pradesh")
+        self.assertEqual(by_code["PB02"], "punjab")
