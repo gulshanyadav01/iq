@@ -17,21 +17,21 @@ OUTPUT FORMAT (STRICT)
 Return a single JSON object with the following top-level keys only:
 
 {
-  "entities": [],
-  "identifiers": [],
-  "dates": [],
-  "monetary_amounts": [],
-  "vehicles": [],
-  "coverages": [],
-  "limits": [],
-  "ncb_details": [],
-  "premiums": [],
-  "taxes": [],
-  "endorsements": [],
-  "participants": [],
-  "locations": [],
-  "references": [],
-  "raw_tables": []
+"entities": [],
+"identifiers": [],
+"dates": [],
+"monetary_amounts": [],
+"vehicles": [],
+"coverages": [],
+"limits": [],
+"ncb_details": [],
+"premiums": [],
+"taxes": [],
+"endorsements": [],
+"participants": [],
+"locations": [],
+"references": [],
+"raw_tables": []
 }
 
 ────────────────────────────────────────
@@ -39,28 +39,31 @@ FIELD DEFINITIONS
 ────────────────────────────────────────
 
 entities:
+
 - Named real-world things (people, insurers, companies, offices)
 
 identifiers:
+
 - Any policy number, proposal number, UIN, engine no, chassis no, receipt no
 - CHASSIS NUMBER RULES:
   • May be labeled as "VIN" (Vehicle Identification Number)
   • Complete chassis number is ALWAYS 17 characters alphanumeric
   • IMPORTANT: Sometimes split across TWO cells - "VIN" in one cell and "Chassis" in another
-    - If you find partial values (less than 17 chars), look for the other part
-    - COMBINE both parts to form complete 17-character chassis number
-    - Example: VIN="MA1" + Chassis="ZC2DE1HD6P0123456" → Full Chassis = "MA1ZC2DE1HD6P0123456"
+  - If you find partial values (less than 17 chars), look for the other part
+  - COMBINE both parts to form complete 17-character chassis number
+  - Example: VIN="MA1" + Chassis="ZC2DE1HD6P0123456" → Full Chassis = "MA1ZC2DE1HD6P0123456"
 
 dates:
+
 - Any date or date range with context (issue, start, end, payment)
 - PREVIOUS POLICY DATES — explicitly capture if present:
   • Labels: "Previous Policy Period To", "Previous Policy Expiry",
-    "Expiry of Previous Policy", "Previous Policy End Date",
-    "Prev Policy To", "Date of Expiry of Previous Policy"
+  "Expiry of Previous Policy", "Previous Policy End Date",
+  "Prev Policy To", "Date of Expiry of Previous Policy"
   • In renewal narratives like "Renewal of Policy from <X> to <Y>",
-    capture <Y> when the document distinguishes new vs previous periods
+  capture <Y> when the document distinguishes new vs previous periods
   • Use a clear "context" string such as "previous_policy_end_date"
-    so Stage 2 can identify it
+  so Stage 2 can identify it
 - ALL dates MUST be normalized to dd/mm/yyyy format (e.g., "15/01/2025")
   • Convert any format: "Jan 15, 2025" → "15/01/2025"
   • Convert: "2025-01-15" → "15/01/2025"
@@ -68,10 +71,11 @@ dates:
   • Convert Excel serial numbers (e.g., 45672) to dd/mm/yyyy
   • Year-only values (e.g., "2023", "2024"): → "01/01/2023"
   • Month + Year values (e.g., "Dec-2024", "12/2024", "December 2024", "DEC 2024"):
-    → "01/MM/YYYY" — use day=01, convert month name to number if needed
-    Examples: "Dec-2024" → "01/12/2024", "12/2024" → "01/12/2024", "March 2023" → "01/03/2023"
+  → "01/MM/YYYY" — use day=01, convert month name to number if needed
+  Examples: "Dec-2024" → "01/12/2024", "12/2024" → "01/12/2024", "March 2023" → "01/03/2023"
 
 monetary_amounts:
+
 - Any INR amount with textual context (other than those in premiums array)
 - Include "position" field to indicate document order:
   • "before_tax" = appears before GST/tax entries
@@ -82,6 +86,7 @@ monetary_amounts:
 - NOTE: Premium-related amounts should go in "premiums" array, not here
 
 vehicles:
+
 - Any vehicle-related attributes detected (no fixed structure)
 - REGISTRATION NUMBER (reg_num): Maximum 10 characters (e.g., "MH12AB1234", "DL01C1234")
   • Indian format: 2 state letters + 2 district digits + 1-2 series letters + 4 digits
@@ -92,163 +97,192 @@ vehicles:
   • "variant": trim/version level (e.g., "VXI", "SX PLUS", "XZ+", "STD")
   • "make_model": full combined text as-is from document (always include this too)
   • If document gives a single combined string like "MARUTI SUZUKI SWIFT DZIRE VXI":
-    - make = first 1-2 words that are a known manufacturer
-    - variant = last word(s) that are known trim codes (VXI, ZXI, LXI, SX, ZX, XZ+, etc.)
-    - model = everything between make and variant
+  - make = first 1-2 words that are a known manufacturer
+  - variant = last word(s) that are known trim codes (VXI, ZXI, LXI, SX, ZX, XZ+, etc.)
+  - model = everything between make and variant
+- CUBIC CAPACITY (cubic_capacity): engine displacement in CC — capture the NUMBER
+  even when the label is just "Cubic Capacity", "CC", "CC/HP", "Cubic Capacity/Power",
+  or the value sits alone in a table cell (e.g. "999 CC", "1248 CC", "236 CC", "4765 CC").
+  Commercial/construction vehicles (backhoe loaders, cranes, tractors) print this too —
+  do NOT skip it. Always include this field when any CC value appears in the document.
+- SEATING CAPACITY (seating_capacity): the licensed/seating capacity NUMBER — capture it
+  even when the label is "Seating Capacity", "Licensed Seating Capacity", "No. of Seats",
+  or split across lines/cells (e.g. "Licensed Seating Capacity 2", "Seating Capacity 4",
+  a backhoe with "1"). Commercial vehicles print this too — do NOT skip it. This is the
+  vehicle's seat count, NOT a "PA for N passengers" line and NOT the number of wheels.
 - RTO LOCATION (for new/unregistered vehicles):
   • If vehicle is new (no reg number yet), extract "rto_location" in format "STATE - City"
 
 coverages:
+
 - Any coverage, benefit, rider, add-on, section, or protection described
 - For ADD-ONS: Mark with "is_addon": true, "addon_name" field, and "premium" (amount if found)
 - CRITICAL: Capture EVERY add-on with its premium amount. If premium is 0 or not listed, set "premium": 0
 
 - SELECTED vs NOT SELECTED (CRITICAL — read carefully):
   coverages[] must ONLY contain add-ons that are ACTUALLY SELECTED/OPTED by the insured.
+  For every add-on you DO add, set an explicit "opted" boolean: true = selected, false = not.
 
   ★ DO NOT add an add-on to coverages[] if:
-    • It appears in a pre-printed template table where the amount column shows "-", blank, "N/A", or "Nil"
-    • These are option SLOTS printed by the insurer — not selections made by the customer
+  • It appears in a pre-printed template table where the amount column shows "-", blank, "N/A", or "Nil"
+  AND it carries no per-row policy-specific UIN/endorsement code
+  • These are option SLOTS printed by the insurer — not selections made by the customer
 
-  ★ DO add an add-on to coverages[] with "premium": 0 if:
-    • It is listed under a header like "Add on Cover/s Opted", "Selected Add-ons", "Add-ons Availed",
-      "Add on Cover/s", or similar — meaning the insured HAS opted for it
-    • Its cost is bundled into the total (no individual line-item amount shown separately)
+  ★ DO add an add-on to coverages[] with "premium": 0 and "opted": true if:
+  • It is listed under a header like "Add on Cover/s Opted", "Selected Add-ons", "Add-ons Availed",
+  "Add on Cover/s", "Optional Cover", "Optional Coverage Details", or similar — the insured HAS opted for it
+  • It appears in a table that prints a per-row policy-specific UIN / endorsement code next to each cover
+  (e.g. a Go Digit "Optional Cover | Optional Coverage Details | UIN" table where each opted cover row
+  carries its own UIN like ".../A0012V02201718"). That per-row UIN means the cover is ATTACHED to THIS
+  policy, so set "opted": true even when no premium is printed (its cost is bundled into the OD total).
+  • Its cost is bundled into the total (no individual line-item amount shown separately)
 
-  ★ Quick rule — how to tell if an add-on IS selected:
-    1. Listed explicitly under an "opted" / "selected" / "availed" heading → SELECTED (even if premium = 0)
-    2. Has a positive premium amount next to it in the premium table → SELECTED
-    3. Shown in a uniform template table with "-" in the amount column → NOT SELECTED (skip it)
+  ★ Quick rule — how to tell if an add-on IS selected (then set "opted": true):
+
+  1. Listed explicitly under an "opted" / "selected" / "availed" / "Optional Cover" heading → SELECTED (even if premium = 0)
+  2. Has a positive premium amount next to it in the premium table → SELECTED
+  3. Carries a per-row UIN / endorsement code specific to this policy → SELECTED (even if premium = 0)
+  4. Uniform template menu with "-"/blank amount AND no per-row UIN → NOT SELECTED ("opted": false; skip it)
 
 - ADD-ON DETECTION CHECKLIST (search for ALL of these in the document):
 
   ┌─────────────────────────────────────────────────────────────────────────┐
-  │ addon_name              │ Labels to search for                         │
+  │ addon_name │ Labels to search for │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "zero_dep"              │ Zero Dep, Zero Depreciation, Nil Dep,       │
-  │                         │ Bumper to Bumper, ZD Cover, Depreciation    │
-  │                         │ Waiver, Depreciation Shield, Dep Waiver,    │
-  │                         │ Nil Depreciation Cover                      │
+  │ "zero_dep" │ Zero Dep, Zero Depreciation, Nil Dep, │
+  │ │ Bumper to Bumper, ZD Cover, Depreciation │
+  │ │ Waiver, Depreciation Shield, Dep Waiver, │
+  │ │ Nil Depreciation Cover, Parts Depreciation, │
+  │ │ Parts Depreciation Protect, Depreciation │
+  │ │ Reimbursement (this is Zero-Dep — NOT NCB) │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "engine_protection"     │ Engine Protection, Engine Protect, EP Cover,│
-  │                         │ Engine Guard, Engine Secure, Hydrostatic    │
-  │                         │ Lock, Water Ingression, Engine Damage Cover │
+  │ "engine_protection" │ Engine Protection, Engine Protect, EP Cover,│
+  │ │ Engine Guard, Engine Secure, Hydrostatic │
+  │ │ Lock, Water Ingression, Engine Damage Cover,│
+  │ │ Engine and Gear Box Protect, Gear Box Protect│
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "consumables"           │ Consumables, Consumable Cover, Consumable   │
-  │                         │ Expenses, Oil Coolant Nuts Bolts,           │
-  │                         │ Consumable Material Expenses                │
+  │ "consumables" │ Consumables, Consumable Cover, Consumable │
+  │ │ Expenses, Oil Coolant Nuts Bolts, │
+  │ │ Consumable Material Expenses │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "key_replacement"       │ Key Replacement, Key Protect, Key Loss,     │
-  │                         │ Lost Key Cover, Key Care, Key Assistance    │
+  │ "key_replacement" │ Key Replacement, Key Protect, Key Loss, │
+  │ │ Lost Key Cover, Key Care, Key Assistance, │
+  │ │ Key & Lock Protect, Key and Lock Protect, │
+  │ │ Lock Protect │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "ncb_protection"        │ NCB Protect, NCB Protection, No Claim Bonus │
-  │                         │ Protection, Protect NCB, NCB Protector,     │
-  │                         │ NCB Safeguard, NCB Shield                   │
+  │ "ncb_protection" │ NCB Protect, NCB Protection, No Claim Bonus │
+  │ │ Protection, Protect NCB, NCB Protector, │
+  │ │ NCB Safeguard, NCB Shield. │
+  │ │ ✗ NOT "Parts Depreciation" / "Depreciation" │
+  │ │ anything — that is zero_dep, never NCB. │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "roadside_assistance"   │ RSA, Roadside Assistance, Road Side         │
-  │                         │ Assistance, 24x7 Assistance, Breakdown      │
-  │                         │ Assistance, Emergency Assistance, Towing,   │
-  │                         │ Spot Assistance, Emergency Road Assistance  │
+  │ "roadside_assistance" │ RSA, Roadside Assistance, Road Side │
+  │ │ Assistance, 24x7 Assistance, Breakdown │
+  │ │ Assistance, Emergency Assistance, Towing, │
+  │ │ Spot Assistance, Emergency Road Assistance │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "return_to_invoice"     │ RTI, Return to Invoice, Invoice Cover,      │
-  │                         │ Invoice Protection, GAP Cover, GAP Value,   │
-  │                         │ Return to Invoice Cover                     │
+  │ "return_to_invoice" │ RTI, Return to Invoice, Invoice Cover, │
+  │ │ Invoice Protection, GAP Cover, GAP Value, │
+  │ │ Return to Invoice Cover │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "personal_belongings"   │ LPB, Loss of Personal Belongings, Personal  │
-  │                         │ Belongings, Loan Protector, Loan Protection,│
-  │                         │ EMI Protection, EMI Protector               │
+  │ "personal_belongings" │ LPB, Loss of Personal Belongings, Personal │
+  │ │ Belongings, Loan Protector, Loan Protection,│
+  │ │ EMI Protection, EMI Protector │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "tyre_protection"       │ Tyre Protection, Tyre Cover, Tyre Guard,    │
-  │                         │ Tyre and Rim, Wheel Protection, Tyre Secure │
-  │                         │ ✗ NOT IMT-23 "Cover for Lamps/Tyres/Tubes/  │
-  │                         │ Mudguards/Bonnet/Paintwork/Fibre Glass/     │
-  │                         │ External Body Parts" — that is a STANDARD OD│
-  │                         │ endorsement bundled into Basic OD, NOT this │
-  │                         │ add-on. Do NOT tag it; it belongs in        │
-  │                         │ endorsements/premiums (no addon_name).      │
+  │ "tyre_protection" │ Tyre Protection, Tyre Cover, Tyre Guard, │
+  │ │ Tyre and Rim, Wheel Protection, Tyre Secure │
+  │ │ ✗ NOT IMT-23 "Cover for Lamps/Tyres/Tubes/ │
+  │ │ Mudguards/Bonnet/Paintwork/Fibre Glass/ │
+  │ │ External Body Parts" — that is a STANDARD OD│
+  │ │ endorsement bundled into Basic OD, NOT this │
+  │ │ add-on. Do NOT tag it; it belongs in │
+  │ │ endorsements/premiums (no addon_name). │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "paid_driver"           │ Optional PAID-DRIVER add-on ONLY (e.g. a    │
-  │                         │ separately-opted driver cover).             │
-  │                         │ ✗ NOT "Legal Liability to Paid Driver/      │
-  │                         │ Conductor/Cleaner/Employee" (IMT-28/LL) —   │
-  │                         │ that is STATUTORY Section-II liability, NOT │
-  │                         │ an add-on. Do NOT tag it; it belongs in     │
-  │                         │ endorsements/premiums (no addon_name).      │
+  │ "paid_driver" │ Optional PAID-DRIVER add-on ONLY (e.g. a │
+  │ │ separately-opted driver cover). │
+  │ │ ✗ NOT "Legal Liability to Paid Driver/ │
+  │ │ Conductor/Cleaner/Employee" (IMT-28/LL) — │
+  │ │ that is STATUTORY Section-II liability, NOT │
+  │ │ an add-on. Do NOT tag it; it belongs in │
+  │ │ endorsements/premiums (no addon_name). │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "personal_accident"     │ OWNER-DRIVER / DEFAULT PA: PA, Personal     │
-  │   (owner-driver / CPA)  │ Accident, PA Cover, Owner Driver PA, CPA,   │
-  │                         │ Compulsory PA, Driver PA, PA for Owner      │
-  │                         │ Driver, Owner PA. A bare "Personal          │
-  │                         │ Accident"/"PA" with NO "Passenger" word     │
-  │                         │ is owner-driver PA → map here (default).    │
-  │                         │ Only lines naming "Passenger" go to         │
-  │                         │ pa_unnamed_passenger.                       │
+  │ "personal_accident" │ OWNER-DRIVER / DEFAULT PA: PA, Personal │
+  │ (owner-driver / CPA) │ Accident, PA Cover, Owner Driver PA, CPA, │
+  │ │ Compulsory PA, Driver PA, PA for Owner │
+  │ │ Driver, Owner PA. A bare "Personal │
+  │ │ Accident"/"PA" with NO "Passenger" word │
+  │ │ is owner-driver PA → map here (default). │
+  │ │ Only lines naming "Passenger" go to │
+  │ │ pa_unnamed_passenger. │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "electrical_accessories"│ Electrical Accessories, Elec Accessories,   │
-  │                         │ Electrical Fitting, Electric Accessory      │
+  │ "electrical_accessories"│ Electrical Accessories, Elec Accessories, │
+  │ │ Electrical Fitting, Electric Accessory │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "non_electrical_acc"    │ Non-Electrical Accessories, Non Elec,       │
-  │                         │ Non-Electric Accessory, Non Electrical      │
+  │ "non_electrical_acc" │ Non-Electrical Accessories, Non Elec, │
+  │ │ Non-Electric Accessory, Non Electrical │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "cng_lpg"               │ OD SIDE of the kit: CNG/LPG Kit, CNG Kit,  │
-  │   (kit OD premium)      │ LPG Kit, Bi-Fuel Kit, CNG/LPG Cover,       │
-  │                         │ External CNG/LPG. Most policies show ONLY  │
-  │                         │ this OD line.                              │
+  │ "cng_lpg" │ OD SIDE of the kit: CNG/LPG Kit, CNG Kit, │
+  │ (kit OD premium) │ LPG Kit, Bi-Fuel Kit, CNG/LPG Cover, │
+  │ │ External CNG/LPG. Most policies show ONLY │
+  │ │ this OD line. │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "pa_unnamed_passenger"  │ PASSENGER PA ONLY (label must say          │
-  │                         │ "Passenger"): PA to Unnamed Passengers,    │
-  │                         │ Unnamed Passenger PA, PA for Unnamed        │
-  │                         │ Passenger(s), Compulsory PA to Unnamed     │
-  │                         │ Passengers. Premium = SMALL amount paid,   │
-  │                         │ NOT the cover sum.                         │
+  │ "pa_unnamed_passenger" │ PASSENGER PA ONLY (label must say │
+  │ │ "Passenger"): PA to Unnamed Passengers, │
+  │ │ Unnamed Passenger PA, PA for Unnamed │
+  │ │ Passenger(s), Compulsory PA to Unnamed │
+  │ │ Passengers. Premium = SMALL amount paid, │
+  │ │ NOT the cover sum. │
   ├─────────────────────────┼──────────────────────────────────────────────┤
-  │ "bifuel_kit_tp"         │ TP SIDE of the kit, ONLY if a SEPARATE     │
-  │   (kit TP premium)      │ third-party line is printed: CNG/LPG TP,   │
-  │                         │ Bi-Fuel Kit TP, TP for CNG/LPG Kit,        │
-  │                         │ CNG/LPG Kit TP Premium                      │
+  │ "bifuel_kit_tp" │ TP SIDE of the kit, ONLY if a SEPARATE │
+  │ (kit TP premium) │ third-party line is printed: CNG/LPG TP, │
+  │ │ Bi-Fuel Kit TP, TP for CNG/LPG Kit, │
+  │ │ CNG/LPG Kit TP Premium │
   └─────────────────────────┴──────────────────────────────────────────────┘
 
   CAUTION — two pairs that must never share a rupee figure:
   • Owner/Driver/CPA PA → "personal_accident" (pa_cover); PA explicitly for
-    PASSENGERS → "pa_unnamed_passenger".
+  PASSENGERS → "pa_unnamed_passenger".
   • A CNG/LPG kit's single premium line is the OD side → "cng_lpg" (cngAmount).
-    Use "bifuel_kit_tp" ONLY when a SEPARATE TP line for the kit is printed.
-    Never tag the same amount as both cng_lpg and bifuel_kit_tp.
+  Use "bifuel_kit_tp" ONLY when a SEPARATE TP line for the kit is printed.
+  Never tag the same amount as both cng_lpg and bifuel_kit_tp.
 
 - For EACH add-on found, extract:
-  {"is_addon": true, "addon_name": "<from table above>", "value": "<label>", "premium": <amount or 0>, "context": "<description>"}
+  {"is_addon": true, "addon_name": "<from table above>", "value": "<label>", "premium": <amount or 0>, "opted": <true if actually selected/opted per the SELECTED-vs-NOT-SELECTED rules above, else false>, "context": "<description>"}
 
 - PA COVER PREMIUM RULE (CRITICAL — very commonly confused):
   PA cover rows in the premium table show TWO amounts in the same row:
-    • Cover amount / Sum Insured: a large number in LAKHS (e.g., 1,500,000 or 15,00,000)
-    • Premium paid to insurer: a small number in HUNDREDS (e.g., 330, 550, 750)
+  • Cover amount / Sum Insured: a large number in LAKHS (e.g., 1,500,000 or 15,00,000)
+  • Premium paid to insurer: a small number in HUNDREDS (e.g., 330, 550, 750)
   ★ "premium" field = the SMALL amount (what the customer PAYS to the insurer)
   ★ The large cover amount goes in the "limits" array as PA sum insured — NOT as the premium
-  ★ EXAMPLE row: "PA for owner driver  |  1,500,000.00  |  550.00"
-      → "premium" = 550   ← correct (amount paid)
-      → 1,500,000 → limits array as "PA cover sum insured"   ← NOT the premium
+  ★ EXAMPLE row: "PA for owner driver | 1,500,000.00 | 550.00"
+  → "premium" = 550 ← correct (amount paid)
+  → 1,500,000 → limits array as "PA cover sum insured" ← NOT the premium
   ★ RULE: If a PA row has two numbers, the rightmost column value is the premium;
-    the larger (leftmost) column value is the sum insured / cover amount
+  the larger (leftmost) column value is the sum insured / cover amount
 
 limits:
+
 - Any liability limit, sum insured, CSI, deductible, or cap
 
 ncb_details:
+
 - CRITICAL: NCB (No Claim Bonus) has TWO separate components - capture BOTH if present:
   • NCB Percentage: Range 0-100 (common values: 0, 20, 25, 35, 45, 50)
-    - Look for: "NCB %", "NCB Percentage", "No Claim Bonus %", "NCB Discount %", "NCB"
-    - Extract as integer percentage value (e.g., 20, 35, 50)
-    - Mark with "ncb_type": "percentage"
-    - Context examples: "NCB: 20%", "No Claim Bonus Discount: 35%", "NCB Applicable: 50%"
-  • NCB Discount Amount: Monetary value in rupees (may appear as negative in premiums section)
-    - Look for: "NCB Discount", "NCB Amount", "No Claim Bonus Discount", "NCB Discount Amount"
-    - Extract as monetary amount (preserve negative sign if present)
-    - Mark with "ncb_type": "discount_amount"
-    - May also appear in premiums array with "is_discount": true
+  - Look for: "NCB %", "NCB Percentage", "No Claim Bonus %", "NCB Discount %", "NCB"
+  - Extract as integer percentage value (e.g., 20, 35, 50)
+  - Mark with "ncb_type": "percentage"
+  - Context examples: "NCB: 20%", "No Claim Bonus Discount: 35%", "NCB Applicable: 50%"
+    • NCB Discount Amount: Monetary value in rupees (may appear as negative in premiums section)
+  - Look for: "NCB Discount", "NCB Amount", "No Claim Bonus Discount", "NCB Discount Amount"
+  - Extract as monetary amount (preserve negative sign if present)
+  - Mark with "ncb_type": "discount_amount"
+  - May also appear in premiums array with "is_discount": true
 - Both can exist in same policy (percentage typically determines the discount amount)
 - If only percentage or only amount is found, capture what's available
 
 premiums:
+
 - CAPTURE EVERY monetary line in the premium breakdown section IN DOCUMENT ORDER
 - For EACH line extract these fields:
   • "label": exact label/description text as it appears in the document
@@ -261,47 +295,49 @@ premiums:
 
 - ADD-ON NAME TABLE (use these exact keys for "addon_name" when applicable):
   ┌───────────────────────┬───────────────────────────────────────────────┐
-  │ addon_name            │ Match these labels in premium breakdown       │
+  │ addon_name │ Match these labels in premium breakdown │
   ├───────────────────────┼───────────────────────────────────────────────┤
-  │ "zero_dep"            │ Zero Dep, Nil Dep, Bumper to Bumper, ZD      │
-  │ "engine_protection"   │ Engine Protection, Engine Protect, EP Cover  │
-  │ "consumables"         │ Consumables, Consumable Cover/Expenses       │
-  │ "key_replacement"     │ Key Replacement, Key Protect, Lost Key       │
-  │ "ncb_protection"      │ NCB Protect, NCB Protection                  │
-  │ "roadside_assistance" │ RSA, Roadside Assistance, Breakdown Assist   │
-  │ "return_to_invoice"   │ RTI, Return to Invoice, GAP Cover            │
-  │ "personal_belongings" │ LPB, Loss of Personal Belongings             │
-  │ "tyre_protection"     │ Tyre Protection, Tyre Guard, Tyre Secure.    │
-  │                       │ ✗ NOT IMT-23 Lamps/Tyres/Tubes/Mudguards/    │
-  │                       │ External Body Parts (standard OD → no tag)   │
-  │ "paid_driver"         │ Optional paid-driver add-on ONLY. ✗ NOT LL   │
-  │                       │ to Paid Driver/Conductor/Cleaner (IMT-28,    │
-  │                       │ statutory liability → no addon_name)         │
-  │ "personal_accident"   │ Owner-driver/DEFAULT PA: PA, Personal Acc,   │
-  │                       │ PA Cover, Owner Driver PA, CPA, Compulsory PA,│
-  │                       │ Driver PA (bare PA w/o "Passenger" = here)   │
-  │  ★ value = SMALL premium paid (e.g. 550), NOT large cover sum    │
-  │ "pa_unnamed_passenger"│ PASSENGER PA only (label says "Passenger"):  │
-  │                       │ PA to Unnamed Passengers, Unnamed Passenger  │
-  │                       │ PA (SMALL premium, not sum)                  │
-  │ "electrical_acc"      │ Electrical Accessories premium               │
-  │ "non_electrical_acc"  │ Non-Electrical Accessories premium           │
-  │ "cng_lpg"             │ CNG/LPG Kit OD premium, Bi-Fuel Kit premium  │
-  │ "bifuel_kit_tp"       │ CNG/LPG kit TP premium — ONLY a separate TP  │
-  │                       │ line; never the same figure as cng_lpg       │
+  │ "zero_dep" │ Zero Dep, Nil Dep, Bumper to Bumper, ZD │
+  │ "engine_protection" │ Engine Protection, Engine Protect, EP Cover │
+  │ "consumables" │ Consumables, Consumable Cover/Expenses │
+  │ "key_replacement" │ Key Replacement, Key Protect, Lost Key │
+  │ "ncb_protection" │ NCB Protect, NCB Protection │
+  │ "roadside_assistance" │ RSA, Roadside Assistance, Breakdown Assist │
+  │ "return_to_invoice" │ RTI, Return to Invoice, GAP Cover │
+  │ "personal_belongings" │ LPB, Loss of Personal Belongings │
+  │ "tyre_protection" │ Tyre Protection, Tyre Guard, Tyre Secure. │
+  │ │ ✗ NOT IMT-23 Lamps/Tyres/Tubes/Mudguards/ │
+  │ │ External Body Parts (standard OD → no tag) │
+  │ "paid_driver" │ Optional paid-driver add-on ONLY. ✗ NOT LL │
+  │ │ to Paid Driver/Conductor/Cleaner (IMT-28, │
+  │ │ statutory liability → no addon_name) │
+  │ "personal_accident" │ Owner-driver/DEFAULT PA: PA, Personal Acc, │
+  │ │ PA Cover, Owner Driver PA, CPA, Compulsory PA,│
+  │ │ Driver PA (bare PA w/o "Passenger" = here) │
+  │ ★ value = SMALL premium paid (e.g. 550), NOT large cover sum │
+  │ "pa_unnamed_passenger"│ PASSENGER PA only (label says "Passenger"): │
+  │ │ PA to Unnamed Passengers, Unnamed Passenger │
+  │ │ PA (SMALL premium, not sum) │
+  │ "electrical_acc" │ Electrical Accessories premium │
+  │ "non_electrical_acc" │ Non-Electrical Accessories premium │
+  │ "cng_lpg" │ CNG/LPG Kit OD premium, Bi-Fuel Kit premium │
+  │ "bifuel_kit_tp" │ CNG/LPG kit TP premium — ONLY a separate TP │
+  │ │ line; never the same figure as cng_lpg │
   └───────────────────────┴───────────────────────────────────────────────┘
+
   - If an add-on doesn't match any entry above, use "addon_name": "other"
 
 - CRITICAL RULES:
   ★ Include GST/tax lines in this array with "is_tax_line": true — they are position anchors for Stage 2
   ★ line_order is GLOBAL across ALL tables in the document — it NEVER resets between tables
-    - Assign 1,2,3... continuously from the very first premium line to the very last
-    - If the document has 3 separate premium tables, the combined line_orders might go 1-20
-    - Never restart at 1 for a second or third table
-  ★ Do NOT skip any monetary line in the premium section
-  ★ Do NOT add "premium_type" or "position" fields — Stage 2 handles classification
-  ★ If the same premium table appears twice (detail + summary), capture BOTH with continuing line_orders
-  ★ Negative values are discounts — preserve the negative sign
+
+  - Assign 1,2,3... continuously from the very first premium line to the very last
+  - If the document has 3 separate premium tables, the combined line_orders might go 1-20
+  - Never restart at 1 for a second or third table
+    ★ Do NOT skip any monetary line in the premium section
+    ★ Do NOT add "premium_type" or "position" fields — Stage 2 handles classification
+    ★ If the same premium table appears twice (detail + summary), capture BOTH with continuing line_orders
+    ★ Negative values are discounts — preserve the negative sign
 
 - TWO-COLUMN PREMIUM TABLE RULE (CRITICAL for correct line_order):
   Some documents show OD section on the LEFT column and TP/Liability section on the RIGHT column
@@ -310,31 +346,31 @@ premiums:
   OD and TP lines — THIS IS WRONG for line_order purposes.
 
   ★ When you detect a two-column OD|TP layout, extract in COLUMN ORDER, not row order:
-    STEP 1: Extract ALL left-column (OD section) lines top-to-bottom — assign line_orders 1, 2, 3...
-    STEP 2: Extract ALL right-column (TP section) lines top-to-bottom — continue line_orders
-    STEP 3: Extract any combined summary lines (Total Package Premium, taxes, Total Premium) — continue
+  STEP 1: Extract ALL left-column (OD section) lines top-to-bottom — assign line_orders 1, 2, 3...
+  STEP 2: Extract ALL right-column (TP section) lines top-to-bottom — continue line_orders
+  STEP 3: Extract any combined summary lines (Total Package Premium, taxes, Total Premium) — continue
 
   ★ EXAMPLE — Correct extraction order for two-column table:
-    LEFT COLUMN (OD):
-      [1] Basic Own Damage = 501
-      [2] Total Basic Premium = 501
-      [3] Add: Cover for Lamps, Tyres, Mudguards (IMT-23) = 75
-      [4] Total - Add = 75
-      [5] Net Own Damage Premium (a) = 576
-    RIGHT COLUMN (TP):
-      [6] Basic Third Party Liability = 16049
-      [7] LL to Paid Driver/Conductor/Cleaner (IMT-28) = 50
-      [8] Net Liability Premium (b) = 16099
-    COMBINED:
-      [9]  Total Package Premium (a+b) = 16675
-      [10] GST 18% = 113  (is_tax_line: true)
-      [11] GST 5% = 802   (is_tax_line: true)
-      [12] Total Tax = 915
-      [13] Total Premium = 17590
+  LEFT COLUMN (OD):
+  [1] Basic Own Damage = 501
+  [2] Total Basic Premium = 501
+  [3] Add: Cover for Lamps, Tyres, Mudguards (IMT-23) = 75
+  [4] Total - Add = 75
+  [5] Net Own Damage Premium (a) = 576
+  RIGHT COLUMN (TP):
+  [6] Basic Third Party Liability = 16049
+  [7] LL to Paid Driver/Conductor/Cleaner (IMT-28) = 50
+  [8] Net Liability Premium (b) = 16099
+  COMBINED:
+  [9] Total Package Premium (a+b) = 16675
+  [10] GST 18% = 113 (is_tax_line: true)
+  [11] GST 5% = 802 (is_tax_line: true)
+  [12] Total Tax = 915
+  [13] Total Premium = 17590
 
   ★ DO NOT interleave OD and TP lines — this breaks the tax-anchor zone detection in Stage 2
   ★ If the same table appears twice in the document, capture BOTH occurrences with continuing line_orders
-    but DO NOT re-read the two-column split — just capture the duplicate as-is
+  but DO NOT re-read the two-column split — just capture the duplicate as-is
 
 - DISCOUNT RULES:
   • Any NEGATIVE amount = DISCOUNT → set "is_discount": true
@@ -342,30 +378,43 @@ premiums:
   • Capture each discount component separately with its own "discount_type": "ncb" or "other"
 
 taxes:
+
 - Any GST / CGST / SGST / IGST entries
 - For each tax entry include a "gst_category" field:
   • "others" — tax at 18% (9% CGST + 9% SGST) on add-ons / non-TP components
-    Labels containing: "Others", "Add-On", "OD", no rate label, or rate = 18%/9%
+  Labels containing: "Others", "Add-On", "OD", no rate label, or rate = 18%/9%
   • "basic_tp" — tax at 5% (2.5% CGST + 2.5% SGST) on Basic Third Party premium
-    Labels containing: "Basic TP", "TP", rate = 5%/2.5%
+  Labels containing: "Basic TP", "TP", rate = 5%/2.5%
   • "igst" — IGST (18% or 5%) used for inter-state policies
   Example: "CGST-Others(9%)" → gst_category: "others"
   Example: "CGST-Basic TP(2.50%)" → gst_category: "basic_tp"
   Example: "IGST @ 18%" → gst_category: "igst"
 
 endorsements:
+
 - IMT or similar endorsements (number + description if present)
 
 participants:
+
 - Roles such as insured, owner, driver, nominee, intermediary
+- FINANCIER / HYPOTHECATION: the bank/NBFC the vehicle is financed with — capture the
+  value printed next to "Financier Details", "Hypothecation", "Financier", or "Hypothecated
+  to" (e.g. "AXIS BANK LTD", "CHOLA. INV. AND FIN. COM. LTD.", "BAJAJ AUTO CREDIT LTD").
+  Tag it with context "financier". If the cell is blank, do NOT emit a financier.
+- NOMINEE: capture ONLY a name printed in the "Nominee"/"Name of Nominee" field, tagged
+  with context "nominee". If the nominee cell is blank, do NOT emit a nominee — never
+  use the insured/policyholder/owner as the nominee.
 
 locations:
+
 - Any address, RTO, office, place of issue, jurisdiction
 
 references:
+
 - URLs, act names, rule numbers, circulars
 
 raw_tables:
+
 - Preserve extracted tables as arrays of rows without modification
 - CRITICAL: Always include the full premium breakdown table verbatim as one entry:
   {"table_type": "premium_breakdown", "rows": [["label", "amount"], ...]}
@@ -374,6 +423,7 @@ raw_tables:
 ────────────────────────────────────────
 RULES
 ────────────────────────────────────────
+
 1. Every extracted item must include:
    - "value"
    - "context" (short phrase explaining what it represents)
