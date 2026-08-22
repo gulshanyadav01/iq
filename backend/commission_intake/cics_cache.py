@@ -135,7 +135,26 @@ def _env_int(name: str, default: int) -> int:
 #         NOTE: this is the same 1.7.0 the CINS_CHOLA_MMV note above reserves.
 #         That flag still defaults to FALSE and is unaffected — enabling it
 #         needs no further bump now that this one has shipped.
-CICS_PIPELINE_VERSION = "1.7.0"
+# 1.8.0 - Third-party rules are now CPA-split. A TP/PA rule carrying the Chola
+#         "CPA not collected" footnote used to be exempted from cpa_split
+#         entirely and exported ONE row labelled the merged "With CPA,Without
+#         CPA" at the undeducted rate — overstating the without-CPA payout by
+#         the full deduction on every one of them. It now emits a With-CPA row
+#         at the grid rate and a Without-CPA row at the grid rate minus the
+#         footnote's deduction, taken off the TP column in percentage POINTS.
+#         The negative case differs from od/net on purpose: where those clamp at
+#         0, a TP deduction larger than the payout (a 1.5-point deduction on a
+#         ~0.3% ACT rate) is DECLINED — the row still bifurcates but both
+#         variants carry the undeducted rate, because a 0% ACT payout is a
+#         number the carrier never published. The count is logged at WARNING.
+#         CoverageIntegrityValidator's check B ("third-party rule wrongly
+#         CPA-split", HIGH) is removed: it now describes correct output, and a
+#         HIGH blocks should_cache, which would make every affected Chola
+#         document permanently un-cacheable. Third-party rule counts roughly
+#         DOUBLE on affected products (this is the incident doc dbe5b4ea's
+#         24 -> 48, now the intended count). Cached documents must re-extract or
+#         they keep serving the single merged-label row.
+CICS_PIPELINE_VERSION = "1.8.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"

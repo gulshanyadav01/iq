@@ -12,8 +12,8 @@ cell but tagged the whole grid ``comprehensive``, so 24 non-blank ACT cells
 landed in the comprehensive bucket and ``third-party`` came out at 0. Every row
 produced a rule, so RowCoverageValidator (row -> >=1 rule) stayed silent.
 
-Two deterministic checks, both run against the source grid markdown + the
-emitted CICS doc:
+One deterministic check, run against the source grid markdown + the emitted
+CICS doc:
 
   A. **ACT column orphaned** — a source grid carries >=1 non-blank ACT
      (third-party) column cell, but the document emitted ZERO ``third-party``
@@ -22,11 +22,17 @@ emitted CICS doc:
      fan-out make an exact expected count unreliable at the validator layer).
      Severity HIGH.
 
-  B. **Third-party rule wrongly CPA-split** — a ``third-party`` / TP rule carries
-     a ``cpa`` condition of ``with-cpa`` / ``without-cpa``. TP/PA-only rules are
-     never CPA-deducted (Chola CPA footnote), so a CPA split on a TP rule means
-     the row was materialized as comprehensive-OD before (or instead of) being
-     tagged third-party. Severity HIGH.
+There used to be a check B — "third-party rule wrongly CPA-split", a HIGH on any
+TP rule carrying a ``with-cpa`` / ``without-cpa`` condition — on the reasoning
+that TP/PA-only rules are never CPA-deducted. That reasoning was wrong (the
+Chola footnote deducts the broker's payout, not the statutory premium), and
+since pipeline version 1.8.0 ``cpa_split.materialize_cpa_split`` splits and
+deducts third-party rules deliberately. The check was REMOVED rather than
+downgraded: it now describes correct output, so it would fire on every affected
+document, and at HIGH it would additionally block ``cics_cache.should_cache``
+from pinning them — making every Chola document with the CPA footnote
+permanently un-cacheable. A finding that is always wrong is worse than no
+finding.
 
 Like RowCoverageValidator, this takes the source grid markdown (per-sheet
 contents) plus the CICS JSON path, and its issues are merged into the pipeline's
@@ -111,29 +117,6 @@ class CoverageIntegrityValidator:
                 )
             )
 
-        # Check B — third-party rule carrying a CPA split.
-        cpa_split_tp = [
-            rid for rid, cpa in third_party_rules if cpa in ("with-cpa", "without-cpa")
-        ]
-        if cpa_split_tp:
-            sample = ", ".join(str(r) for r in cpa_split_tp[:5])
-            issues.append(
-                ValidationIssue(
-                    severity=Severity.HIGH,
-                    message=(
-                        f"{len(cpa_split_tp)} third-party rule(s) carry a CPA split "
-                        f"(with-cpa/without-cpa) — TP/PA-only rules are never "
-                        f"CPA-deducted [e.g. {sample}]."
-                    ),
-                    field_path="products[].commission_rules[].conditions.cpa",
-                    category="Coverage Integrity",
-                    suggestion=(
-                        "Do not attach the CPA conditional_deduction clause to "
-                        "ACT/third-party rules; keep them out of cpa_split."
-                    ),
-                )
-            )
-
         errors = [i for i in issues if i.severity in (Severity.CRITICAL, Severity.HIGH)]
         warnings = [i for i in issues if i.severity == Severity.MEDIUM]
         info = [i for i in issues if i.severity in (Severity.LOW, Severity.INFO)]
@@ -146,7 +129,11 @@ class CoverageIntegrityValidator:
 
     @staticmethod
     def _third_party_rules(doc: Dict) -> List:
-        """(rule_id, cpa_value) for every rule whose policy_type includes third-party."""
+        """rule_id for every rule whose policy_type includes third-party.
+
+        Check A only needs the count. This used to also carry each rule's `cpa`
+        value for the removed check B — see the module docstring.
+        """
         out = []
         for product in doc.get("products", []):
             for rule in product.get("commission_rules", []):
@@ -154,17 +141,7 @@ class CoverageIntegrityValidator:
                 pt = cond.get("policy_type")
                 pts = pt if isinstance(pt, (list, tuple)) else [pt]
                 if any(str(p).lower() == "third-party" for p in pts if p is not None):
-                    cpa = cond.get("cpa")
-                    cpa_vals = cpa if isinstance(cpa, (list, tuple)) else [cpa]
-                    cpa_norm = next(
-                        (
-                            str(c).lower()
-                            for c in cpa_vals
-                            if c and str(c).lower() in ("with-cpa", "without-cpa")
-                        ),
-                        None,
-                    )
-                    out.append((rule.get("rule_id"), cpa_norm))
+                    out.append(rule.get("rule_id"))
         return out
 
     @staticmethod
