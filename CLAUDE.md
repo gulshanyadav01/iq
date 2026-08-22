@@ -121,11 +121,17 @@ lints diff-scoped only, so lint just the files you changed:
 
 ## Branching
 
-**The default branch is `dev`. There is no `master` and no `main`** — the remote carries
-neither, and `origin/HEAD` points at `dev`. Branch off `dev`, diff against `origin/dev`,
-and open every PR with `gh pr create --base dev`. Tooling that guesses a default (and
-Claude Code's own session preamble, which reports "master") is wrong here; verify with
-`git ls-remote --heads origin` rather than assuming.
+Two long-lived branches, and **`dev` is the integration branch — never open a PR against
+`main`.** `origin/HEAD` points at `dev`.
+
+| Branch | Role |
+| ------ | ---- |
+| `dev`  | Integration / default. Branch off it, diff against `origin/dev`, and open every PR with `gh pr create --base dev` |
+| `main` | **Production deployment branch.** Advanced by promoting `dev`, not by feature PRs |
+
+There is no `master`. Claude Code's session preamble reports `master` as the main branch,
+which is wrong on both counts — the branch does not exist, and the repo's PR target is
+`dev` regardless. Do not trust a tool's guess at the default here.
 
 ## Git Hooks
 
