@@ -21,6 +21,10 @@ from datetime import datetime
 from itertools import chain
 from typing import List, Dict, NamedTuple, Optional, Set, Tuple, Any
 
+from cins.processors.core.carrier_subclasses import (
+    canonical_subclass_slugs,
+    carrier_subclass_rows,
+)
 from cins.schema.carriers import CARRIER_FULL_NAMES, normalize_carrier
 from cins.schema.raw_extraction import (
     RawExtraction,
@@ -678,6 +682,57 @@ def gcv_no_subclass_enabled() -> bool:
     return raw.strip().lower() not in ("0", "false", "no", "off", "")
 
 
+# The four commercial-vehicle sub-products, spelled as _SEGMENT_TO_SUBPRODUCT
+# emits them. Written out rather than derived from a ``commercial`` prefix so a
+# future commercial sub-product has to opt in deliberately.
+CV_SUBPRODUCTS = (
+    "commercial-gcv",
+    "commercial-pcv",
+    "commercial-buses",
+    "commercial-miscd",
+)
+
+
+def renewal_implies_rollover_enabled() -> bool:
+    """``CINS_RENEWAL_IMPLIES_ROLLOVER`` — a CV renewal rate also prices rollover.
+
+    A rollover IS a renewal that changes carrier, and no CV grid in the corpus
+    prices the two apart: the carrier publishes one renewal rate card and books
+    both against it. Exporting the bare ``renewal`` left a rollover quote with
+    no matching deal at all.
+
+    Scoped to ``CV_SUBPRODUCTS`` and carrier-agnostic — it is a fact about how
+    commercial-vehicle rate cards are written, not about Chola. Private Car and
+    Two Wheeler are deliberately excluded: their grids DO sometimes price
+    rollover separately, and widening there would fabricate an overlap.
+
+    Defaults ON. ``false`` restores the pre-change cell without a redeploy, and
+    is itself a ``CICS_PIPELINE_VERSION``-relevant change.
+    """
+    raw = os.environ.get("CINS_RENEWAL_IMPLIES_ROLLOVER")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def miscd_subclass_merge_enabled() -> bool:
+    """``CINS_MISCD_SUBCLASS_MERGE`` — MISC-D bodies share one rule.
+
+    The client prices Agricultural Tractor and Harvester as their own deals and
+    treats every other MISC-D body as one bucket. The per-body fan-out
+    (``_bifurcate_subclass_buckets``) turned a single "Loader, Excavator, Crane,
+    Bulldozer, Road Rollers, Fork Lift Trucks" grid cell into six deals at one
+    rate, which is six rows to reconcile where the carrier books one.
+
+    Defaults ON. ``false`` restores the per-body fan-out without a redeploy, and
+    is itself a ``CICS_PIPELINE_VERSION``-relevant change.
+    """
+    raw = os.environ.get("CINS_MISCD_SUBCLASS_MERGE")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
 class RawToCICSTransformer:
     """
     Transforms RawExtraction to full CICS schema.
@@ -725,6 +780,12 @@ class RawToCICSTransformer:
         # Dedup set for the "zone label not found in master" warning — one
         # warning per distinct unmatched text per document, not per rule.
         self._zone_warned: Set[str] = set()
+        # Carrier body-class vocabulary, read lazily by
+        # _canonical_subclass_slugs. ``None`` means "not read yet"; the DB must
+        # not be touched here, since this class is constructed as a pure object
+        # by CholaProductHierarchyValidator and by unit tests.
+        self._carrier_subclass_rows: Optional[List[dict]] = None
+        self._canonical_subclass_cache: Dict[Tuple[str, str, str], List[str]] = {}
 
     def transform(
         self, raw: RawExtraction, document_date: Optional[str] = None
@@ -1007,10 +1068,19 @@ class RawToCICSTransformer:
             # non-GCV product (and never forms an all-leak empty product). The
             # legitimate GCV copy is untouched. Deterministic backstop for a
             # non-deterministic codegen bug.
+            #
+            # The token is matched ANYWHERE in the rule text, not just as a
+            # prefix. The real leak on the May'26 grid spells it "GCV 1_GCCV_3W
+            # AP ACT" — the segment slug carries the GCCV token while the row
+            # opens with the shorter "GCV", so a startswith() test missed all
+            # 222 phantom rows (74 into each of PCV / Buses / MISC-D) and 148 of
+            # them exported as MISC-D auto-rickshaws: a three-wheeled goods
+            # carrier filed as a miscellaneous-D deal, which is not a vehicle
+            # the carrier sells under that sub-product at all.
             if (
                 self._carrier_code == "Chola"
                 and segment in ("PCV", "Buses", "MISC-D")
-                and (entry.rule_text or "").strip().lower().startswith("gccv")
+                and self._names_gccv(entry)
             ):
                 # Record each dropped row so a false positive is auditable in
                 # the validation report — not just an aggregate count.
@@ -1047,6 +1117,33 @@ class RawToCICSTransformer:
             products.append(product)
 
         return products
+
+    # Word-boundary GCCV token. Anchored so it can never fire on a longer word,
+    # and deliberately NOT matching the shorter "GCV": that token opens most
+    # legitimate commercial rows of every segment, while "GCCV" is the goods
+    # table's own PROD label and has no business in a passenger / misc row.
+    _GCCV_TOKEN_RE = re.compile(r"(?<![a-z0-9])gccv(?![a-z0-9])")
+
+    def _names_gccv(self, entry: RawCommissionEntry) -> bool:
+        """Does this entry carry the goods table's own GCCV label?
+
+        Checked across the rule text AND the raw ``vehicle_sub_class`` slug,
+        because the leak is a merged-header value: the slug ("1_GCCV_3W") is
+        where the token actually lives, and the rule text merely happens to
+        repeat it. Reading only one of the two is how the original prefix test
+        came to miss the whole class.
+        """
+        raw_sub_class = (getattr(entry, "conditions", None) or {}).get(
+            "vehicle_sub_class"
+        )
+        for text in (entry.rule_text, raw_sub_class):
+            if not text:
+                continue
+            if isinstance(text, (list, tuple, set)):
+                text = " ".join(str(t) for t in text)
+            if self._GCCV_TOKEN_RE.search(str(text).lower()):
+                return True
+        return False
 
     def _get_product_key(self, entry: RawCommissionEntry) -> str:
         """Get a product key from an entry."""
@@ -1264,7 +1361,13 @@ class RawToCICSTransformer:
             # per subclass. Runs before collapse so identical state/coverage
             # clones dedupe; the collapse key keeps vehicle_sub_class, so the
             # distinct-subclass clones themselves survive.
-            rules = self._bifurcate_subclass_buckets(rules)
+            rules = self._bifurcate_subclass_buckets(rules, product_subproduct)
+
+        # A CV renewal rate also prices rollover. Runs BEFORE the collapse so a
+        # widened "renewal" rule and a natively "renewal,rollover" rule at the
+        # same rate dedupe for free; at different rates both survive, as a
+        # genuine conflict for the overlap checker to report.
+        self._imply_rollover_on_renewal(rules, product_subproduct)
 
         rules = self._collapse_duplicate_rules(rules)
 
@@ -3634,8 +3737,68 @@ class RawToCICSTransformer:
             )
         return result
 
+    # MISC-D bodies the client prices as their own deals. Everything else in
+    # the sub-product is one bucket — see _bifurcate_subclass_buckets.
+    _MISCD_KEEP_OWN_RULE = ("agricultural-tractor", "harvester")
+
+    def _miscd_rest_bucket(self, rule: CommissionRule) -> bool:
+        """Is this rule a MISC-D "everything else" rule the merge would widen?
+
+        True when it names at least one body that is not Agricultural Tractor or
+        Harvester. Singletons count — the real MSV grid is one row per body.
+        """
+        cond = rule.conditions
+        sub = cond.vehicle_sub_class if cond is not None else None
+        if not sub:
+            return False
+        return any(sc not in self._MISCD_KEEP_OWN_RULE for sc in sub)
+
+    def _canonical_subclass_slugs(self, product: str, sub_product: str) -> List[str]:
+        """The carrier's whole body list for a bucket, in rule slug space.
+
+        Lazily read and memoized per instance — once per document in practice.
+        The DB read cannot move to ``__init__``: this class is constructed as a
+        pure object by ``CholaProductHierarchyValidator`` and by unit tests that
+        want only ``_normalize_list_field``, neither of which has a database.
+
+        Fails open to ``[]``; every caller must treat that as "say nothing".
+        """
+        key = (self._carrier_code or "", product, sub_product)
+        cached = self._canonical_subclass_cache.get(key)
+        if cached is not None:
+            return cached
+        if self._carrier_subclass_rows is None:
+            self._carrier_subclass_rows = carrier_subclass_rows(
+                self._carrier_code or ""
+            )
+
+        def _normalize(text: str) -> Optional[List[str]]:
+            # Warnings are discarded: this is master-data seed text, not
+            # extracted content, and a spelling the dict cannot fold simply
+            # drops out of the vocabulary (same contract as the validator).
+            keep = self.warnings
+            self.warnings = []
+            try:
+                return self._normalize_list_field(
+                    text, VEHICLE_SUB_CLASS_MAPPINGS, "carrier_subclass_seed"
+                )
+            finally:
+                self.warnings = keep
+
+        slugs = canonical_subclass_slugs(
+            self._carrier_code or "",
+            product,
+            sub_product,
+            _normalize,
+            rows=self._carrier_subclass_rows,
+        )
+        self._canonical_subclass_cache[key] = slugs
+        return slugs
+
     def _bifurcate_subclass_buckets(
-        self, rules: List[CommissionRule]
+        self,
+        rules: List[CommissionRule],
+        product_subproduct: Optional[str] = None,
     ) -> List[CommissionRule]:
         """Fan out a multi-subclass rule into one distinct deal per subclass.
 
@@ -3647,53 +3810,198 @@ class RawToCICSTransformer:
         its own deal (Earth Mover / Bulldozer / Road Rollers …), so clone the
         rule once per subclass with a single-value ``vehicle_sub_class``.
 
-        Rules already scoped to a single subclass pass through unchanged. The
-        clones keep priority / outcome / dates / description and share the same
-        rate; ``rule_id`` gets a subclass suffix to stay unique. Runs before
-        duplicate collapse (whose key retains ``vehicle_sub_class``), so
+        **MISC-D is the exception** (``CINS_MISCD_SUBCLASS_MERGE``, default ON):
+        Agricultural Tractor and Harvester still get their own deal, and every
+        other body of the source rule collapses into ONE rule carrying a
+        multi-value ``vehicle_sub_class``. The merge is per SOURCE rule, never
+        per rate: two differently-priced grid rows stay two rules, because the
+        thing being suppressed is one rule's fan-out, not a merge across rules.
+        That is also why it lives here rather than in a CICS post-processor —
+        after the fan-out the only handle on "same source rule" is the ``_SC_``
+        suffix, and ``cpa_split`` emits both its variants under one ``rule_id``.
+
+        Outside MISC-D, a rule already scoped to a single subclass passes
+        through unchanged — it is not a fan-out candidate. **Inside MISC-D a
+        singleton IS widened**, and that is the whole point on real grids: the
+        May'26 Chola MSV table does not enumerate its bodies in one cell, it
+        publishes one row per body ("2_EXCAVATOR", "3_HARVESTOR", "1_TRAC"), so
+        every MISC-D rule reaches here already a singleton. Skipping them made
+        the merge a no-op on the only document it exists for.
+
+        The clones keep priority / outcome / dates / description and share the
+        same rate; ``rule_id`` gets a subclass suffix to stay unique. Runs
+        before duplicate collapse (whose key retains ``vehicle_sub_class``), so
         identical state/coverage clones dedupe while the distinct subclasses
         survive.
         """
         if not rules:
             return rules
+        merge_miscd = (
+            product_subproduct == "commercial-miscd" and miscd_subclass_merge_enabled()
+        )
+
+        # Widening the "rest" bucket to the carrier's FULL body list replaces
+        # every such rule's bodies with the SAME list, so body type stops
+        # telling those rules apart. That is fine while every other dimension
+        # still does — a MISC-D grid always has an ACT rule and a PACK rule, and
+        # they differ on coverage. It is NOT fine when two rest-bucket rules are
+        # identical in every dimension BUT body ({crane, loader} at 10% vs
+        # {excavator} at 12%, same state, same coverage): widening those makes
+        # them overlap on every body and price one vehicle twice — a HIGH from
+        # rule_overlap_checker, which blocks the cache pin. So the guard keys on
+        # the sub-class-free signature, not on a bare rule count.
+        #
+        # Two refinements, both needed to keep the guard from disabling itself:
+        #   - the collision needs DIFFERENT bodies. Two rules with the same
+        #     signature and the same body already conflict today; widening does
+        #     not create that, and treating it as a collision would let one
+        #     pre-existing duplicate switch off the merge for the whole product.
+        #   - it needs DIFFERENT rates. Same slot, same rate, different bodies is
+        #     precisely the case the merge exists to fold into one deal — those
+        #     rules collapse together right after this.
+        collision = False
+        if merge_miscd:
+            by_signature: Dict[str, List[Tuple[str, str]]] = {}
+            for rule in rules:
+                if not self._miscd_rest_bucket(rule):
+                    continue
+                bodies = json.dumps(
+                    sorted(rule.conditions.vehicle_sub_class or []), default=str
+                )
+                rate = json.dumps(
+                    (
+                        rule.outcome.model_dump(exclude_none=False)
+                        if rule.outcome is not None
+                        else {}
+                    ),
+                    sort_keys=True,
+                    default=str,
+                )
+                group = by_signature.setdefault(self._subclass_free_signature(rule), [])
+                if any(b != bodies and r != rate for b, r in group):
+                    collision = True
+                    break
+                group.append((bodies, rate))
+        widen_to_master = merge_miscd and not collision
+
+        def _clone(rule: CommissionRule, sub_classes: List[str], suffix: str):
+            clone_cond = rule.conditions.model_copy(deep=True)
+            clone_cond.vehicle_sub_class = list(sub_classes)
+            # Deep-copy the outcome too: the clones share one source rule, so
+            # a by-reference outcome would let a later in-place mutation on
+            # one subclass bleed into its siblings (conditions are already
+            # deep-copied above — keep the two symmetric).
+            clone_outcome = (
+                rule.outcome.model_copy(deep=True) if rule.outcome is not None else None
+            )
+            return CommissionRule(
+                rule_id=f"{rule.rule_id}_SC_{suffix}",
+                priority=rule.priority,
+                conditions=clone_cond,
+                outcome=clone_outcome,
+                valid_from=rule.valid_from,
+                valid_to=rule.valid_to,
+                rule_description=rule.rule_description,
+            )
+
         result: List[CommissionRule] = []
         n_split = 0
+        n_merged = 0
         for rule in rules:
             cond = rule.conditions
             sub = cond.vehicle_sub_class if cond is not None else None
-            if not sub or len(sub) <= 1:
+            # A MISC-D singleton is still a merge candidate — see the docstring:
+            # the real MSV grid publishes one row per body, so every rule
+            # arrives here already scoped to one.
+            if not sub or (len(sub) <= 1 and not merge_miscd):
                 result.append(rule)
                 continue
+
+            if merge_miscd:
+                rest = [sc for sc in sub if sc not in self._MISCD_KEEP_OWN_RULE]
+                keep = [sc for sc in sub if sc in self._MISCD_KEEP_OWN_RULE]
+                if not rest and len(keep) <= 1:
+                    # A lone Agricultural Tractor / Harvester row: already the
+                    # shape the client asked for. Pass it through untouched
+                    # rather than re-issuing it under a _SC_ rule_id.
+                    result.append(rule)
+                    continue
+                for sc in keep:
+                    result.append(_clone(rule, [sc], sc))
+                if rest:
+                    merged = rest
+                    if widen_to_master:
+                        # Fail open: an unseeded/unreadable master leaves the
+                        # rule's own bodies, never an empty sub-class.
+                        master = [
+                            sc
+                            for sc in self._canonical_subclass_slugs("CV", "MISC-D")
+                            if sc not in self._MISCD_KEEP_OWN_RULE
+                        ]
+                        merged = master or rest
+                    result.append(_clone(rule, sorted(merged), "MISCD"))
+                    n_merged += 1
+                if len(sub) > 1:
+                    # Only count a real fan-out here; a widened singleton is
+                    # reported by the merge notice below, not as a split.
+                    n_split += 1
+                continue
+
             for sc in sub:
-                clone_cond = cond.model_copy(deep=True)
-                clone_cond.vehicle_sub_class = [sc]
-                # Deep-copy the outcome too: the clones share one source rule, so
-                # a by-reference outcome would let a later in-place mutation on
-                # one subclass bleed into its siblings (conditions are already
-                # deep-copied above — keep the two symmetric).
-                clone_outcome = (
-                    rule.outcome.model_copy(deep=True)
-                    if rule.outcome is not None
-                    else None
-                )
-                result.append(
-                    CommissionRule(
-                        rule_id=f"{rule.rule_id}_SC_{sc}",
-                        priority=rule.priority,
-                        conditions=clone_cond,
-                        outcome=clone_outcome,
-                        valid_from=rule.valid_from,
-                        valid_to=rule.valid_to,
-                        rule_description=rule.rule_description,
-                    )
-                )
+                result.append(_clone(rule, [sc], sc))
             n_split += 1
+
         if n_split:
             self.notices.append(
                 f"Subclass fan-out: split {n_split} multi-subclass rule(s) "
                 f"into one distinct deal per subclass"
             )
+        if n_merged:
+            detail = (
+                "the carrier's full MISC-D body list"
+                if widen_to_master
+                else (
+                    "each rule's own bodies — two rest buckets differ ONLY by "
+                    "body type, so widening would price a vehicle twice"
+                )
+            )
+            self.notices.append(
+                f"MISC-D sub-class merge: collapsed {n_merged} rest-bucket "
+                f"fan-out(s) into one multi-value rule each, carrying {detail}"
+            )
         return result
+
+    def _imply_rollover_on_renewal(
+        self,
+        rules: List[CommissionRule],
+        product_subproduct: Optional[str],
+    ) -> None:
+        """A CV rule priced for renewals also prices rollovers.
+
+        See ``renewal_implies_rollover_enabled`` for why this is CV-only and
+        carrier-agnostic. Mutates in place; idempotent (the membership test
+        makes a second run a no-op). A rule with no ``business_type`` at all is
+        left alone — it exports a blank BusinessType today, and filling that
+        would be a different claim entirely.
+        """
+        if not rules or product_subproduct not in CV_SUBPRODUCTS:
+            return
+        if not renewal_implies_rollover_enabled():
+            return
+        n = 0
+        for rule in rules:
+            cond = rule.conditions
+            bt = cond.business_type if cond is not None else None
+            if not bt or "renewal" not in bt or "rollover" in bt:
+                continue
+            # Appended, so the cell reads "renewal,rollover" in grid order.
+            cond.business_type = list(bt) + ["rollover"]
+            n += 1
+        if n:
+            self.notices.append(
+                f"Renewal implies rollover: tagged {n} {product_subproduct} "
+                f"rule(s) with rollover"
+            )
 
     # Condition fields excluded from duplicate-collapse identity. Same
     # rationale as _DEDUPE_LIST_FIELDS: vehicle_make / vehicle_model commonly
@@ -3759,6 +4067,29 @@ class RawToCICSTransformer:
             sort_keys=True,
             default=str,
         )
+
+    def _subclass_free_signature(self, rule: CommissionRule) -> str:
+        """A rule's grid slot with body type and rate removed.
+
+        Two rules sharing this signature are told apart by ``vehicle_sub_class``
+        and nothing else — which is exactly the case where the MISC-D merge must
+        NOT widen them to a shared body list. Outcome is excluded on purpose:
+        same slot at the same rate would collapse harmlessly, but same slot at
+        different rates is the double-pricing case, and both are unsafe to
+        widen. Same list-sorting and make/model exclusions as
+        ``_duplicate_collapse_key``, so the two cannot disagree about what
+        counts as a dimension.
+        """
+        cond_dump: Dict[str, Any] = {}
+        if rule.conditions is not None:
+            cond_dump = rule.conditions.model_dump(exclude_none=False)
+            for field in self._COLLAPSE_IGNORE_CONDITION_FIELDS:
+                cond_dump.pop(field, None)
+            cond_dump.pop("vehicle_sub_class", None)
+            for k, v in list(cond_dump.items()):
+                if isinstance(v, list):
+                    cond_dump[k] = sorted(v, key=str)
+        return json.dumps(cond_dump, sort_keys=True, default=str)
 
     def _dedupe_range_overlaps(self, rules: List[CommissionRule]) -> None:
         """Bump successive start = prev_end + 1 for GVW/CC/seating/policies
