@@ -17,12 +17,17 @@ Run from the backend container:
     python manage.py test cins.tests.test_cv_subclass_slugs -v 2
 """
 
-from unittest import TestCase
+import json
+import os
+import tempfile
+from unittest import TestCase, mock
 
 from cins.processors.core.raw_to_cics_transformer import (
     VEHICLE_SUB_CLASS_MAPPINGS,
     RawToCICSTransformer,
 )
+from cins.schema.cics_model import CommissionOutcome, CommissionRule, RuleConditions
+from cins.validators.rule_overlap_checker import RuleOverlapChecker
 
 
 class SubclassSlugNormalizationTests(TestCase):
@@ -136,46 +141,172 @@ class DimensionSlugSuppressionTests(TestCase):
         self.assertEqual(self.t.warnings, [])
 
 
-class GCVUnspecifiedSubclassTests(TestCase):
+class GCVSubclassStrippedTests(TestCase):
     """The GCCV grid's SUBCLASS column holds the weight ladder, not a body type.
 
         | GCCV | 2_UPTO_3.5T    | TATA/ Maruti/ Mahindra | Ace, Super Ace, … |
         | GCCV | 3_3.5T_TO_7.5T | 3_3.5T_TO_7.5T         | 3_3.5T_TO_7.5T    |
 
-    There is no body class in the source, so record Chola's own "Not Available"
-    rather than leaving the mandatory field null (400 rules on doc 733711bd).
+    There is no body class in the source at all, so GCV carries none. The strip
+    is ABSOLUTE (a body resolved from a slug goes too) and carrier-agnostic —
+    goods-carrying grids price by weight everywhere, this is not a Chola quirk.
     """
 
     def setUp(self):
         self.t = RawToCICSTransformer()
         self.t._carrier_code = "Chola"
-        self.t._product_subproduct = "commercial-gcv"
 
-    def test_empty_subclass_defaults_to_not_available(self):
-        self.assertEqual(self.t._apply_chola_gcv_subclass(None), ["not-available"])
-        self.assertEqual(self.t._apply_chola_gcv_subclass([]), ["not-available"])
-
-    def test_resolved_body_is_never_overwritten(self):
-        # The 3-wheeler rows resolve auto-rickshaw from "1_GCCV_3W" and keep it.
-        self.assertEqual(
-            self.t._apply_chola_gcv_subclass(["auto-rickshaw"]), ["auto-rickshaw"]
+    @staticmethod
+    def _rule(sub_class):
+        return CommissionRule(
+            rule_id="R1",
+            priority=1,
+            conditions=RuleConditions(vehicle_sub_class=sub_class),
+            outcome=CommissionOutcome(
+                commission_type="percentage", percentage_value=10.0
+            ),
         )
-        self.assertEqual(self.t._apply_chola_gcv_subclass(["tipper"]), ["tipper"])
+
+    def test_strips_a_resolved_body(self):
+        # The 3-wheeler rows resolve auto-rickshaw from "1_GCCV_3W" — it goes.
+        rules = [self._rule(["auto-rickshaw"]), self._rule(["tipper"])]
+        self.assertEqual(self.t._strip_gcv_subclass(rules, "commercial-gcv"), 2)
+        for rule in rules:
+            self.assertIsNone(rule.conditions.vehicle_sub_class)
+
+    def test_strips_the_not_available_sentinel(self):
+        rules = [self._rule(["not-available"])]
+        self.assertEqual(self.t._strip_gcv_subclass(rules, "commercial-gcv"), 1)
+        self.assertIsNone(rules[0].conditions.vehicle_sub_class)
+
+    def test_the_body_word_survives_as_rule_id_provenance(self):
+        # RowCoverageValidator's declined-row check (a HIGH, which blocks the
+        # output-cache pin) reads the rule's identity fields — the body word has
+        # to stay reachable there once the condition is gone.
+        rules = [self._rule(["others"])]
+        self.t._strip_gcv_subclass(rules, "commercial-gcv")
+        self.assertEqual(rules[0].rule_id, "R1_SC_others")
+
+    def test_rule_id_suffix_stays_schema_legal(self):
+        rules = [self._rule(["pick up/delivery van", "not-available"])]
+        self.t._strip_gcv_subclass(rules, "commercial-gcv")
+        # rule_id's schema pattern is ^[A-Za-z0-9_-]+$ — the space and slash
+        # in the source spelling must not leak through.
+        self.assertRegex(rules[0].rule_id, r"^[A-Za-z0-9_-]+$")
+        CommissionRule(
+            rule_id=rules[0].rule_id,
+            priority=1,
+            outcome=CommissionOutcome(commission_type="percentage"),
+        )
+
+    def test_already_empty_is_not_counted(self):
+        rules = [self._rule(None), self._rule([])]
+        self.assertEqual(self.t._strip_gcv_subclass(rules, "commercial-gcv"), 0)
+        self.assertEqual(self.t.notices, [])
 
     def test_other_subproducts_untouched(self):
-        for sub in ("commercial-pcv", "commercial-misc-d", "car", "two-wheeler"):
+        for sub in ("commercial-pcv", "commercial-miscd", "car", "two-wheeler"):
             with self.subTest(sub=sub):
-                self.t._product_subproduct = sub
-                self.assertIsNone(self.t._apply_chola_gcv_subclass(None))
+                rules = [self._rule(["taxi"])]
+                self.assertEqual(self.t._strip_gcv_subclass(rules, sub), 0)
+                self.assertEqual(rules[0].conditions.vehicle_sub_class, ["taxi"])
 
-    def test_other_carriers_untouched(self):
+    def test_applies_to_every_carrier(self):
+        # Carrier-agnostic on purpose: a goods-carrying grid prices by weight
+        # regardless of who published it.
         self.t._carrier_code = "ICICI"
-        self.assertIsNone(self.t._apply_chola_gcv_subclass(None))
+        rules = [self._rule(["tipper"])]
+        self.assertEqual(self.t._strip_gcv_subclass(rules, "commercial-gcv"), 1)
+        self.assertIsNone(rules[0].conditions.vehicle_sub_class)
+
+    def test_env_flag_off_restores_the_old_behaviour(self):
+        rules = [self._rule(["tipper"])]
+        with mock.patch.dict(os.environ, {"CINS_GCV_NO_SUBCLASS": "false"}):
+            self.assertEqual(self.t._strip_gcv_subclass(rules, "commercial-gcv"), 0)
+        self.assertEqual(rules[0].conditions.vehicle_sub_class, ["tipper"])
 
     def test_not_available_is_a_valid_enum_value(self):
-        from cins.schema.cics_model import RuleConditions
-
+        # Still a real value for the OTHER CV sub-products (PCV / MISC-D).
         RuleConditions(vehicle_sub_class=["not-available"])
+
+
+class GCVStripCollapseTests(TestCase):
+    """Stripping the field can make subclass-only clones byte-identical.
+
+    ``_bifurcate_subclass_buckets`` fans a body enumeration out into N rules
+    differing ONLY in ``vehicle_sub_class``; remove that field and they collide.
+    ``_transform_product`` therefore re-runs ``_collapse_duplicate_rules`` after
+    the strip — which merges only when the OUTCOME matches too.
+    """
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+        self.t._carrier_code = "Chola"
+
+    @staticmethod
+    def _rule(rule_id, sub_class, pct):
+        return CommissionRule(
+            rule_id=rule_id,
+            priority=1,
+            conditions=RuleConditions(
+                vehicle_sub_class=sub_class,
+                state=["maharashtra"],
+                number_of_wheels=["4w-and-above"],
+            ),
+            outcome=CommissionOutcome(
+                commission_type="percentage",
+                percentage_value=pct,
+                applied_on="Net Premium",
+            ),
+        )
+
+    def test_same_rate_clones_collapse_to_one(self):
+        rules = [
+            self._rule("R1", ["truck"], 10.0),
+            self._rule("R2", ["tipper"], 10.0),
+        ]
+        self.assertEqual(self.t._strip_gcv_subclass(rules, "commercial-gcv"), 2)
+        collapsed = self.t._collapse_duplicate_rules(rules)
+        self.assertEqual(len(collapsed), 1)
+
+    def test_different_rate_clones_both_survive(self):
+        # The honest cost of stripping absolutely: the only dimension that told
+        # these two apart is gone, so they stay as a genuine conflict for
+        # RuleOverlapChecker to report rather than being silently merged.
+        rules = [
+            self._rule("R1", ["truck"], 10.0),
+            self._rule("R2", ["tipper"], 12.5),
+        ]
+        self.t._strip_gcv_subclass(rules, "commercial-gcv")
+        collapsed = self.t._collapse_duplicate_rules(rules)
+        self.assertEqual(len(collapsed), 2)
+
+    def test_overlap_checker_reports_the_surviving_pair_as_critical(self):
+        rules = [
+            self._rule("R1", ["truck"], 10.0),
+            self._rule("R2", ["tipper"], 12.5),
+        ]
+        self.t._strip_gcv_subclass(rules, "commercial-gcv")
+        rules = self.t._collapse_duplicate_rules(rules)
+
+        doc = {
+            "products": [
+                {
+                    "product_code": "GCV",
+                    "commission_rules": [
+                        r.model_dump(exclude_none=True) for r in rules
+                    ],
+                }
+            ]
+        }
+        fd = tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False, encoding="utf-8"
+        )
+        json.dump(doc, fd)
+        fd.close()
+
+        result = RuleOverlapChecker().check(fd.name)
+        self.assertTrue(result.has_critical)
 
 
 class SubproductSubclassOverrideTests(TestCase):

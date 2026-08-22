@@ -107,6 +107,69 @@ class RowCoverageTests(TestCase):
         self.assertEqual(result.errors, [])
 
 
+class GCVStrippedSubclassCoverageTests(TestCase):
+    """GCV rules carry no vehicle_sub_class, so the body word survives only as
+    provenance on the rule_id (``_strip_gcv_subclass``).
+
+    The declined-row check is a HIGH, and a HIGH blocks the CICS output-cache
+    pin — before the rule_id suffix it was satisfied by the "not-available"
+    sentinel the strip deletes, so a GCV sheet's ``4_OTHERS`` row went from
+    covered to un-cacheable.
+    """
+
+    _GCCV_SHEET = """## Commission Data Sheet: GCCV
+| PROD | SUBCLASS | ACT |
+| --- | --- | --- |
+| GCCV | 2_UPTO_3.5T | 0.20 |
+| GCCV | 4_OTHERS |  |
+"""
+
+    @staticmethod
+    def _gcv_doc(rules):
+        doc = {
+            "products": [
+                {
+                    "product_name": "Commercial Vehicle",
+                    "sub_category": "GCV",
+                    "commission_rules": rules,
+                }
+            ]
+        }
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(doc, tmp)
+        tmp.close()
+        return tmp.name
+
+    @staticmethod
+    def _stripped_rule(rule_id):
+        return {
+            "rule_id": rule_id,
+            "conditions": {"vehicle_sub_class": None},
+            "outcome": {"commission_type": "percentage", "percentage_value": 10},
+        }
+
+    def test_declined_row_still_covered_via_the_rule_id_suffix(self):
+        path = self._gcv_doc(
+            [self._stripped_rule("R1"), self._stripped_rule("R2_SC_others")]
+        )
+        result = RowCoverageValidator().validate(path, {"GCCV": self._GCCV_SHEET})
+        self.assertEqual(result.errors, [], [e.message for e in result.errors])
+
+    def test_without_the_suffix_the_declined_row_is_a_high(self):
+        # Pins WHY the suffix exists — delete it and this goes red.
+        path = self._gcv_doc([self._stripped_rule("R1"), self._stripped_rule("R2")])
+        result = RowCoverageValidator().validate(path, {"GCCV": self._GCCV_SHEET})
+        msgs = " ".join(e.message for e in result.errors)
+        self.assertIn("4_OTHERS", msgs)
+
+    def test_weight_band_rows_need_no_body_token(self):
+        # The bulk of a GCV grid: the ladder carries no body word at all, so
+        # stripping the field cannot make it traceless.
+        path = self._gcv_doc([self._stripped_rule("R1_SC_others")])
+        result = RowCoverageValidator().validate(path, {"GCCV": self._GCCV_SHEET})
+        self.assertEqual(result.errors, [])
+
+
 class _StubIndexedDoc:
     def __init__(self, sheets):
         self._sheets = sheets

@@ -492,8 +492,12 @@ class TransformProductWheelBackfillTests(TestCase):
             product.commission_rules[0].conditions.number_of_wheels, ["3w"]
         )
 
-    def test_rule_text_tractor_routes_to_4w_only_with_subclass(self):
-        # "1_TRAC" in rule_text → vehicle_sub_class=tractor, 4W-only, no 3W clone.
+    def test_rule_text_tractor_routes_to_4w_only(self):
+        # "1_TRAC" in rule_text resolves the tractor body, which routes the rule
+        # 4W-only — and is then STRIPPED, because GCV publishes no body type.
+        # This is the regression net for that ordering: strip before
+        # _bifurcate_gcv_wheels and the wheel-less tractor falls through to the
+        # both-wheels arm and grows a spurious 3W clone.
         entry = RawCommissionEntry(
             rule_text="Commercial Vehicle 1_TRAC GJ PACK",
             commission_value="20%",
@@ -506,7 +510,7 @@ class TransformProductWheelBackfillTests(TestCase):
         )
         self.assertEqual(len(product.commission_rules), 1)
         rule = product.commission_rules[0]
-        self.assertEqual(rule.conditions.vehicle_sub_class, ["tractor"])
+        self.assertIsNone(rule.conditions.vehicle_sub_class)
         self.assertEqual(rule.conditions.number_of_wheels, ["4w-and-above"])
 
     def test_rule_text_excavator_no_3w_clone(self):
