@@ -46,9 +46,12 @@ the transformer, so it could never produce a matching slug either.
 from __future__ import annotations
 
 import json
-import re
 from typing import Dict, List, Optional, Set, Tuple
 
+from cins.processors.core.carrier_subclasses import (
+    canonical_subclass_slugs,
+    carrier_subclass_rows,
+)
 from cins.processors.core.raw_to_cics_transformer import (
     VEHICLE_SUB_CLASS_MAPPINGS,
     RawToCICSTransformer,
@@ -59,8 +62,6 @@ from cins.validators.schema_validator import (
     ValidationIssue,
     ValidationResult,
 )
-
-_CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])")
 
 # Product-subproduct (Product.product_subproduct) -> the master's product
 # bucket. The mapping itself lives in raw_to_cics_transformer as
@@ -79,18 +80,20 @@ class CholaProductHierarchyValidator:
         self._valid_sub_products: Dict[str, Set[str]] = {}
         self._valid_subclasses: Dict[Tuple[str, str], Set[str]] = {}
         self._covered_products: Set[str] = set()
-        try:
-            from master_data.services.resolver import carrier_product_hierarchy
-
-            rows = carrier_product_hierarchy("Chola")
-        except Exception:
-            rows = []
+        rows = carrier_subclass_rows("Chola")
 
         # Reused only for its normalization method — warnings it appends are
         # discarded (this instance never feeds the pipeline), mirroring
         # StateColumnAlignmentValidator's ``self._expander`` pattern.
         normalizer = RawToCICSTransformer()
 
+        def _normalize(text: str):
+            normalizer.warnings = []
+            return normalizer._normalize_list_field(
+                text, VEHICLE_SUB_CLASS_MAPPINGS, "chola_hierarchy_seed"
+            )
+
+        buckets: Set[Tuple[str, str]] = set()
         for row in rows:
             product = row.get("product") or ""
             if not product:
@@ -99,15 +102,26 @@ class CholaProductHierarchyValidator:
             sub_product = row.get("sub_product") or ""
             if sub_product:
                 self._valid_sub_products.setdefault(product, set()).add(sub_product)
-            raw_subclass = row.get("vehicle_subclass") or ""
-            spaced = _CAMEL_SPLIT_RE.sub(" ", raw_subclass)
-            normalizer.warnings = []
-            slugs = normalizer._normalize_list_field(
-                spaced, VEHICLE_SUB_CLASS_MAPPINGS, "chola_hierarchy_seed"
+            buckets.add((product, sub_product))
+
+        # One slug-resolution path, shared with the transformer's MISC-D merge
+        # (``_canonical_subclass_slugs``) — a second scheme here would flag
+        # spellings the transformer would have folded. ``drop_sentinels=False``
+        # because "Not Available" is a real master value here: recording the
+        # absence of a body is valid, even though the sentinel can never belong
+        # in a body list the transformer widens a rule to.
+        for product, sub_product in buckets:
+            slugs = canonical_subclass_slugs(
+                "Chola",
+                product,
+                sub_product,
+                _normalize,
+                rows=rows,
+                drop_sentinels=False,
             )
-            for slug in slugs or ():
-                self._valid_subclasses.setdefault((product, sub_product), set()).add(
-                    slug
+            if slugs:
+                self._valid_subclasses.setdefault((product, sub_product), set()).update(
+                    slugs
                 )
 
     def validate(self, cics_path: str) -> ValidationResult:

@@ -169,7 +169,42 @@ def _env_int(name: str, default: int) -> int:
 #         drop slightly where subclass-only clones now collapse. Rollback is
 #         CINS_GCV_NO_SUBCLASS=false, which is itself a version-relevant change.
 #         Cached documents must re-extract or they keep serving the 15-body cell.
-CICS_PIPELINE_VERSION = "1.9.0"
+# 1.10.0 - Two client corrections to the commercial-vehicle export, both behind
+#         default-ON flags.
+#         (a) CINS_RENEWAL_IMPLIES_ROLLOVER: a CV rule whose business_type
+#         contains "renewal" now also carries "rollover", so BusinessType exports
+#         "renewal,rollover". A rollover IS a renewal that changes carrier, and
+#         no CV grid in the corpus prices the two apart — a rollover quote used
+#         to find no matching deal at all. Scoped to the four commercial
+#         sub-products and carrier-agnostic; Private Car / Two Wheeler are
+#         excluded because their grids DO sometimes price rollover separately.
+#         (b) CINS_MISCD_SUBCLASS_MERGE: MISC-D keeps Agricultural Tractor and
+#         Harvester as their own rules and collapses every OTHER body of a source
+#         rule into ONE rule carrying a multi-value vehicle_sub_class, widened to
+#         the carrier's full MISC-D body list from CarrierProductHierarchyMaster.
+#         The merge is per SOURCE rule, never across rates. MISC-D rule counts
+#         drop by design (a six-body grid cell goes from six rules to one).
+#         Rollback is either flag set to false, itself version-relevant.
+#         NOTE for the rollout: because (b) drops rule counts in the
+#         "commercial vehicle|misc-d" segment, the first re-extraction of an
+#         already-cached Chola document may trip CINS_REGRESSION_GUARD and refuse
+#         to pin. No segment disappears, so this is a count regression only —
+#         expected and one-time. Relax CINS_REGRESSION_GUARD_RATIO (or disable
+#         the guard) for that first pass if it fires.
+#         (c) The stale-GCCV merged-header guard now matches the GCCV token
+#         ANYWHERE in a leaked row, not only as a rule_text prefix. The May'26
+#         grid spells the leak "GCV 1_GCCV_3W AP ACT" — the shorter "GCV" opens
+#         the row while the GCCV token sits in the segment slug — so the old
+#         startswith() test dropped none of the 222 phantom rows (74 into each of
+#         PCV / Buses / MISC-D). 148 of them exported as MISC-D auto-rickshaws: a
+#         three-wheeled goods carrier filed as a miscellaneous-D deal, which is
+#         not a vehicle the carrier sells under that sub-product. Not flagged:
+#         the rows are well-formed, they are simply in the wrong table. No flag —
+#         this is a bug fix to an existing deterministic guard, and it can only
+#         drop rows the guard was already written to drop.
+#         Cached documents must re-extract or they keep serving the per-body
+#         MISC-D rows, the bare "renewal" cell and the phantom auto-rickshaws.
+CICS_PIPELINE_VERSION = "1.10.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"

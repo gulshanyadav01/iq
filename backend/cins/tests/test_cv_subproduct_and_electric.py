@@ -14,7 +14,8 @@ Run from the backend container:
     python manage.py test cins.tests.test_cv_subproduct_and_electric -v 2
 """
 
-from unittest import TestCase
+import os
+from unittest import TestCase, mock
 
 from cins.processors.core.raw_to_cics_transformer import RawToCICSTransformer
 from cins.schema.cics_model import CommissionRule
@@ -827,7 +828,39 @@ class ExcavatorSubclassSplitTests(TestCase):
             tuple(r.conditions.vehicle_sub_class or [])
             for r in product.commission_rules
         ]
-        # Every emitted rule is scoped to exactly ONE subclass.
+        # MISC-D merges its "rest" bucket (CINS_MISCD_SUBCLASS_MERGE): none of
+        # these six bodies is Agricultural Tractor or Harvester, so the source
+        # rule yields ONE multi-body rule rather than six single-body ones.
+        # (Both entries here carry coverage "comprehensive" and the same rate,
+        # so they were already collapsing to one deal before this change too —
+        # what changed is that deal's sub-class list, not the rule count.)
+        self.assertEqual(len(subclasses), 1)
+        self.assertEqual(set(subclasses[0]), self.EXPECTED)
+
+    @mock.patch.dict(os.environ, {"CINS_MISCD_SUBCLASS_MERGE": "false"})
+    def test_fan_out_one_deal_per_subclass_with_merge_off(self):
+        entries = [
+            RawCommissionEntry(
+                rule_text="MISC-D 2_EXCAVATOR AP ACT",
+                commission_value="12%",
+                product_name="Commercial Vehicle",
+                product_type="MISC-D",
+                coverage_type_text="comprehensive",
+                conditions={
+                    "vehicle_sub_class": "2_EXCAVATOR",
+                    "vehicle_make": self.BODIES,
+                    "vehicle_model": self.BODIES,
+                },
+            )
+        ]
+        product = self.t._transform_product(
+            "Commercial Vehicle", entries, None, _raw(entries), segment="MISC-D"
+        )
+        subclasses = [
+            tuple(r.conditions.vehicle_sub_class or [])
+            for r in product.commission_rules
+        ]
+        # Rollback restores one deal per body, byte-for-byte as before.
         self.assertTrue(all(len(s) == 1 for s in subclasses))
         self.assertEqual({s[0] for s in subclasses}, self.EXPECTED)
 
@@ -889,6 +922,61 @@ class StaleGccvLeakGuardTests(TestCase):
         self.assertTrue(
             any((d or "").startswith("PCV") for d in self._descs(prods, "PCV"))
         )
+
+    def test_gcv_prefixed_gccv_row_is_still_a_leak(self):
+        # The real May'26 shape: the row opens with the SHORTER "GCV" and
+        # carries the GCCV token inside its segment slug. A startswith("gccv")
+        # test missed all 222 phantom rows (74 into each of PCV / Buses /
+        # MISC-D), and 148 of them exported as MISC-D auto-rickshaws — a
+        # three-wheeled goods carrier filed as a miscellaneous-D deal.
+        entries = [
+            RawCommissionEntry(
+                rule_text="GCV 1_GCCV_3W AP ACT",
+                commission_value="10%",
+                product_name="Commercial Vehicle",
+                coverage_type_text="comprehensive",
+                source_section="Table 4: MSV Commission Grid",
+            ),
+            RawCommissionEntry(
+                rule_text="MISC-D 2_EXCAVATOR AP ACT",
+                commission_value="12%",
+                product_name="Commercial Vehicle",
+                coverage_type_text="comprehensive",
+                source_section="Table 4: MSV Commission Grid",
+            ),
+        ]
+        prods = {
+            p.sub_category: p
+            for p in self.t._transform_products(entries, None, _raw(entries))
+        }
+        subclasses = {
+            sc
+            for r in prods["MISC-D"].commission_rules
+            for sc in (r.conditions.vehicle_sub_class or [])
+        }
+        self.assertNotIn("auto-rickshaw", subclasses)
+        self.assertTrue(
+            any("GCCV" in (w or "") for w in self.t.warnings), self.t.warnings
+        )
+
+    def test_the_gccv_token_needs_a_word_boundary(self):
+        # "GCV" alone opens most legitimate commercial rows of every segment —
+        # only the goods table's own GCCV label is a leak signal.
+        entries = [
+            RawCommissionEntry(
+                rule_text="MISC-D 3_HARVESTOR AP ACT",
+                commission_value="10%",
+                product_name="Commercial Vehicle",
+                coverage_type_text="comprehensive",
+                source_section="Table 4: MSV Commission Grid",
+            )
+        ]
+        prods = {
+            p.sub_category: p
+            for p in self.t._transform_products(entries, None, _raw(entries))
+        }
+        self.assertIn("MISC-D", prods)
+        self.assertTrue(prods["MISC-D"].commission_rules)
 
     def test_all_leak_segment_never_created(self):
         # A GCCV row that would segment into MISC-D produces NO MISC-D product

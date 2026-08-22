@@ -110,23 +110,26 @@ rule bullet yet — the first two are only referenced in passing by the ones tha
 do, and the mirror's rationale lives in the `pcv_taxi_mirror.py` module
 docstring. Write them up there when you next touch any of them.
 
-| Variable                    | Default | Effect                                                                                                                                                    |
-| --------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CINS_SKIP_HIDDEN_SHEETS`   | `true`  | Hidden/veryHidden Excel worksheets are indexed and classified but never feed extraction                                                                   |
-| `CINS_CODEGEN_GATE`         | `true`  | Reconcile emitted Pass-3 rules against the grid's rate-bearing rows; a dropped table/segment retries, then flags `requires_review`                        |
-| `CINS_STATE_RTO_MANDATORY`  | `true`  | Every exported deal must carry a State (missing → HIGH, blocks the cache pin) and an RTO (blank → MEDIUM)                                                 |
-| `CINS_REGRESSION_GUARD`     | `true`  | A cache-miss re-extraction that lost a product/segment vs the last good run of the same document is warned and not cached                                 |
-| `CINS_PCV_TAXI_MIRROR`      | `true`  | CV/PCV rules whose `vehicle_sub_class` is exactly `taxi` are mirrored into a duplicate `Private Car` / `Taxi` product so both deals export                |
-| `CINS_GCV_NO_SUBCLASS`      | `true`  | GCV rules carry no `vehicle_sub_class`, so the `VehicleSubClass` column exports blank                                                                     |
-| `CINS_CHOLA_MMV`            | `false` | Fold Chola `vehicle_make`/`vehicle_model` onto the `CarrierVehicleMMVMaster` spelling, and flag (MEDIUM) values no vehicle matches. One flag, both halves |
-| `CINS_MAKE_MODEL_MANDATORY` | `false` | `VehicleMake`/`VehicleModel` must be non-empty on every exported Chola deal; a rule with neither raises a MEDIUM per product                              |
+| Variable                        | Default | Effect                                                                                                                                                    |
+| ------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CINS_SKIP_HIDDEN_SHEETS`       | `true`  | Hidden/veryHidden Excel worksheets are indexed and classified but never feed extraction                                                                   |
+| `CINS_CODEGEN_GATE`             | `true`  | Reconcile emitted Pass-3 rules against the grid's rate-bearing rows; a dropped table/segment retries, then flags `requires_review`                        |
+| `CINS_STATE_RTO_MANDATORY`      | `true`  | Every exported deal must carry a State (missing → HIGH, blocks the cache pin) and an RTO (blank → MEDIUM)                                                 |
+| `CINS_REGRESSION_GUARD`         | `true`  | A cache-miss re-extraction that lost a product/segment vs the last good run of the same document is warned and not cached                                 |
+| `CINS_PCV_TAXI_MIRROR`          | `true`  | CV/PCV rules whose `vehicle_sub_class` is exactly `taxi` are mirrored into a duplicate `Private Car` / `Taxi` product so both deals export                |
+| `CINS_GCV_NO_SUBCLASS`          | `true`  | GCV rules carry no `vehicle_sub_class`, so the `VehicleSubClass` column exports blank                                                                     |
+| `CINS_RENEWAL_IMPLIES_ROLLOVER` | `true`  | A commercial-vehicle rule whose `business_type` contains `renewal` also carries `rollover`, so `BusinessType` exports `renewal,rollover`                  |
+| `CINS_MISCD_SUBCLASS_MERGE`     | `true`  | MISC-D keeps Agricultural Tractor and Harvester as their own rules; every other body of a source rule collapses into one multi-value rule                 |
+| `CINS_CHOLA_MMV`                | `false` | Fold Chola `vehicle_make`/`vehicle_model` onto the `CarrierVehicleMMVMaster` spelling, and flag (MEDIUM) values no vehicle matches. One flag, both halves |
+| `CINS_MAKE_MODEL_MANDATORY`     | `false` | `VehicleMake`/`VehicleModel` must be non-empty on every exported Chola deal; a rule with neither raises a MEDIUM per product                              |
 
 Tunables, all read only when their gate is on: `CINS_CODEGEN_COVERAGE_FLOOR_RATIO`,
 `CINS_CODEGEN_COVERAGE_MIN_EXPECTED`, `CINS_REGRESSION_GUARD_RATIO`,
 `CINS_REGRESSION_GUARD_MIN_TOTAL`.
 
-Flipping `CINS_PCV_TAXI_MIRROR`, `CINS_GCV_NO_SUBCLASS`, `CINS_CHOLA_MMV` or
-`CINS_MAKE_MODEL_MANDATORY` changes CICS output — treat it as a
+Flipping `CINS_PCV_TAXI_MIRROR`, `CINS_GCV_NO_SUBCLASS`,
+`CINS_RENEWAL_IMPLIES_ROLLOVER`, `CINS_MISCD_SUBCLASS_MERGE`, `CINS_CHOLA_MMV`
+or `CINS_MAKE_MODEL_MANDATORY` changes CICS output — treat it as a
 `CICS_PIPELINE_VERSION` change and confirm `CINS_REGRESSION_GUARD` at the same
 time.
 
