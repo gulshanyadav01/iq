@@ -80,13 +80,20 @@ def build_mmv_index(carrier: str) -> Dict[str, dict]:
         {"_makes": {make_slug: canonical_make},          # carrier-wide
          product: {"makes":      {make_slug: canonical_make},
                    "models":     {make_slug: {model_slug: canonical_model}},
-                   "models_any": {model_slug: canonical_model}}}
+                   "models_any": {model_slug: canonical_model},
+                   "makes_own":  {make_slug: canonical_make}}}
 
     ``models`` is nested by make so a scoped lookup is one dict access;
     ``models_any`` is the precomputed make-less lookup, holding only model
     slugs with a single spelling across the whole bucket. Both exist so
     ``match_model`` does no per-call rebuilding — treat this shape as internal
     and never hand-assemble it in a test, build it through here.
+
+    ``makes_own`` holds only the makes THIS product's book actually lists, and
+    exists for ENUMERATION, not matching. ``makes`` is a carrier-wide alias on
+    purpose (see below) — right for resolving a spelling, wrong for answering
+    "which makes does this product cover", where it would return all 1,109 the
+    carrier has ever written against a Car book that lists 53.
 
     One scoped query. Returns ``{}`` on any failure (DB unavailable, table
     unmigrated, master unseeded) so every consumer degrades to today's
@@ -104,6 +111,7 @@ def build_mmv_index(carrier: str) -> Dict[str, dict]:
     # not tell "the same name written twice" from "two different companies
     # that happen to share a slug", and silently picked one of the two.
     make_spellings: Dict[str, set] = {}
+    product_make_spellings: Dict[str, Dict[str, set]] = {}
     model_spellings: Dict[str, Dict[str, set]] = {}
     products: set = set()
 
@@ -114,6 +122,9 @@ def build_mmv_index(carrier: str) -> Dict[str, dict]:
             continue
         products.add(product)
         make_spellings.setdefault(make_slug, set()).add(row.get("make") or "")
+        product_make_spellings.setdefault(product, {}).setdefault(make_slug, set()).add(
+            row.get("make") or ""
+        )
         model_slug = row.get("model_slug") or ""
         if model_slug:
             # Nested by product then make so a scoped lookup is one dict access
@@ -135,6 +146,7 @@ def build_mmv_index(carrier: str) -> Dict[str, dict]:
         by_make = model_spellings.get(product, {})
         bucket = {
             "makes": index["_makes"],
+            "makes_own": _finalize(product_make_spellings.get(product, {})),
             "models": {ms: _finalize(models) for ms, models in by_make.items()},
         }
         # Precompute the make-less lookup ONCE per bucket. It depends only on
@@ -260,6 +272,73 @@ def match_make(index: Dict[str, dict], product: str, text: str) -> Optional[str]
     if not index:
         return None
     return _resolve(index.get("_makes", {}), text)
+
+
+# A grid writes one manufacturer word where the master lists a whole corporate
+# family, and only the carrier knows which subsidiaries belong to it. Chola's
+# CV grids price "TMM" — Tata / Maruti / Mahindra — as one bucket; the master
+# has no bare "Mahindra" or "TATA" row at all, so an exact match returns
+# nothing and an exclusion cannot be expanded.
+#
+# These groupings are READ OFF the client's own production deals, not inferred.
+# In Chola_Dump_AMJJ.xlsx the "all makes except TMM" deal carries 1,700 makes
+# against the full book's 1,713, and the 13 it drops are exactly the 13 below —
+# the same 13 that appear as the TMM *include* list on the sibling deals.
+#
+# It has to be an explicit list, because no mechanical rule reproduces it:
+# TATA MOTORS LTD is in the family but **TATA HITACHI is NOT** (the carrier
+# treats the construction JV as a separate brand and leaves it in the
+# complement), while SHUBHMARUTI — not a word-boundary match at all — IS. A
+# prefix or substring rule would get both wrong, in the direction that silently
+# changes who gets paid.
+#
+# Used ONLY to enumerate a family for export. ``match_make`` stays exact and
+# single-valued: it answers "what is this spelling", which has one answer,
+# where this answers "what does this word cover", which has thirteen.
+CARRIER_MAKE_FAMILIES: Dict[str, Dict[str, tuple]] = {
+    "Chola": {
+        "mahindra": (
+            "MAHINDRA AND MAHINDRA",
+            "MAHINDRA CONSTRUCTION EQUIPMENTS",
+            "MAHINDRA ELECTRIC MOBILITY LIMITED",
+            "MAHINDRA GUJARAT TRACTOR LTD",
+            "MAHINDRA INTL",
+            "MAHINDRA NAVISTAR",
+        ),
+        "maruti": (
+            "MARUTI",
+            "MARUTI BHIWANI E AUTOMOBILES",
+            "MARUTI NANDAN BUSINESS PV",
+            "MARUTI SUZUKI",
+            "SHREE MARUTI NANDAN",
+            "SHUBHMARUTI",
+        ),
+        "tata": ("TATA MOTORS LTD",),
+    },
+}
+
+
+def expand_make_family(
+    index: Dict[str, dict], carrier: str, product: str, text: str
+) -> tuple:
+    """Every canonical make in ``product``'s book that ``text``'s family covers.
+
+    Returns ``()`` when the carrier has no family table, the token names no
+    family, or the family's members are all absent from this product's book —
+    callers treat an empty result as "this token did not resolve" and must not
+    proceed as though nothing needed excluding.
+
+    Members absent from the book are simply skipped: the book is what we are
+    subtracting from, so a make it never listed cannot be removed from it.
+    """
+    families = CARRIER_MAKE_FAMILIES.get(carrier or "")
+    if not families or not index:
+        return ()
+    members = families.get(mmv_slug(text))
+    if not members:
+        return ()
+    book = (index.get(product) or {}).get("makes_own") or {}
+    return tuple(book[slug] for slug in (mmv_slug(m) for m in members) if slug in book)
 
 
 def match_model(

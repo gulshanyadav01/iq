@@ -232,6 +232,15 @@ from commission_intake.tasks import (  # noqa: E402
 )
 
 
+# Upper bound on an auto-sized Excel column, in characters. Widths are fitted
+# to the longest cell, and a few columns hold list values with no natural
+# ceiling — an expanded ``VehicleMake`` can run to thousands of characters, and
+# ``RTO`` to hundreds — which fits the column to a width nothing can read and
+# pushes every later column off-screen. Excel itself refuses anything above 255,
+# so an unbounded fit is not merely ugly. Cells are not truncated; the reader
+# widens the column or opens the cell.
+_MAX_COL_WIDTH = 60
+
 # Real model columns loaded for the lean list query. Kept explicit (not
 # `*ListSerializer.Meta.fields`) because that fields list now includes the
 # non-column `applicable_period` SerializerMethodField — passing it to `.only()`
@@ -794,21 +803,267 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                 return default
             return cv(v)
 
-        def render_make_model_cell(include, exclude):
-            """Render a VehicleMake / VehicleModel cell with inline exclusion.
+        # MMV expansion (make/model exclusion -> positive list). Built ONCE per
+        # export: a real Chola document carries ~5k rules and the CV book is
+        # ~26k rows, so a per-rule query would be a table scan per row. Read
+        # through build_mmv_index / carrier_vehicle_mmv, which are module-level
+        # and carrier-scoped — never MasterDataResolver, which eagerly reloads
+        # every table it owns. Any failure leaves the index empty and every
+        # cell falls back to the literal exclude(...) rendering.
+        # The master is keyed by the canonical carrier CODE ("Chola"), not the
+        # provider's display name ("Cholamandalam MS") — same normalize_carrier
+        # the transformer resolves _carrier_code with, so the two agree.
+        _mmv_index: dict = {}
+        try:
+            from cins.schema.carriers import normalize_carrier
+            from master_data.services.mmv import build_mmv_index
 
-            An exclusion list renders as ``exclude(A, B, C)`` inside the
-            existing column — no new columns, so index-based importers are
-            unaffected. An include list renders exactly as ``cv`` does
-            (unchanged). Both should never be set from the bucket fan-out; if
-            they are, prefer the include list defensively.
+            _mmv_index = build_mmv_index(normalize_carrier(provider_name) or "") or {}
+        except Exception:
+            _mmv_index = {}
+
+        # _product_bucket speaks CAR/CV/TW; the MMV master's own product column
+        # is Car/CV/TW. One place to reconcile the two spellings rather than a
+        # third bucketing function.
+        _MMV_PRODUCT_BY_BUCKET = {"CAR": "Car", "CV": "CV", "TW": "TW"}
+
+        # Sub-class fill: a weight-banded commercial rule carries no body class,
+        # which the transformer records as Chola's own "Not Available" — a real
+        # value in the carrier's hierarchy, not a gap. But the rule does apply
+        # to every body in its sub-product, and the carrier's deal records say
+        # so by enumerating them. Widen the CELL only; conditions are untouched,
+        # so this cannot interact with dedupe or the pipeline version. Built
+        # once per export, like the RTO fill above.
+        _subclasses_by_sub_product: dict = {}
+        try:
+            from master_data.models import CarrierProductHierarchyMaster
+
+            for _row in CarrierProductHierarchyMaster.objects.values(
+                "carrier", "product", "sub_product", "canonical_subclass"
+            ):
+                if not _row["sub_product"] or not _row["canonical_subclass"]:
+                    continue
+                _subclasses_by_sub_product.setdefault(
+                    (_row["carrier"], _row["sub_product"].strip().lower()), []
+                ).append(_row["canonical_subclass"])
+        except Exception:
+            _subclasses_by_sub_product = {}
+
+        _carrier_code = ""
+        try:
+            from cins.schema.carriers import normalize_carrier
+
+            _carrier_code = normalize_carrier(provider_name) or ""
+        except Exception:
+            _carrier_code = ""
+
+        def sub_class_cell(conditions, sub_product):
+            """VehicleSubClass column: the rule's own bodies, or — when it names
+            no body at all — every body its sub-product covers.
+
+            Only the exact ``["not-available"]`` sentinel is widened. A rule that
+            resolved a real body keeps it, and a rule listing "Not Available"
+            ALONGSIDE real bodies is describing a genuine mixed bucket, not an
+            absent dimension.
+            """
+            values = conditions.get("vehicle_sub_class")
+            if values != ["not-available"]:
+                return cv(values)
+            filled = _subclasses_by_sub_product.get(
+                (_carrier_code, str(sub_product or "").strip().lower())
+            )
+            return ",".join(sorted(filled)) if filled else cv(values)
+
+        def _make_scope(makes):
+            """The rule's makes as written, for scoping a model expansion.
+
+            ALL of them, not just a lone one. ``mmv.scope_make`` deliberately
+            gives up on more than one make because it is answering "what does
+            this model name mean" — an unscoped guess there rewrites a rule.
+            Here the question is "which models do this rule's makes cover",
+            and a rule listing three manufacturers covers all three books.
+            Chola's TMM rules are exactly this shape: three makes, and a model
+            list ("Ace, Yodha, Xenon, Mahindra Jeeto") drawn from across them.
+            """
+            if not makes:
+                return []
+            vals = makes if isinstance(makes, list) else [makes]
+            return [str(v) for v in vals if v]
+
+        def _strip_make_prefix(text, makes):
+            """``"Mahindra Jeeto"`` -> ``"Jeeto"`` when the rule names Mahindra.
+
+            Only an exact leading make word followed by a space is removed, and
+            only for a make the SAME RULE carries — not any make in the book.
+            Returns None when nothing was stripped, so the caller can tell
+            "retry this" from "no change".
+            """
+            head = str(text).strip()
+            for make in makes:
+                token = str(make or "").strip()
+                if token and head.lower().startswith(token.lower() + " "):
+                    rest = head[len(token) :].strip()
+                    if rest:
+                        return rest
+            return None
+
+        def _expand_exclusion(values, bucket, models=False, make_scope=None):
+            """The positive list an exclusion implies, or None to fall back.
+
+            Returns None — meaning "render exclude(...) verbatim" — whenever the
+            expansion would be a guess: no index, no bucket, an empty universe,
+            an exclusion term the master does not know, or an expansion that
+            removes nothing (which means the terms named vehicles this book does
+            not list, so the "universe minus them" is not the carve-out the grid
+            described).
+
+            KNOWN LIMITATION — the cell is only ever as complete as the seeded
+            book, and an incomplete book UNDER-states coverage. "Everything
+            except three makes" is unambiguous; the list that replaces it says
+            the makes it omits are not payable. Measured against a dump of live
+            Chola deals: a GCV 0-3500 exclusion renders 830 makes where the
+            carrier's own deal carries 1,696, because
+            ``chola_mmv_cv_source.xlsx`` holds 839 distinct manufacturers
+            against the 1,709 their production book runs on (the CSV export and
+            loader drop nothing — the workbook we were given is simply half the
+            book). The Car book, at 53 against their 56-65, is effectively
+            complete. Shipping the partial CV list is a deliberate call; re-seed
+            from a current MMV export and it corrects itself with no code
+            change. Re-run the dump comparison in ``.context`` after any reseed.
+            """
+            from master_data.services.mmv import (
+                expand_make_family,
+                match_make,
+                match_model,
+                mmv_slug,
+            )
+
+            product = _MMV_PRODUCT_BY_BUCKET.get(bucket or "")
+            bucket_index = _mmv_index.get(product) if product else None
+            if not bucket_index:
+                return None
+
+            def _resolved_makes(texts):
+                """Canonical makes for the rule's make list — family first, as
+                in the exclusion branch below."""
+                out = []
+                for text in texts or []:
+                    family = expand_make_family(
+                        _mmv_index, _carrier_code, product, text
+                    )
+                    if family:
+                        out.extend(family)
+                        continue
+                    exact = match_make(_mmv_index, product, text)
+                    if exact:
+                        out.append(exact)
+                return out
+
+            scoped_makes = []
+            if models:
+                scoped_makes = _resolved_makes(make_scope)
+                if scoped_makes:
+                    # Union of the scoped makes' model books.
+                    universe = {}
+                    for name in scoped_makes:
+                        universe.update(bucket_index["models"].get(mmv_slug(name), {}))
+                else:
+                    # No make resolved: only a model unambiguous across the
+                    # whole bucket can be named at all.
+                    universe = bucket_index.get("models_any", {})
+            else:
+                universe = bucket_index.get("makes_own", {})
+            if not universe:
+                return None
+
+            # Drop by canonical NAME, not slug. The master seeds several slug
+            # variants per manufacturer — "tata" and "tata motors" both carry
+            # the name "TATA MOTORS LTD" — so removing the one slug a term
+            # resolved to would leave its twin in the payable list.
+            drop = set()
+            for value in values:
+                text = str(value)
+                if models:
+                    # A model name can legitimately exist under more than one
+                    # of the rule's makes; drop every one it names.
+                    scopes = scoped_makes or [None]
+                    hits = [
+                        match_model(_mmv_index, product, name, text) for name in scopes
+                    ]
+                    if not any(hits):
+                        # The grid sometimes repeats the manufacturer inside
+                        # the model cell ("Mahindra Jeeto" where the master
+                        # lists "JEETO" under Mahindra). Retry once with a
+                        # leading make word stripped — but ONLY a make this
+                        # same rule already names, so this can never reach a
+                        # model belonging to anyone else.
+                        shorter = _strip_make_prefix(
+                            text, list(make_scope or []) + scoped_makes
+                        )
+                        if shorter:
+                            hits = [
+                                match_model(_mmv_index, product, name, shorter)
+                                for name in scopes
+                            ]
+                else:
+                    # The FAMILY wins over an exact spelling, because a grid
+                    # writing "Maruti" means the manufacturer, not the one row
+                    # that happens to be spelled exactly that way. The master
+                    # holds both "MARUTI" and "MARUTI SUZUKI"; matching exactly
+                    # would drop the first and leave the second in the payable
+                    # list, which is the silent half-exclusion this whole
+                    # function is built to avoid. Prod's own complement drops
+                    # all six Maruti rows.
+                    family = expand_make_family(
+                        _mmv_index, _carrier_code, product, text
+                    )
+                    hits = list(family) or [match_make(_mmv_index, product, text)]
+                if not any(hits):
+                    return None  # unmatched term — never silently keep it in
+                drop.update(h for h in hits if h)
+
+            # De-duplicate by name for the same reason: the CV book is 1,133
+            # slugs for 839 distinct makes.
+            names = set(universe.values())
+            kept = names - drop
+            if not kept or kept == names:
+                return None
+            return ",".join(sorted(kept))
+
+        def render_make_model_cell(
+            include, exclude, bucket=None, models=False, make_scope=None
+        ):
+            """Render a VehicleMake / VehicleModel cell.
+
+            An include list renders exactly as ``cv`` does. An exclusion list is
+            EXPANDED against the carrier's MMV master into the positive list it
+            implies — "every make in this product's book except these" — which
+            is the form the carrier's own system carries and the only form an
+            index-based importer can act on.
+
+            Falls back to the literal ``exclude(A, B, C)`` rendering whenever
+            the expansion cannot be trusted: no master, no product bucket, or —
+            critically — an exclusion term that does not match the master. A
+            positive list that silently still contains a make the grid excluded
+            would pay commission on a vehicle the carrier carved out, which is
+            strictly worse than a cell the reader can see is unexpanded. Same
+            "ambiguity resolves to nothing, never to a guess" rule the matcher
+            itself follows.
+
+            Both lists should never be set from the bucket fan-out; if they
+            are, prefer the include list defensively.
             """
             if include:
                 return cv(include)
-            if exclude:
-                vals = exclude if isinstance(exclude, list) else [exclude]
-                return "exclude(" + ", ".join(str(i) for i in vals) + ")"
-            return ""
+            if not exclude:
+                return ""
+            vals = exclude if isinstance(exclude, list) else [exclude]
+            expanded = _expand_exclusion(
+                vals, bucket, models=models, make_scope=make_scope
+            )
+            if expanded is not None:
+                return expanded
+            return "exclude(" + ", ".join(str(i) for i in vals) + ")"
 
         def outcome_percentages(outcome, deal_param, conditions=None):
             """
@@ -820,7 +1075,11 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             authoritative over deal_parameter. When applied_on does not name a
             known basis, fall back to deal_parameter routing.
             """
-            od_pct = tp_pct = net_pct = tp_lte3 = tp_gte4 = flat = ""
+            # Unused commission columns export 0, not blank. The carrier's own
+            # deal records carry 0 in every column a deal does not pay on, and
+            # an importer reading a blank cell as "unset" rather than "zero"
+            # has to guess which of the six the rate belongs in.
+            od_pct = tp_pct = net_pct = tp_lte3 = tp_gte4 = flat = 0
             if not outcome:
                 return od_pct, tp_pct, net_pct, tp_lte3, tp_gte4, flat
 
@@ -839,17 +1098,17 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             if c_type == "flat" and flat_val is not None:
                 flat = flat_val
             elif column == "od":
-                od_pct = pct if pct is not None else ""
+                od_pct = pct if pct is not None else 0
             elif column == "tp":
-                tp_pct = pct if pct is not None else ""
+                tp_pct = pct if pct is not None else 0
             elif column == "net":
-                net_pct = pct if pct is not None else ""
+                net_pct = pct if pct is not None else 0
             elif "od" in params:
-                od_pct = pct if pct is not None else ""
+                od_pct = pct if pct is not None else 0
             elif "net" in params:
-                net_pct = pct if pct is not None else ""
+                net_pct = pct if pct is not None else 0
             elif "tp" in params or "regular-tp" in params:
-                tp_pct = pct if pct is not None else ""
+                tp_pct = pct if pct is not None else 0
             elif "tp-with-vehicle-age" in params:
                 # split between lte3 and gte4 if tiers present, else put in both
                 tiers = outcome.get("tiers") or []
@@ -858,12 +1117,12 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                         thresh = tier.get("threshold") or {}
                         t_max = thresh.get("max")
                         if t_max is not None and t_max <= 3:
-                            tp_lte3 = tier.get("value", "")
+                            tp_lte3 = tier.get("value", 0)
                         else:
-                            tp_gte4 = tier.get("value", "")
+                            tp_gte4 = tier.get("value", 0)
                 else:
-                    tp_lte3 = pct if pct is not None else ""
-                    tp_gte4 = pct if pct is not None else ""
+                    tp_lte3 = pct if pct is not None else 0
+                    tp_gte4 = pct if pct is not None else 0
             else:
                 # fallback: percentage goes to OD column
                 if pct is not None:
@@ -989,7 +1248,7 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                     provider_name,  # Insurer
                     product_name,  # Product
                     sub_product,  # SubProduct
-                    cv(conditions.get("vehicle_sub_class")),
+                    sub_class_cell(conditions, sub_product),
                     cv(conditions.get("policy_type")),
                     cv(conditions.get("state")),
                     rto_cell(conditions, product_rto_bucket),
@@ -1021,10 +1280,16 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                     render_make_model_cell(
                         conditions.get("vehicle_make"),
                         conditions.get("vehicle_make_exclude"),
+                        bucket=product_rto_bucket,
                     ),
                     render_make_model_cell(
                         conditions.get("vehicle_model"),
                         conditions.get("vehicle_model_exclude"),
+                        bucket=product_rto_bucket,
+                        models=True,
+                        # A model name is only unique within its manufacturer,
+                        # so scope the lookup by the rule's make when it has one.
+                        make_scope=_make_scope(conditions.get("vehicle_make")),
                     ),
                     cv(conditions.get("vehicle_carrier")),
                     cv(conditions.get("business_type")),
@@ -1067,13 +1332,13 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
             if col_idx in json_col_indices:
                 # JSON-formatted cell — fixed width keeps the row height
                 # readable instead of stretching out for the longest clause.
-                ws.column_dimensions[col_letter].width = 60
+                ws.column_dimensions[col_letter].width = _MAX_COL_WIDTH
                 continue
             max_len = max(
                 len(str(ws.cell(row=r, column=col_idx).value or ""))
                 for r in range(1, row_idx)
             )
-            ws.column_dimensions[col_letter].width = max_len + 4
+            ws.column_dimensions[col_letter].width = min(max_len + 4, _MAX_COL_WIDTH)
 
         # ── Global Rules sheet ──────────────────────────────────────────
         # Hoist modifiers that apply to every rule onto their own sheet.

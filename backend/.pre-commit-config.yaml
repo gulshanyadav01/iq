@@ -69,10 +69,13 @@ repos:
         # sources' own typos read as misspellings, and "correcting" one would
         # stop the row matching a grid that spells it the same way.
         exclude: "master_data/data/.*\\.csv$"
+        # `equipments` is not a typo we own either: it is the master's own
+        # spelling of MAHINDRA CONSTRUCTION EQUIPMENTS, quoted verbatim in
+        # `mmv.py`'s family table, which matches on the seeded string.
         args:
           [
             "--skip",
             "*.lock,pnpm-lock.yaml,*.min.js,*.css",
             "-L",
-            "couldn,bu,nd",
+            "couldn,bu,nd,equipments",
           ]

@@ -123,7 +123,19 @@ def _env_int(name: str, default: int) -> int:
 #         vehicle_model and their _exclude twins, and the _exclude fields are
 #         part of _DEDUPE_SCALAR_FIELDS, so two groups that differed only by
 #         spelling would merge. Bump to 1.7.0 at that point, not before.
-CICS_PIPELINE_VERSION = "1.6.0"
+# 1.7.0 - A body word is re-filed when it names a different vehicle in its
+#         sub-product. Chola writes the MISC-D agricultural tractor as the
+#         segment slug "1_TRAC"; the shared VEHICLE_SUB_CLASS_MAPPINGS table
+#         maps the bare token "trac" to "tractor", which the carrier's own
+#         hierarchy master files under GCV as a GOODS body — a different
+#         vehicle at a different payout. Reconciled against prod deal 799822
+#         (MISC-D / Third Party / Bihar), which reads "Agricultural Tractor".
+#         Cached documents must re-extract or they keep serving the GCV body
+#         on MISC-D rules. See _SUBPRODUCT_SUBCLASS_OVERRIDES.
+#         NOTE: this is the same 1.7.0 the CINS_CHOLA_MMV note above reserves.
+#         That flag still defaults to FALSE and is unaffected — enabling it
+#         needs no further bump now that this one has shipped.
+CICS_PIPELINE_VERSION = "1.7.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"
