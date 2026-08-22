@@ -119,6 +119,14 @@ Repo-wide `pnpm lint` is red on arrival (pre-existing violations in legacy files
 lints diff-scoped only, so lint just the files you changed:
 `cd web && pnpm exec eslint <paths>`.
 
+## Branching
+
+**The default branch is `dev`. There is no `master` and no `main`** — the remote carries
+neither, and `origin/HEAD` points at `dev`. Branch off `dev`, diff against `origin/dev`,
+and open every PR with `gh pr create --base dev`. Tooling that guesses a default (and
+Claude Code's own session preamble, which reports "master") is wrong here; verify with
+`git ls-remote --heads origin` rather than assuming.
+
 ## Git Hooks
 
 - Husky pre-commit hooks configured (`.husky/`)
