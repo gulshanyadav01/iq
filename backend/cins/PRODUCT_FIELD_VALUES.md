@@ -26,6 +26,13 @@
 
 **vehicleSubClass** – Private Car, Taxi, Scooter, Moped, Bike, E Rickshaw, Auto Rickshaw, Pick Up/Delivery Van, Truck, Tractor, Tipper, Heavy Truck/Semi Trailer, Dumper, Tanker, Trailer, Refrigerated Van, Bulker, School Bus, Passenger Bus, Agricultural Tractor, Backhoe Loader, Crane, Ambulance, Loader, Tractor Loader, Harvester, Excavators, Garbage Van, Motor Grader, Transit Mixer, Fork Lift Trucks, Generator Van, Drilling Rigs, Compressors, Other Carts, Plane Loaders And Other, Road Rollers, Road Sweeper, Staff Bus, Car Carrier, Greater Than Six Seater, Kaali Peeli Taxi, Not Available, E-Bike, Flat Bed Trailer, Kisan Suvidha, Container, Towing Van, Bulldozer, Compactor, Gas Tanker, Jetting Machine, Fire Vehicles
 
+> **GCV never carries a vehicleSubClass — the cell exports blank.** A
+> goods-carrying grid prices by weight band and publishes no body type (its
+> SUBCLASS column holds the weight ladder, `2_UPTO_3.5T`), so
+> `_strip_gcv_subclass` clears the field. `Not Available` remains a real value
+> for the other CV sub-products (PCV / Buses / MISC-D), where the export widens
+> it into that sub-product's seeded bodies.
+
 **vehicleType** – Car/Taxi, Two Wheeler, GCV, PCV, Buses, MISC-D
 
 **product** – Car, Two Wheeler, Commercial Vehicle

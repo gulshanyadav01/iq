@@ -510,6 +510,28 @@ class MirrorSignatureNcbTests(TestCase):
         ]
         self.assertEqual(len(kept), 1, "genuine third-party rate was deleted")
 
+    def test_gcv_null_subclass_does_not_widen_the_signature(self):
+        # GCV rules now carry no vehicle_sub_class at all (_strip_gcv_subclass),
+        # so that _MIRROR_DIM_KEYS member is null on every side. This path
+        # DELETES rules, so confirm the remaining dimensions still discriminate:
+        # a genuine ACT rate on a different GVW band must survive.
+        comp = _cov_rule("c1", "comprehensive", 42.5)
+        comp["conditions"].update(
+            vehicle_sub_class=None, gvw_start_range=0, gvw_end_range=3500
+        )
+        tp = _cov_rule("t1", "third-party", 42.5)
+        tp["conditions"].update(
+            vehicle_sub_class=None, gvw_start_range=3501, gvw_end_range=7500
+        )
+        doc = _cov_doc([comp, tp], product_name="Commercial Vehicle")
+        drop_mirrored_third_party(doc)
+        kept = [
+            r
+            for r in doc["products"][0]["commission_rules"]
+            if r["conditions"]["policy_type"] == ["third-party"]
+        ]
+        self.assertEqual(len(kept), 1, "genuine third-party rate was deleted")
+
     def test_band_absent_on_both_sides_still_dedupes(self):
         # Regression guard for the fix itself: documents with no NCB dimension
         # at all must keep the pre-existing fabricated-TP cleanup behaviour.

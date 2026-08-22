@@ -175,12 +175,15 @@ class InvalidComboFindingTests(TestCase):
 
 class MandatorySubClassTests(TestCase):
     """vehicle_sub_class is mandatory on every Chola rule — a rule without one
-    is a HIGH error (fails validation, blocks the CICS output-cache pin)."""
+    is a HIGH error (fails validation, blocks the CICS output-cache pin).
+
+    GCV is the one exemption; see ``GCVExemptFromMandatorySubClassTests``.
+    """
 
     def test_missing_subclass_is_a_high_error(self):
         v = _ValidatorWithSeededHierarchy(_HIERARCHY)
         path = _write_doc(
-            _doc("Chola", [_product("commercial-gcv", "GCV", [_rule(None)])])
+            _doc("Chola", [_product("commercial-pcv", "PCV", [_rule(None)])])
         )
         result = v.validate(path)
         self.assertEqual(len(result.errors), 1)
@@ -196,7 +199,7 @@ class MandatorySubClassTests(TestCase):
     def test_one_finding_per_segment_listing_the_rule_ids(self):
         v = _ValidatorWithSeededHierarchy(_HIERARCHY)
         rules = [dict(_rule(None), rule_id=f"R{i}") for i in range(3)]
-        path = _write_doc(_doc("Chola", [_product("commercial-gcv", "GCV", rules)]))
+        path = _write_doc(_doc("Chola", [_product("commercial-pcv", "PCV", rules)]))
         result = v.validate(path)
         self.assertEqual(len(result.errors), 1)
         self.assertIn("3 rule(s)", result.errors[0].message)
@@ -215,7 +218,7 @@ class MandatorySubClassTests(TestCase):
         # does not require the master to cover this (product, sub_product).
         v = _ValidatorWithSeededHierarchy(_HIERARCHY)
         path = _write_doc(
-            _doc("Chola", [_product("commercial-gcv", "NOT-A-SEGMENT", [_rule(None)])])
+            _doc("Chola", [_product("commercial-pcv", "NOT-A-SEGMENT", [_rule(None)])])
         )
         result = v.validate(path)
         self.assertEqual(len(result.errors), 1)
@@ -223,7 +226,7 @@ class MandatorySubClassTests(TestCase):
     def test_non_chola_missing_subclass_not_flagged(self):
         v = _ValidatorWithSeededHierarchy(_HIERARCHY)
         path = _write_doc(
-            _doc("Bajaj", [_product("commercial-gcv", "GCV", [_rule(None)])])
+            _doc("Bajaj", [_product("commercial-pcv", "PCV", [_rule(None)])])
         )
         result = v.validate(path)
         self.assertEqual(result.errors, [])
@@ -231,10 +234,65 @@ class MandatorySubClassTests(TestCase):
     def test_unseeded_master_still_fails_open(self):
         v = _ValidatorWithSeededHierarchy([])
         path = _write_doc(
+            _doc("Chola", [_product("commercial-pcv", "PCV", [_rule(None)])])
+        )
+        result = v.validate(path)
+        self.assertEqual(result.errors, [])
+
+
+class GCVExemptFromMandatorySubClassTests(TestCase):
+    """A goods-carrying grid prices by weight band and publishes no body type,
+    so ``_strip_gcv_subclass`` clears the field and absence is CORRECT there.
+
+    Without this carve-out the HIGH fires on every GCV rule of every Chola
+    document — and a HIGH blocks ``cics_cache.should_cache``, walling the
+    carrier's whole CV book out of the output cache.
+    """
+
+    def test_gcv_missing_subclass_is_not_flagged(self):
+        v = _ValidatorWithSeededHierarchy(_HIERARCHY)
+        path = _write_doc(
             _doc("Chola", [_product("commercial-gcv", "GCV", [_rule(None)])])
         )
         result = v.validate(path)
         self.assertEqual(result.errors, [])
+        self.assertFalse(result.has_high)
+
+    def test_exemption_is_keyed_on_subproduct_not_free_text_sub_category(self):
+        # sub_category is free text; product_subproduct is the transformer's
+        # own gate, so the two sides cannot drift.
+        v = _ValidatorWithSeededHierarchy(_HIERARCHY)
+        path = _write_doc(
+            _doc("Chola", [_product("commercial-gcv", "NOT-A-SEGMENT", [_rule(None)])])
+        )
+        result = v.validate(path)
+        self.assertEqual(result.errors, [])
+
+    def test_sibling_cv_subproducts_keep_the_high(self):
+        for subproduct, segment in (
+            ("commercial-pcv", "PCV"),
+            ("commercial-buses", "Buses"),
+            ("commercial-miscd", "MISC-D"),
+        ):
+            with self.subTest(subproduct=subproduct):
+                v = _ValidatorWithSeededHierarchy(_HIERARCHY)
+                path = _write_doc(
+                    _doc("Chola", [_product(subproduct, segment, [_rule(None)])])
+                )
+                result = v.validate(path)
+                self.assertEqual(len(result.errors), 1)
+                self.assertTrue(result.has_high)
+
+    def test_gcv_validity_check_still_runs_on_a_present_value(self):
+        # Only the mandatory-PRESENCE half is exempt. A GCV rule that somehow
+        # still carries a body is still checked against the master.
+        v = _ValidatorWithSeededHierarchy(_HIERARCHY)
+        path = _write_doc(
+            _doc("Chola", [_product("commercial-gcv", "GCV", [_rule(["taxi"])])])
+        )
+        result = v.validate(path)
+        self.assertEqual(len(result.warnings), 1)
+        self.assertIn("'taxi' is not valid", result.warnings[0].message)
 
 
 class NonCholaUntouchedTests(TestCase):

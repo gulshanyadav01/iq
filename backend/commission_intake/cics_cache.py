@@ -154,7 +154,22 @@ def _env_int(name: str, default: int) -> int:
 #         DOUBLE on affected products (this is the incident doc dbe5b4ea's
 #         24 -> 48, now the intended count). Cached documents must re-extract or
 #         they keep serving the single merged-label row.
-CICS_PIPELINE_VERSION = "1.8.0"
+# 1.9.0 - GCV rules no longer carry a vehicle_sub_class at all. A goods-carrying
+#         grid prices by weight band and publishes no body type — its SUBCLASS
+#         column holds the weight ladder ("2_UPTO_3.5T") — so the transformer
+#         used to stamp the "not-available" sentinel, which the export then
+#         WIDENED into all 15 seeded GCV bodies (Truck, Tipper, Tanker, …). The
+#         cell is now blank. The strip is absolute (a body resolved from a slug,
+#         e.g. auto-rickshaw off "1_GCCV_3W", goes too) and carrier-agnostic, and
+#         runs LAST in _transform_product — after _bifurcate_gcv_wheels, whose
+#         4W-only routing for wheel-less special-purpose bodies reads the field.
+#         CholaProductHierarchyValidator's mandatory-presence HIGH is carved out
+#         for GCV: it would otherwise fire on every GCV rule and, being a HIGH,
+#         wall the carrier's whole CV book out of this cache. Rule counts may
+#         drop slightly where subclass-only clones now collapse. Rollback is
+#         CINS_GCV_NO_SUBCLASS=false, which is itself a version-relevant change.
+#         Cached documents must re-extract or they keep serving the 15-body cell.
+CICS_PIPELINE_VERSION = "1.9.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"

@@ -658,6 +658,26 @@ def mmv_enabled() -> bool:
     return raw.strip().lower() not in ("0", "false", "no", "off", "")
 
 
+def gcv_no_subclass_enabled() -> bool:
+    """``CINS_GCV_NO_SUBCLASS`` — GCV rules carry no ``vehicle_sub_class``.
+
+    A goods-carrying grid prices by WEIGHT BAND, not by body type: Chola's
+    GCCV sheet puts the weight ladder (``2_UPTO_3.5T``, ``3_3.5T_TO_7.5T``) in
+    the column the extractor reads as SUBCLASS, so there is no body class in
+    the source to extract. Recording one anyway made the export widen the
+    ``not-available`` sentinel into all 15 seeded GCV bodies — a guess the
+    grid never made.
+
+    Defaults ON. ``false`` restores the pre-change behaviour without a
+    redeploy, and is itself a ``CICS_PIPELINE_VERSION``-relevant change: a
+    document cached under one setting keeps serving that setting's cell.
+    """
+    raw = os.environ.get("CINS_GCV_NO_SUBCLASS")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
 class RawToCICSTransformer:
     """
     Transforms RawExtraction to full CICS schema.
@@ -1314,6 +1334,16 @@ class RawToCICSTransformer:
         # 40000, only line up after this point. The pass is evidence-gated and
         # idempotent, so re-running never bumps an already-monotonic ladder.
         self._normalize_boundary_overlaps(rules)
+
+        # GCV carries no body dimension — strip it, LAST. See
+        # _strip_gcv_subclass for why this cannot move earlier.
+        if self._strip_gcv_subclass(rules, product_subproduct):
+            # The strip can make subclass-only clones byte-identical, which
+            # RuleOverlapChecker reports as a CRITICAL complete_overlap. Collapse
+            # them here; the pass only merges when the OUTCOME matches too, so
+            # differently-priced bodies survive as the genuine conflict they now
+            # are.
+            rules = self._collapse_duplicate_rules(rules)
 
         # Determine sub-category. For a split commercial group the segment is
         # the canonical SubProduct (GCV / PCV / Buses / MISC-D) — use it
@@ -2413,7 +2443,6 @@ class RawToCICSTransformer:
             seat_start,
             seat_end,
         )
-        vehicle_sub_class = self._apply_chola_gcv_subclass(vehicle_sub_class)
         vehicle_sub_class = self._apply_chola_tw_subclass(
             vehicle_sub_class, entry, cc_start, cc_end
         )
@@ -4136,31 +4165,75 @@ class RawToCICSTransformer:
         )
         return None
 
-    def _apply_chola_gcv_subclass(self, vehicle_sub_class):
-        """Default a body-less Chola GCV rule to the explicit "not available".
+    @staticmethod
+    def _rule_id_token(bodies) -> str:
+        """Body slugs as a rule_id-legal token (``^[A-Za-z0-9_-]+$``)."""
+        joined = "-".join(str(b) for b in bodies if b)
+        return re.sub(r"[^A-Za-z0-9_-]+", "-", joined).strip("-") or "NA"
 
-        The GCCV grid's own SUBCLASS column holds the weight ladder, not a body
-        type::
+    def _strip_gcv_subclass(self, rules, product_subproduct) -> int:
+        """Clear ``vehicle_sub_class`` on every GCV rule. Returns the count.
+
+        A goods-carrying grid prices by WEIGHT BAND, not by body type. The
+        GCCV sheet's own SUBCLASS column holds the weight ladder::
 
             | GCCV | 2_UPTO_3.5T    | TATA/ Maruti/ Mahindra | Ace, Super Ace, … |
             | GCCV | 3_3.5T_TO_7.5T | 3_3.5T_TO_7.5T         | 3_3.5T_TO_7.5T    |
 
-        So there is no body class in the source to extract — the weight band is
-        already captured as the gvw range. Chola's own hierarchy master lists
-        "Not Available" among the valid GCV subclasses for exactly this case, so
-        record it explicitly rather than leaving the mandatory field null (or
-        guessing "Truck" from tonnage, which the grid never states).
+        so there is no body class in the source at all — the weight band is
+        already captured as the gvw range. The old behaviour recorded the
+        ``not-available`` sentinel here, which the export then WIDENED into all
+        15 seeded GCV bodies (Truck, Tipper, Tanker, …), shipping a guess the
+        grid never made.
 
-        Only fills an EMPTY value, so the genuine 3-wheeler rows keep the
-        auto-rickshaw body resolved from their "1_GCCV_3W" slug.
+        The strip is absolute: a body genuinely resolved from a slug (the
+        ``auto-rickshaw`` / ``e-rickshaw`` off ``1_GCCV_3W``) goes too. And it
+        is carrier-agnostic — this is a fact about goods-carrying grids, not a
+        Chola quirk — so it gates on ``product_subproduct`` alone.
+
+        **Ordering is load-bearing: this must run LAST in ``_transform_product``**,
+        after every writer of the field, and in particular after
+        ``_bifurcate_gcv_wheels``:
+
+        - ``_transform_product``'s backfill re-adds an ``inferred_sub_class``
+          from the source section AFTER ``_transform_conditions`` returns, so a
+          strip inside the conditions chain would simply be undone.
+        - ``_bifurcate_subclass_buckets`` clones body enumerations.
+        - ``_is_four_wheel_only_subclass`` is the SOLE 4W-only signal for the
+          special-purpose bodies that carry no GVW band (tractor, excavator,
+          harvester, bus, maxicab). Strip before bifurcation and every one of
+          them falls through to the both-wheels arm and doubles into spurious
+          3W clones — the (0,0) catch-all regression that logic exists to kill.
+          Run after it and the scoping survives in ``number_of_wheels``.
+
+        Known limitation: when two differently-bodied clones carry the SAME
+        rate, the follow-up collapse keeps one rule and the other body's token
+        leaves the coverage blob with it. Rare on a GCV grid, whose sub-class
+        column is the weight ladder rather than a body enumeration.
         """
-        if (
-            self._carrier_code != "Chola"
-            or self._product_subproduct != "commercial-gcv"
-            or vehicle_sub_class
-        ):
-            return vehicle_sub_class
-        return ["not-available"]
+        if product_subproduct != "commercial-gcv" or not gcv_no_subclass_enabled():
+            return 0
+        stripped = 0
+        for rule in rules:
+            if rule.conditions is not None and rule.conditions.vehicle_sub_class:
+                bodies = rule.conditions.vehicle_sub_class
+                rule.conditions.vehicle_sub_class = None
+                # Keep the body word as PROVENANCE on the rule_id.
+                # RowCoverageValidator's blob is built from the rule's identity
+                # fields, and its declined-row check (the empty-rate "4_OTHERS"
+                # row, a HIGH) was satisfied by the "not-available" sentinel
+                # this strip deletes. rule_id is excluded from
+                # _duplicate_collapse_key, so the suffix cannot block the
+                # follow-up collapse, and _bifurcate_subclass_buckets already
+                # suffixes rule_ids the same way.
+                rule.rule_id = f"{rule.rule_id}_SC_{self._rule_id_token(bodies)}"
+                stripped += 1
+        if stripped:
+            self.notices.append(
+                f"GCV: cleared vehicle_sub_class on {stripped} rule(s) — a "
+                f"goods-carrying grid prices by weight band, not body type"
+            )
+        return stripped
 
     # Leading enumeration index on a CV segment slug ("1_GCCV_3W", "3_HARVESTOR").
     _SUBCLASS_SLUG_INDEX_RE = re.compile(r"^\s*\d+\s*_")

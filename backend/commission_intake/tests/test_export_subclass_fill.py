@@ -1,14 +1,20 @@
 """
-VehicleSubClass fill for weight-banded commercial rules.
+VehicleSubClass fill for commercial rules that name no body class.
 
-A GCV rule priced purely on GVW names no body class, which the transformer
-records as Chola's own canonical "Not Available" — a real value in the carrier's
-hierarchy master, not a gap. The rule still applies to every body in its
-sub-product, and the carrier's live deal records say so by enumerating all of
-them ("Pick Up/Delivery Van,Truck,Tractor,Tipper,...").
+A rule whose grid names no body is recorded as Chola's own canonical "Not
+Available" — a real value in the carrier's hierarchy master, not a gap. The rule
+still applies to every body in its sub-product, and the carrier's live deal
+records say so by enumerating all of them ("Crane,Excavator,...").
 
 The widening happens in the EXPORT CELL, never in the rule's conditions, so it
 cannot shift a dedupe group key or move CICS_PIPELINE_VERSION.
+
+**GCV is out of scope for the widening** — a goods-carrying grid prices by
+weight band and publishes no body type at all, so ``_strip_gcv_subclass`` clears
+the field in the transformer and the cell renders BLANK. It used to carry the
+sentinel and widen into all 15 seeded GCV bodies, which was a guess the grid
+never made. The GCV fixtures below therefore exercise the null path; the
+widening itself is pinned on PCV / MISC-D.
 
 Run from the backend container:
     python manage.py test commission_intake.tests.test_export_subclass_fill -v 2
@@ -25,7 +31,11 @@ from rest_framework.test import APIClient
 from commission_intake.models import CommissionDocument, CICSResult
 from master_data.models import CarrierProductHierarchyMaster
 
+# GCV is seeded on purpose even though it is never widened: the blank-cell
+# tests below have to prove the null path wins over an available fill, not
+# merely that the master happens to be empty.
 GCV_BODIES = ["Truck", "Tipper", "Tractor", "Not Available"]
+PCV_BODIES = ["Taxi", "Auto Rickshaw", "Not Available"]
 MISCD_BODIES = ["Crane", "Excavator"]
 
 
@@ -65,6 +75,14 @@ class ExportSubclassFillTests(DjangoTestCase):
                 vehicle_subclass=body,
                 canonical_subclass=body,
             )
+        for body in PCV_BODIES:
+            CarrierProductHierarchyMaster.objects.create(
+                carrier="Chola",
+                product="CV",
+                sub_product="PCV",
+                vehicle_subclass=body,
+                canonical_subclass=body,
+            )
         for body in MISCD_BODIES:
             CarrierProductHierarchyMaster.objects.create(
                 carrier="Chola",
@@ -98,9 +116,20 @@ class ExportSubclassFillTests(DjangoTestCase):
 
     def test_not_available_widens_to_the_sub_products_bodies(self):
         (cell,) = self._cells(
-            _doc("GCV", [_rule({"vehicle_sub_class": ["not-available"]})])
+            _doc("PCV", [_rule({"vehicle_sub_class": ["not-available"]})])
         )
-        self.assertEqual(cell, "Not Available,Tipper,Tractor,Truck")
+        self.assertEqual(cell, "Auto Rickshaw,Not Available,Taxi")
+
+    def test_gcv_null_subclass_exports_blank(self):
+        # What the transformer now emits for GCV. The master HAS 4 GCV bodies
+        # seeded, so this proves the null path wins over an available fill
+        # rather than passing by accident.
+        (cell,) = self._cells(_doc("GCV", [_rule({"vehicle_sub_class": None})]))
+        self.assertIn(cell, (None, ""))
+
+    def test_gcv_absent_subclass_key_exports_blank(self):
+        (cell,) = self._cells(_doc("GCV", [_rule({})]))
+        self.assertIn(cell, (None, ""))
 
     def test_fill_is_scoped_to_the_rules_sub_product(self):
         (cell,) = self._cells(
@@ -109,16 +138,16 @@ class ExportSubclassFillTests(DjangoTestCase):
         self.assertEqual(cell, "Crane,Excavator")
 
     def test_a_resolved_body_is_never_widened(self):
-        (cell,) = self._cells(_doc("GCV", [_rule({"vehicle_sub_class": ["tipper"]})]))
-        self.assertEqual(cell, "tipper")
+        (cell,) = self._cells(_doc("PCV", [_rule({"vehicle_sub_class": ["taxi"]})]))
+        self.assertEqual(cell, "taxi")
 
     def test_a_mixed_bucket_is_left_alone(self):
         # "Not Available" beside real bodies is a genuine enumeration, not an
         # absent dimension — widening it would invent coverage.
         (cell,) = self._cells(
-            _doc("GCV", [_rule({"vehicle_sub_class": ["not-available", "tipper"]})])
+            _doc("PCV", [_rule({"vehicle_sub_class": ["not-available", "taxi"]})])
         )
-        self.assertEqual(cell, "not-available,tipper")
+        self.assertEqual(cell, "not-available,taxi")
 
     def test_unknown_sub_product_leaves_the_sentinel(self):
         (cell,) = self._cells(

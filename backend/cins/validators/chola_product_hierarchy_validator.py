@@ -24,6 +24,13 @@ flagged, since that is missing coverage, not a validity violation. The
 *mandatory-presence* check is not: it needs no master coverage to know that an
 empty ``vehicle_sub_class`` is wrong.
 
+**GCV is exempt from the mandatory-presence check.** A goods-carrying grid
+prices by weight band and publishes no body type, so the transformer clears the
+field outright (``_strip_gcv_subclass``) and absence is the correct shape, not a
+gap. Without the carve-out this HIGH would fire on every GCV rule of every Chola
+document — and a HIGH blocks ``cics_cache.should_cache`` from pinning the
+output, making the carrier's whole CV book permanently un-cacheable.
+
 The master's raw ``vehicle_subclass`` text needs the SAME regex
 substring/word-boundary matching the transformer runs (``_normalize_list_field``),
 not a naive exact-key lookup: the source spells some values without the
@@ -132,6 +139,7 @@ class CholaProductHierarchyValidator:
             if bucket is None:
                 continue  # unclassifiable subproduct — nothing to say about it
 
+            subproduct = product.get("product_subproduct")
             sub_category = (product.get("sub_category") or "").strip()
             sub_product = sub_category if bucket == "CV" else ""
             seg = f"{bucket}/{sub_product}" if sub_product else bucket
@@ -141,11 +149,18 @@ class CholaProductHierarchyValidator:
             # is a defect regardless of whether the master can vouch for this
             # exact (product, sub_product) combination. The validity checks
             # that follow are what need master coverage; this one does not.
+            #
+            # GCV is carved out: a goods-carrying grid has no body dimension at
+            # all (see ``_strip_gcv_subclass``), so absence there is correct
+            # rather than a gap. Gated on ``product_subproduct``, matching the
+            # transformer's own gate — ``sub_category`` is free text.
             missing = [
                 rule.get("rule_id") or "<no rule_id>"
                 for rule in product.get("commission_rules", [])
                 if not (rule.get("conditions") or {}).get("vehicle_sub_class")
             ]
+            if subproduct == "commercial-gcv":
+                missing = []
             if missing:
                 key = (bucket, sub_product, None, "missing")
                 if key not in findings:
