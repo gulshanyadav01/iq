@@ -90,7 +90,13 @@ class CoverageIntegrityTests(TestCase):
         result = self.v.validate(path, {"July pvt car": _PACKAGE_SHEET})
         self.assertFalse(_has_high(result))
 
-    def test_third_party_rule_with_cpa_split_is_high(self):
+    def test_third_party_rule_with_cpa_split_is_clean(self):
+        # Inverted from test_third_party_rule_with_cpa_split_is_high. A CPA-split
+        # third-party pair is the INTENDED output of cpa_split.materialize_cpa_split
+        # since pipeline 1.8.0, so check B was removed rather than downgraded: it
+        # would fire on every affected document, and a HIGH additionally blocks
+        # cics_cache.should_cache from pinning them — making every Chola document
+        # carrying the CPA footnote permanently un-cacheable.
         path = _write_doc(
             [
                 _rule("r1", "third-party", cpa="with-cpa"),
@@ -98,8 +104,9 @@ class CoverageIntegrityTests(TestCase):
             ]
         )
         result = self.v.validate(path, {"July pvt car": _PACKAGE_SHEET})
-        self.assertTrue(_has_high(result))
-        self.assertTrue(any("CPA split" in i.message for i in result.errors))
+        self.assertFalse(_has_high(result))
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.warnings, [])
 
     def test_blank_act_cells_no_false_positive(self):
         # SOD-shaped grid: ACT sub-columns blank/zero -> no ACT-orphan issue even

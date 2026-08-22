@@ -142,6 +142,33 @@ class ExportRendererTests(DjangoTestCase):
         rows = self._rows(ws)
         self.assertEqual(rows[0][cols["TPPercentage"] - 1], 25)
 
+    def test_third_party_split_pair_renders_two_rows_with_labels(self):
+        # End-to-end proof of the reported bug's fix. A clause-carrying TP rule
+        # used to reach the exporter cpa-unconstrained and render ONE row whose
+        # CPA cell read the merged "With CPA,Without CPA" at the undeducted
+        # rate. cpa_split now hands the exporter the two rules below.
+        wb = self._export(
+            _doc(
+                [
+                    _rule("with-cpa", 25, [OVERRIDE_TP], ["third-party"]),
+                    _rule("without-cpa", 23.5, [OVERRIDE_TP], ["third-party"]),
+                ]
+            )
+        )
+        ws = wb["Commission Rules"]
+        cols = self._cols(ws)
+        rows = self._rows(ws)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            [r[cols["CPA"] - 1] for r in rows], ["With CPA", "Without CPA"]
+        )
+        tp = {r[cols["CPA"] - 1]: r[cols["TPPercentage"] - 1] for r in rows}
+        self.assertEqual(tp["With CPA"], 25)
+        self.assertEqual(tp["Without CPA"], 23.5)
+        # TP-based rows pay in neither OD nor Net.
+        for key in ("ODPercentage", "NetPercentage"):
+            self.assertTrue(all(r[cols[key] - 1] == 0 for r in rows), key)
+
     def test_net_rule_routes_to_net_column(self):
         wb = self._export(_doc([_rule(None, 12, None, ["comprehensive"])]))
         ws = wb["Commission Rules"]

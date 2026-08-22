@@ -13,8 +13,25 @@ pipeline mode.
 
 The function is pure and idempotent: a rule that has already been split has an
 explicit ``cpa`` value (and the clause removed), so it is never split again.
+
+The deduction comes off the rule's OWN payout column — od / net / tp — in
+percentage POINTS, not off the premium basis the clause happens to name (the
+footnote is Private-Car-centric and says "OD Pay-out" even on a Net-paying CV
+grid). Third-party rules split and deduct like any other: the footnote reduces
+the BROKER's payout, not the statutory TP premium, so there is no pass-through
+to protect. What differs is only the negative case, and the two policies must
+not be conflated:
+
+* **od / net clamp at 0** (``deduct_pct``) — a 1.5-point deduction on a 0.5%
+  Two Wheeler grade would otherwise emit a negative rate that fails schema
+  validation CRITICAL and takes the whole document down.
+* **tp declines** (``deduct_pct_no_negative``) — the row still bifurcates, but
+  both variants carry the undeducted rate, because a 0% ACT payout is a number
+  the carrier never published while the grid rate at least appears on the grid.
+  The count is logged at WARNING so the frequency stays visible in real data.
 """
 
+import collections
 import json
 import logging
 
@@ -129,7 +146,11 @@ def deduct_pct(v, amount):
     on low-rate rows (e.g. a 1.5% OD-CPA deduction on a 0.5%-1% Two Wheeler
     grade), which would otherwise emit a negative commission that the schema
     validator flags CRITICAL and fails the whole document on. A carrier never
-    pays a negative commission, so the floor is 0."""
+    pays a negative commission, so the floor is 0.
+
+    This is the od / net path only; the tp path uses
+    ``deduct_pct_no_negative``. Do not merge the two — see the module docstring
+    for why they differ."""
     if v is None or v == "":
         return v
     try:
@@ -138,25 +159,59 @@ def deduct_pct(v, amount):
         return v
 
 
-def _split_rule(rule):
+def deduct_pct_no_negative(v, amount):
+    """TP path: subtract `amount` points, or DECLINE when it would go negative.
+
+    Returns ``(value, applied)``. Where ``deduct_pct`` floors an over-large
+    deduction at 0, this one refuses it and hands back the input unchanged: a
+    third-party ACT rate is routinely smaller than the footnote's deduction (a
+    1.5-point deduction against a ~0.3% ACT payout), and flooring those to 0
+    would export a 0% commission deal — a rate the carrier never published, and
+    one a booking system may well read as "no payout at all". Handing back the
+    grid rate is the conservative direction: the row still bifurcates into
+    With-CPA / Without-CPA, the two variants simply carry the same value.
+
+    ``applied`` lets the caller count declines so ``materialize_cpa_split`` can
+    report how often this fires on real documents.
+    """
+    if v is None or v == "":
+        return v, False
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return v, False
+    new = round(f - amount, 4)
+    # Exactly zero is not negative — a rate the deduction consumes precisely is
+    # a real 0%, not an over-large deduction.
+    if new < 0:
+        return v, False
+    return new, True
+
+
+def _split_rule(rule, stats=None):
     """Return [rule] unchanged, or [with_cpa, without_cpa] when it carries a
-    without-cpa conditional_deduction and its own CPA is unconstrained."""
+    without-cpa conditional_deduction and its own CPA is unconstrained.
+
+    ``stats`` is an optional Counter the tp-path deduction reports into; see
+    ``materialize_cpa_split``.
+    """
     import copy
 
     conditions = rule.get("conditions") or {}
     outcome = rule.get("outcome") or {}
 
-    # Third-party / TP-PA rules are a statutory pass-through and are NEVER
-    # CPA-deducted (Chola CPA footnote: "TP/PA-only rules are never deducted").
-    # The deduction path below already refuses to reduce their value (rule_col
-    # is neither "od" nor "net"), but a rule that still carries the CPA clause
-    # would be split into two identical with-cpa/without-cpa variants — pure
-    # duplication that doubles the third-party rule count. Skip the split
-    # entirely for third-party rules so they stay single, cpa-unconstrained.
-    pt = conditions.get("policy_type")
-    pts = pt if isinstance(pt, (list, tuple)) else [pt]
-    if any("third" in str(p).lower() for p in pts if p):
-        return [rule]
+    # NOTE: third-party rules used to be exempted here, on the reasoning that
+    # TP/PA is a statutory pass-through that is never CPA-deducted. That was
+    # wrong about what the footnote deducts: it reduces the BROKER's payout,
+    # not the statutory premium, so a TP rule carrying the clause splits and
+    # deducts like any other. The exemption's visible cost was that such a rule
+    # stayed cpa-unconstrained and exported ONE row labelled the merged
+    # "With CPA,Without CPA" at the UNDEDUCTED rate — overstating the
+    # without-CPA payout by the full deduction on every one of them.
+    #
+    # Only clause-carrying rules split, which is what keeps this Chola-scoped
+    # in practice: no other carrier in the corpus writes the footnote. That is
+    # deliberate — there is no carrier-name check here and there should not be.
 
     dc = cpa_deduction_clause(outcome.get("qualifying_clauses"))
     if dc is None:
@@ -180,15 +235,30 @@ def _split_rule(rule):
         out["qualifying_clauses"] = [
             c for c in (out.get("qualifying_clauses") or []) if _clause_key(c) != dc_key
         ]
-        # The CPA-not-collected deduction reduces the carrier's commission
+        # The CPA-not-collected deduction reduces the broker's commission
         # *payout*, which is whatever column the rule pays in — OD (Private Car
-        # comprehensive) or Net (Commercial Vehicle). The TP/PA column is a
-        # statutory pass-through and is never reduced. So apply the deduction to
-        # the rule's own payout column when it is OD or Net, independent of the
-        # premium basis named in the clause (often a Private-Car-centric "OD
-        # Pay-out"). This fixes CV-Net rules without ever touching TP payouts.
-        if apply_deduction and rule_col in ("od", "net"):
-            out["percentage_value"] = deduct_pct(out.get("percentage_value"), deduction)
+        # comprehensive), Net (Commercial Vehicle) or TP/PA (ACT). So apply it
+        # to the rule's own payout column, independent of the premium basis
+        # named in the clause (often a Private-Car-centric "OD Pay-out").
+        #
+        # The tp branch is tested FIRST, and on `_is_third_party` as well as on
+        # the column: `rule_col` is derived from applied_on, not policy_type, so
+        # a third-party rule carrying no third-party applied_on_override falls
+        # back to outcome.applied_on ("Net Premium") and would otherwise take
+        # the clamp-at-0 path. It is the rule's coverage, not the label on its
+        # premium basis, that makes a 0% floor the wrong answer.
+        if apply_deduction:
+            if _is_third_party(rule) or rule_col == "tp":
+                new, applied = deduct_pct_no_negative(
+                    out.get("percentage_value"), deduction
+                )
+                out["percentage_value"] = new
+                if stats is not None:
+                    stats["tp_deducted" if applied else "tp_skipped_negative"] += 1
+            elif rule_col in ("od", "net"):
+                out["percentage_value"] = deduct_pct(
+                    out.get("percentage_value"), deduction
+                )
         return v
 
     return [variant("with-cpa", False), variant("without-cpa", True)]
@@ -296,18 +366,31 @@ def materialize_cpa_split(cics_doc):
     Mutates and returns `cics_doc`. Idempotent: already-split rules carry an
     explicit cpa value and no clause, so a second pass is a no-op.
 
-    Runs ``drop_mirrored_third_party`` first so fabricated comprehensive->TP
-    duplicates never reach the split (and never get counted/exported).
+    Runs ``drop_mirrored_third_party`` FIRST so fabricated comprehensive->TP
+    duplicates never reach the split (and never get counted/exported). Do not
+    reorder these two: since third-party rules now split, a dedup running after
+    the split would compare a deducted without-cpa value against its
+    comprehensive twin, stop recognising the mirror, and let the fabricated pair
+    through as two rows instead of zero.
     """
     if not isinstance(cics_doc, dict):
         return cics_doc
     drop_mirrored_third_party(cics_doc)
+    stats = collections.Counter()
     for product in cics_doc.get("products") or []:
         rules = product.get("commission_rules")
         if not rules:
             continue
         expanded = []
         for rule in rules:
-            expanded.extend(_split_rule(rule))
+            expanded.extend(_split_rule(rule, stats))
         product["commission_rules"] = expanded
+    if stats["tp_skipped_negative"]:
+        logger.warning(
+            "cpa_split: %d third-party without-CPA row(s) kept UNDEDUCTED because the "
+            "deduction exceeds the TP payout (%d TP row(s) deducted normally). Both "
+            "CPA variants export the same rate for those rows.",
+            stats["tp_skipped_negative"],
+            stats["tp_deducted"],
+        )
     return cics_doc

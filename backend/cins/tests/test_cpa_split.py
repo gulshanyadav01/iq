@@ -3,9 +3,14 @@ Tests for CPA-deduction row materialization (cins.processors.core.cpa_split).
 
 A rule with no explicit CPA condition that carries a without-cpa
 conditional_deduction clause is expanded at transform time into two rules:
-With-CPA at payout x and Without-CPA at x minus the deduction (only when the
-rule's commission column matches the clause's applied_on basis). The clause is
-removed from both variants.
+With-CPA at payout x and Without-CPA at x minus the deduction. The deduction
+comes off the rule's OWN payout column (od / net / tp), not off the premium
+basis the clause names. The clause is removed from both variants.
+
+Third-party rules split too. The negative case is where od/net and tp diverge,
+and these tests pin both halves: od/net CLAMP at 0 (`deduct_pct`), while tp
+DECLINES and exports the undeducted rate on both variants
+(`deduct_pct_no_negative`).
 
 Run from the backend container:
     python manage.py test cins.tests.test_cpa_split -v 2
@@ -18,6 +23,7 @@ from cins.processors.core.cpa_split import (
     applied_on_to_column,
     cpa_deduction_clause,
     deduct_pct,
+    deduct_pct_no_negative,
     derive_applied_on,
     drop_mirrored_third_party,
     materialize_cpa_split,
@@ -117,6 +123,22 @@ class HelperTests(TestCase):
         self.assertEqual(deduct_pct(0.5, 1.5), 0.0)
         self.assertEqual(deduct_pct(1.5, 1.5), 0.0)
 
+    def test_deduct_pct_no_negative(self):
+        # The tp counterpart of deduct_pct: it DECLINES an over-large deduction
+        # rather than flooring it, so the caller can export the grid rate on
+        # both CPA variants instead of a 0% the carrier never published.
+        self.assertEqual(deduct_pct_no_negative(30, 1.5), (28.5, True))
+        # Exactly zero is not negative — a rate the deduction consumes
+        # precisely is a real 0%, and IS applied.
+        self.assertEqual(deduct_pct_no_negative(1.5, 1.5), (0.0, True))
+        # Over-large: input handed straight back, applied=False.
+        self.assertEqual(deduct_pct_no_negative(1.0, 1.5), (1.0, False))
+        self.assertEqual(deduct_pct_no_negative(0.3, 1.5), (0.3, False))
+        # Non-numeric passes through, and never counts as applied.
+        self.assertEqual(deduct_pct_no_negative(None, 1.5), (None, False))
+        self.assertEqual(deduct_pct_no_negative("", 1.5), ("", False))
+        self.assertEqual(deduct_pct_no_negative("n/a", 1.5), ("n/a", False))
+
 
 class MaterializeTests(TestCase):
     def test_comprehensive_splits_and_deducts_on_od(self):
@@ -183,21 +205,134 @@ class MaterializeTests(TestCase):
         materialize_cpa_split(doc)
         self.assertEqual(len(doc["products"][0]["commission_rules"]), 1)
 
-    def test_third_party_not_split(self):
-        # TP/PA payout is a statutory pass-through — never CPA-deducted. A TP
-        # rule that still carries the CPA clause must NOT be split: splitting it
-        # would emit two identical with-cpa/without-cpa variants (the deduction
-        # is a no-op on the TP column), doubling the third-party rule count.
-        # Regression: Chola doc dbe5b4ea emitted third-party 24 -> 48 this way.
+    def test_third_party_splits_and_deducts_on_tp(self):
+        # Inverted from the old test_third_party_not_split, which asserted TP
+        # rules stay single because "TP/PA payout is a statutory pass-through".
+        # That was wrong about what the footnote deducts: it reduces the
+        # BROKER's payout, not the statutory TP premium, so there is no
+        # pass-through to protect and a TP rule splits like any other.
+        #
+        # The incident that test cited (Chola doc dbe5b4ea, third-party
+        # 24 -> 48 rules) is the CORRECT count now: 24 TP grid cells that each
+        # price two commercially different deals (CPA collected / not collected)
+        # are 48 exportable deals. The single row it preserved exported the
+        # merged label "With CPA,Without CPA" at the UNDEDUCTED rate, which
+        # overstated the without-CPA payout by the full deduction on every one.
         doc = _doc(
             [_rule(None, 25, [OVERRIDE_OD, OVERRIDE_TP, CPA_CLAUSE], ["third-party"])]
         )
         materialize_cpa_split(doc)
         rules = _rules(doc)
+        self.assertEqual(len(rules), 2)
+        by_cpa = {r["conditions"]["cpa"]: r for r in rules}
+        self.assertEqual(by_cpa["with-cpa"]["outcome"]["percentage_value"], 25)
+        self.assertEqual(by_cpa["without-cpa"]["outcome"]["percentage_value"], 23.5)
+        for r in rules:
+            types = [c["clause_type"] for c in r["outcome"]["qualifying_clauses"]]
+            self.assertNotIn("conditional_deduction", types)
+
+    def test_third_party_without_clause_not_split(self):
+        # Only CLAUSE-carrying rules split. This is what keeps the change
+        # Chola-scoped in practice without a carrier-name check anywhere: no
+        # other carrier in the corpus writes the CPA footnote.
+        doc = _doc([_rule(None, 25, [OVERRIDE_TP], ["third-party"])])
+        materialize_cpa_split(doc)
+        rules = _rules(doc)
         self.assertEqual(len(rules), 1)
         self.assertEqual(rules[0]["outcome"]["percentage_value"], 25)
-        # Left cpa-unconstrained (single rule, no with/without split).
         self.assertIsNone(rules[0]["conditions"].get("cpa"))
+
+    def test_third_party_negative_deduction_exports_undeducted_on_both(self):
+        # A ~1% ACT payout cannot absorb a 1.5-point deduction. The row still
+        # bifurcates (that is the whole point of the change), but flooring the
+        # without-CPA variant to 0 would export a rate the carrier never
+        # published, so BOTH variants carry the grid rate.
+        doc = _doc(
+            [_rule(None, 1.0, [OVERRIDE_OD, OVERRIDE_TP, CPA_CLAUSE], ["third-party"])]
+        )
+        materialize_cpa_split(doc)
+        rules = _rules(doc)
+        self.assertEqual(len(rules), 2)
+        by_cpa = {r["conditions"]["cpa"]: r for r in rules}
+        self.assertEqual(by_cpa["with-cpa"]["outcome"]["percentage_value"], 1.0)
+        self.assertEqual(by_cpa["without-cpa"]["outcome"]["percentage_value"], 1.0)
+
+    def test_third_party_negative_deduction_logs_warning(self):
+        # The decline is silent in the output (both rows look like an ordinary
+        # undeducted pair), so the log is the only signal of how often it fires
+        # on real documents. Keep it.
+        doc = _doc(
+            [_rule(None, 1.0, [OVERRIDE_OD, OVERRIDE_TP, CPA_CLAUSE], ["third-party"])]
+        )
+        with self.assertLogs("cins.cpa_split", level="WARNING") as cm:
+            materialize_cpa_split(doc)
+        self.assertIn("kept UNDEDUCTED", cm.output[0])
+        self.assertIn("1 third-party", cm.output[0])
+
+    def test_third_party_net_applied_on_still_declines(self):
+        # rule_col comes from applied_on, NOT policy_type: a third-party rule
+        # with no third-party applied_on_override falls back to "Net Premium"
+        # and would take the od/net clamp path if the branch keyed on the column
+        # alone. It is the rule's COVERAGE that makes a 0% floor wrong, so the
+        # tp branch tests _is_third_party too.
+        doc = _doc([_rule(None, 1.0, [CPA_CLAUSE], ["third-party"])])
+        materialize_cpa_split(doc)
+        rules = _rules(doc)
+        self.assertEqual(len(rules), 2)
+        by_cpa = {r["conditions"]["cpa"]: r for r in rules}
+        self.assertEqual(by_cpa["without-cpa"]["outcome"]["percentage_value"], 1.0)
+
+    def test_od_negative_deduction_still_clamps_at_zero(self):
+        # The tp no-negative rule must NOT leak into the od/net path: a 1.5-point
+        # deduction on a 0.5%-1% Two Wheeler comprehensive grade still floors at
+        # 0, which is what keeps a negative rate out of schema validation.
+        doc = _doc(
+            [
+                _rule(
+                    None, 1.0, [OVERRIDE_OD, OVERRIDE_TP, CPA_CLAUSE], ["comprehensive"]
+                )
+            ]
+        )
+        materialize_cpa_split(doc)
+        by_cpa = {r["conditions"]["cpa"]: r for r in _rules(doc)}
+        self.assertEqual(by_cpa["without-cpa"]["outcome"]["percentage_value"], 0.0)
+
+    def test_third_party_notes_fallback_splits(self):
+        # The notes fallback (_cpa_clause_from_notes) must reach the TP path too
+        # — Chola CV/ACT grids carry the footnote only in other_conditions.
+        rule = {
+            "rule_id": "act",
+            "conditions": {
+                "deal_parameter": "net",
+                "cpa": None,
+                "policy_type": ["third-party"],
+            },
+            "outcome": {
+                "commission_type": "percentage",
+                "percentage_value": 27.5,
+                "applied_on": "Net Premium",
+                "other_conditions": (
+                    "if CPA is not collected for individual name then 1.5% of "
+                    "Net Payout will be deducted"
+                ),
+            },
+        }
+        doc = {"products": [{"product_name": "CV", "commission_rules": [rule]}]}
+        materialize_cpa_split(doc)
+        rules = doc["products"][0]["commission_rules"]
+        self.assertEqual(len(rules), 2)
+        by_cpa = {r["conditions"]["cpa"]: r for r in rules}
+        self.assertEqual(by_cpa["with-cpa"]["outcome"]["percentage_value"], 27.5)
+        self.assertEqual(by_cpa["without-cpa"]["outcome"]["percentage_value"], 26.0)
+
+    def test_third_party_split_is_idempotent(self):
+        doc = _doc(
+            [_rule(None, 25, [OVERRIDE_OD, OVERRIDE_TP, CPA_CLAUSE], ["third-party"])]
+        )
+        materialize_cpa_split(doc)
+        once = copy.deepcopy(doc)
+        materialize_cpa_split(doc)
+        self.assertEqual(doc, once)
 
     def test_cv_net_splits_and_deducts_on_net(self):
         # Fix ii: a Commercial-Vehicle Net rule carrying the CPA clause must
@@ -313,6 +448,23 @@ class MirrorDedupTests(TestCase):
                 _cov_rule("t1", "third-party", 42.5),
             ]
         )
+        materialize_cpa_split(doc)
+        tp = [
+            r
+            for r in doc["products"][0]["commission_rules"]
+            if r["conditions"]["policy_type"] == ["third-party"]
+        ]
+        self.assertEqual(len(tp), 0)
+
+    def test_dedup_still_runs_before_split_for_clause_carrying_tp(self):
+        # Ordering guard. Now that third-party rules DO split, running the dedup
+        # after the split would compare a deducted without-cpa value against its
+        # comprehensive twin, stop recognising the mirror, and let a fabricated
+        # pair through as TWO rows instead of zero. Dedup runs first, so a
+        # fabricated TP rule is deleted even when it carries the CPA clause.
+        t1 = _cov_rule("t1", "third-party", 42.5)
+        t1["outcome"]["qualifying_clauses"] = [CPA_CLAUSE]
+        doc = _cov_doc([_cov_rule("c1", "comprehensive", 42.5), t1])
         materialize_cpa_split(doc)
         tp = [
             r
