@@ -119,6 +119,20 @@ Repo-wide `pnpm lint` is red on arrival (pre-existing violations in legacy files
 lints diff-scoped only, so lint just the files you changed:
 `cd web && pnpm exec eslint <paths>`.
 
+## Branching
+
+Two long-lived branches, and **`dev` is the integration branch — never open a PR against
+`main`.** `origin/HEAD` points at `dev`.
+
+| Branch | Role |
+| ------ | ---- |
+| `dev`  | Integration / default. Branch off it, diff against `origin/dev`, and open every PR with `gh pr create --base dev` |
+| `main` | **Production deployment branch.** Advanced by promoting `dev`, not by feature PRs |
+
+There is no `master`. Claude Code's session preamble reports `master` as the main branch,
+which is wrong on both counts — the branch does not exist, and the repo's PR target is
+`dev` regardless. Do not trust a tool's guess at the default here.
+
 ## Git Hooks
 
 - Husky pre-commit hooks configured (`.husky/`)
