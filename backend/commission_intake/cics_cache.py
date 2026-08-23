@@ -204,7 +204,74 @@ def _env_int(name: str, default: int) -> int:
 #         drop rows the guard was already written to drop.
 #         Cached documents must re-extract or they keep serving the per-body
 #         MISC-D rows, the bare "renewal" cell and the phantom auto-rickshaws.
-# 1.11.0 - The two upper Chola PCV seating bands were attached to the OPPOSITE
+#   1.11.0 — CC/GVW range boundaries are inclusive on both ends again.
+#         Two regressions and one long-standing gap, all producing overlapping
+#         or degenerate bands ("150cc to 150cc") in the export:
+#         (a) An EXCLUSIVE lower bound is now made inclusive at parse time —
+#         _parse_range_field(strict_bounds=True) turns "> 150" / "ABOVE 1500 CC"
+#         into 151 / 1501 (">=" is untouched), and _recover_cc_range's GT slug
+#         arm returns (N+1, 99999). Previously that +1 happened ONLY in the
+#         de-overlap passes, which need a sibling rung in a compatible group as
+#         evidence — so an isolated ">150cc" rule shipped overlapping the
+#         "UPTO 150 CC" rule by one point. Applied to cc and gvw only: seating
+#         deliberately reads "ABOVE 6" as (6, 99), and NCB owns its own GT/GTE
+#         parser.
+#         (b) A THIRD _normalize_boundary_overlaps pass runs after
+#         _strip_gcv_subclass and the final collapse. Both earlier passes group
+#         by all non-range conditions, vehicle_sub_class included, so a GCV
+#         weight ladder whose rungs differ ONLY by body word was one singleton
+#         group per body and was never walked — it exported its shared
+#         boundaries verbatim. The strip (1.9.0) is what makes those rungs
+#         siblings, and nothing ran after it.
+#         (c) _dedupe_range_overlaps walks DISTINCT BANDS, not rules. A rung of
+#         a ladder is routinely several rules — a grid column is published once
+#         per make and per rate, and vehicle_make/vehicle_model are excluded
+#         from the group key — and walking rules normalised only the FIRST rule
+#         of each rung: the second (150,150) hit start <= prev_end with prev_end
+#         already 150, the bump to 151 would have inverted the range, and the
+#         invert-guard let it ship as the point band. This was the bulk of the
+#         reported defect: on Chola May'26 doc b6b085b3, 538 Two Wheeler rules
+#         stuck at (150,150) and 650 at (350,350), with exactly one rule per
+#         rung coming out right.
+#         (d) A cc/GVW band still collapsed to a point after all three passes is
+#         now reported as a MEDIUM (never HIGH — a HIGH would block the cache
+#         pin over one unresolved grid header) rather than silently exported.
+#         Cached documents must re-extract or they keep serving the overlapping
+#         bands. Expect boundary shifts of ±1 on affected deals; no rule is
+#         added or dropped, so CINS_REGRESSION_GUARD should not fire.
+#   1.12.0 — parse_cc_range no longer eats the lower bound of an underscore-
+#         separated CC BAND. The Chola TW grid spells its middle column
+#         "150_350CC" (the sheet uses "_" where other grids write "-"), and the
+#         leading-ordinal strip added for the PCCV slugs ("2_4W_LT_1500CC")
+#         treated that "150" as an enumeration index — collapsing the column to
+#         the point "350", which then collided with the "350cc" column. That
+#         left the ladder as TWO NON-ADJACENT SINGLETONS, (150,150) and
+#         (350,350), with the middle rung gone: no adjacent boundary anywhere,
+#         so the de-overlap passes correctly declined to touch them and the
+#         grid exported "150cc to 150cc" / "350cc to 350cc". This was the
+#         remaining half of the defect after 1.11.0 — the walk was right, but
+#         the ladder handed to it had a hole in the middle. The ordinal is now
+#         stripped only when the slug carries a non-numeric token (4W/LT/GT) or
+#         when three or more numbers make a band impossible ("1_150_350CC").
+#         Cached documents must re-extract; TW cc bands move from two point
+#         bands to the full 0-150 / 151-350 / 351-99999 ladder.
+#   1.13.0 — _normalize_boundary_overlaps compares the OTHER range dimensions
+#         by OVERLAP, not equality, and no longer skips single-rule groups.
+#         _DEDUPE_RANGES is walked one dimension at a time and each dimension's
+#         group key holds the others' CURRENT values, so a rule un-bumped on TWO
+#         dimensions at once was invisible on both: on the cc walk its NOP
+#         (100,500) matched no sibling's (101,500), and on the NOP walk its cc
+#         (150,350) matched no sibling's (151,350). Each waited for the other
+#         and neither moved. Two overlapping bands describe the same region of
+#         the same ladder; non-overlapping ones (0-150 vs 151-350) stay separate
+#         contexts, and the bump is still gated on a real shared tier edge. The
+#         size guard went with it — evidence comes from every compatible key, so
+#         a singleton group is a legitimate candidate, and a stuck rule's unique
+#         un-normalized band is exactly what makes its group a singleton.
+#         Last 18 Two Wheeler rules on Chola May'26 doc b6b085b3; replaying the
+#         pass over that document moves those 18 on both dimensions and nothing
+#         else, in any product.
+# 1.14.0 - The two upper Chola PCV seating bands were attached to the OPPOSITE
 #         bodies. The client's spec is: 0-5 seats is a Normal Taxi (split further
 #         by CC), 6-12 a Maxi Cab, 13-16 a Big Taxi. _PCV_MAXI_CAB_SEATING held
 #         (13, 16) and _PCV_BIG_TAXI_SEATING held (6, 12), so every Maxi Cab deal
@@ -273,7 +340,7 @@ def _env_int(name: str, default: int) -> int:
 #         document keeps serving the short list until it re-extracts.
 #         Cached documents must re-extract or they keep serving the swapped
 #         seating columns, the (6, 99) sentinel and the mirrored Big Taxis.
-CICS_PIPELINE_VERSION = "1.11.0"
+CICS_PIPELINE_VERSION = "1.14.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"

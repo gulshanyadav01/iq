@@ -198,10 +198,34 @@ def parse_cc_range(header):
     # are left untouched, then honour the LT / GT qualifier as an explicit
     # lower-/upper-open band. Without this the indiscriminate digit extraction
     # below folds the ordinal/wheel digits into the range (e.g. "2-4" garbage).
+    #
+    # The leading-ordinal strip must NOT fire on a purely numeric band. The
+    # Chola TW grid spells its middle column "150_350CC" — underscore-separated
+    # because the sheet uses "_" where other grids write "-" — and there the
+    # leading "150" is the band's LOWER BOUND, not an enumeration index.
+    # Stripping it collapsed the column to the point "350", which then collided
+    # with the "350cc" column and left the ladder as two non-adjacent singletons
+    # ("150cc to 150cc" / "350cc to 350cc") that the de-overlap passes correctly
+    # refuse to touch — there is no adjacent rung left to prove the boundary.
+    # A real CC band never has more than two numbers, so: strip the leading
+    # digit token only when the slug also carries a NON-numeric token (the
+    # wheel/LT/GT qualifiers of "2_4W_LT_1500CC") or when two or more numeric
+    # tokens FOLLOW it — which makes three in total, one too many for a band,
+    # so the first is an ordinal ("1_150_350CC" -> "150-350").
     if "_" in h:
         slug_toks = [t for t in h.split("_") if t.strip()]
+
+        def _is_num_tok(t):
+            s = t.strip()
+            return s != "" and all(c.isdigit() or c == "." for c in s) and any(
+                c.isdigit() for c in s
+            )
+
         if slug_toks and slug_toks[0].strip().isdigit():
-            slug_toks = slug_toks[1:]
+            rest = slug_toks[1:]
+            numeric_rest = [t for t in rest if _is_num_tok(t)]
+            if len(numeric_rest) != len(rest) or len(numeric_rest) >= 2:
+                slug_toks = rest
         slug_toks = [t for t in slug_toks if t.strip().upper() not in ("3W", "4W")]
         upper_toks = [t.strip().upper() for t in slug_toks]
         if "LT" in upper_toks:

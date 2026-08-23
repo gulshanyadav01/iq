@@ -15,11 +15,17 @@ Run from the backend container:
 from types import SimpleNamespace
 from unittest import TestCase
 
+from cins.processors.core.code_gen_executor import _SANDBOX_HELPERS
 from cins.processors.core.raw_to_cics_transformer import RawToCICSTransformer
 from cins.schema.cics_model import (
     CommissionOutcome,
     CommissionRule,
     RuleConditions,
+)
+from cins.schema.raw_extraction import (
+    RawCommissionEntry,
+    RawExtraction,
+    RawProviderInfo,
 )
 
 
@@ -899,9 +905,14 @@ class GVWRecoveryTests(TestCase):
             self.t._recover_gvw_range({"subclass": "3_3.5T_TO_7.5T"}, self.raw),
             (3500, 7500),
         )
+        # "ABOVE 47T" is EXCLUSIVE, and the rung below it ends at 47000 — so the
+        # open band starts at 47001, not 47000. _recover_gvw_range parses with
+        # strict_bounds=True; previously it returned 47000 and relied on the
+        # de-overlap pass to bump it, which only fires when the 40T-47T sibling
+        # happens to share a group.
         self.assertEqual(
             self.t._recover_gvw_range({"subclass": "10_ABOVE_47T"}, self.raw),
-            (47000, 999999),
+            (47001, 999999),
         )
 
     def test_recover_from_canonical_key(self):
@@ -1083,3 +1094,428 @@ class BoundaryNormalizationTests(TestCase):
         by_id = {r.rule_id: r for r in rules}
         self.assertEqual(by_id["F1"].conditions.cc_start_range, 0)
         self.assertEqual(by_id["F2"].conditions.cc_start_range, 0)
+
+
+class PointBandFlagTests(TestCase):
+    """A cc/GVW band still collapsed to a point after all three passes is
+    REPORTED, not repaired.
+
+    "150cc" means (0, 150) in a ladder whose next column is "150_350cc" and
+    (151, 99999) in one whose previous column is "UPTO 150 CC". Both boundary
+    passes already widen it whenever a sibling column supplies that evidence;
+    when none does, guessing would silently misprice a deal."""
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+
+    def test_lone_cc_point_band_is_flagged(self):
+        rules = [_make_rule("R1", 10, cc_start_range=150, cc_end_range=150)]
+        self.t._flag_point_bands(rules, "Two Wheeler")
+        self.assertEqual(len(self.t.warnings), 1)
+        self.assertIn("Unresolved cc point band", self.t.warnings[0])
+        self.assertIn("R1", self.t.warnings[0])
+        # Reported, not repaired.
+        self.assertEqual(rules[0].conditions.cc_start_range, 150)
+
+    def test_gvw_point_band_is_flagged(self):
+        rules = [_make_rule("R1", 10, gvw_start_range=3500, gvw_end_range=3500)]
+        self.t._flag_point_bands(rules, "Commercial Vehicle")
+        self.assertEqual(len(self.t.warnings), 1)
+        self.assertIn("Unresolved GVW point band", self.t.warnings[0])
+
+    def test_sentinels_and_real_bands_are_not_flagged(self):
+        rules = [
+            # (0, 0) is the "no GVW filter" sentinel, not a zero-width band.
+            _make_rule("R1", 10, gvw_start_range=0, gvw_end_range=0),
+            _make_rule("R2", 20, cc_start_range=0, cc_end_range=99999),
+            _make_rule("R3", 30, cc_start_range=151, cc_end_range=350),
+        ]
+        self.t._flag_point_bands(rules, "Two Wheeler")
+        self.assertEqual(self.t.warnings, [])
+
+    def test_promoted_ladder_leaves_nothing_to_flag(self):
+        # The Chola TW three-bucket ladder: once _dedupe_range_overlaps has run,
+        # no point band survives, so the flag must stay silent.
+        rules = [
+            _make_rule("R1", 10, cc_start_range=150, cc_end_range=150),
+            _make_rule("R2", 20, cc_start_range=150, cc_end_range=350),
+            _make_rule("R3", 30, cc_start_range=350, cc_end_range=350),
+        ]
+        self.t._dedupe_range_overlaps(rules)
+        self.t._flag_point_bands(rules, "Two Wheeler")
+        self.assertEqual([r.conditions.cc_start_range for r in rules], [0, 151, 351])
+        self.assertEqual(self.t.warnings, [])
+
+    def test_many_offenders_are_summarised(self):
+        rules = [
+            _make_rule(f"R{i}", i, cc_start_range=150, cc_end_range=150)
+            for i in range(1, 9)
+        ]
+        self.t._flag_point_bands(rules, "Two Wheeler")
+        self.assertEqual(len(self.t.warnings), 1)
+        self.assertIn("on 8 rule(s)", self.t.warnings[0])
+        self.assertIn("(+3 more)", self.t.warnings[0])
+
+
+class LateMutationLadderTests(TestCase):
+    """The boundary passes group rules by all their NON-range conditions,
+    vehicle_sub_class included — so a GCV weight ladder whose rungs are told
+    apart ONLY by a body word is one singleton group per body, and neither
+    earlier pass can see the pair. _strip_gcv_subclass then nulls the body,
+    which is what makes them siblings, and until the third pass was added
+    nothing ran after it: the rungs exported their shared boundary verbatim."""
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+
+    def _make_raw(self, entries):
+        return RawExtraction(
+            document_type="commission_grid",
+            source_type="excel",
+            provider=RawProviderInfo(name="Test Insurer"),
+            start_date="2024-01-01",
+            end_date="2024-03-31",
+            commission_entries=entries,
+        )
+
+    def test_gcv_ladder_split_by_subclass_is_monotonic_after_the_strip(self):
+        # Two GVW rungs sharing the boundary 3500, told apart ONLY by a body
+        # word. The body must be carried in conditions["vehicle_sub_class"] —
+        # that is the field the group key reads. Reaching the strip at
+        # (0,3500) / (3500,7500) is the precondition this test exists for;
+        # remove the third pass and the second rung stays at 3500.
+        entries = [
+            RawCommissionEntry(
+                rule_text="GCCV 4W tipper upto 3.5T",
+                commission_value="10%",
+                product_name="Commercial Vehicle",
+                product_type="GCV",
+                conditions={"vehicle_sub_class": "TIPPER", "gvw": "UPTO 3.5T"},
+                source_section="1_GCCV_4W",
+            ),
+            RawCommissionEntry(
+                rule_text="GCCV 4W tanker 3.5T to 7.5T",
+                commission_value="12%",
+                product_name="Commercial Vehicle",
+                product_type="GCV",
+                conditions={"vehicle_sub_class": "TANKER", "gvw": "3.5T TO 7.5T"},
+                source_section="1_GCCV_4W",
+            ),
+        ]
+        product = self.t._transform_product(
+            "Commercial Vehicle", entries, None, self._make_raw(entries)
+        )
+        bands = sorted(
+            (r.conditions.gvw_start_range, r.conditions.gvw_end_range)
+            for r in product.commission_rules
+        )
+        self.assertEqual(bands, [(0, 3500), (3501, 7500)])
+
+    def test_cv_ladder_split_by_renewal_rollover_widening_is_monotonic(self):
+        # business_type is also a group-key field, and _imply_rollover_on_renewal
+        # rewrites it — but it runs BEFORE the first dedupe, so by grouping time
+        # a rung spelled "renewal" and one spelled "renewal, rollover" have
+        # converged and share a key. This pins that ordering: move the widening
+        # after the dedupe and these two rungs split into singleton groups and
+        # keep their shared 3500 boundary.
+        entries = [
+            RawCommissionEntry(
+                rule_text="GCCV 4W renewal upto 3.5T",
+                commission_value="10%",
+                product_name="Commercial Vehicle",
+                product_type="GCV",
+                customer_type_text="renewal",
+                conditions={"gvw": "UPTO 3.5T"},
+                source_section="1_GCCV_4W",
+            ),
+            RawCommissionEntry(
+                rule_text="GCCV 4W renewal/rollover 3.5T to 7.5T",
+                commission_value="12%",
+                product_name="Commercial Vehicle",
+                product_type="GCV",
+                customer_type_text="renewal, rollover",
+                conditions={"gvw": "3.5T TO 7.5T"},
+                source_section="1_GCCV_4W",
+            ),
+        ]
+        product = self.t._transform_product(
+            "Commercial Vehicle", entries, None, self._make_raw(entries)
+        )
+        bands = sorted(
+            (r.conditions.gvw_start_range, r.conditions.gvw_end_range)
+            for r in product.commission_rules
+        )
+        self.assertEqual(bands, [(0, 3500), (3501, 7500)])
+
+    def test_isolated_above_cc_rule_starts_at_the_next_integer(self):
+        # The case no amount of re-running the evidence-gated passes can fix:
+        # ONE rule, no sibling rung anywhere. ">150cc" is exclusive, so it must
+        # start at 151 — otherwise it overlaps a "UPTO 150 CC" rule published on
+        # some other sheet of the same document.
+        entries = [
+            RawCommissionEntry(
+                rule_text="TW above 150cc",
+                commission_value="10%",
+                product_name="Two Wheeler",
+                product_type="2W",
+                conditions={"cc": "ABOVE 150 CC"},
+            ),
+        ]
+        product = self.t._transform_product(
+            "Two Wheeler", entries, None, self._make_raw(entries)
+        )
+        self.assertEqual(len(product.commission_rules), 1)
+        cond = product.commission_rules[0].conditions
+        self.assertEqual((cond.cc_start_range, cond.cc_end_range), (151, 99999))
+
+
+class DedupeMultiRuleRungTests(TestCase):
+    """A rung of the ladder is routinely MORE THAN ONE RULE, and the walk has
+    to normalise it as a unit.
+
+    A grid column is published once per make and per rate, and
+    vehicle_make/vehicle_model are deliberately excluded from the group key —
+    so the Chola TW ladder arrives as several rules on "150cc", one on
+    "150_350cc" and several on "350cc", all in ONE group. Walking rules
+    directly fixed the first rule of each rung and left every sibling behind:
+    the second (150,150) hit ``start <= prev_end`` with prev_end already 150,
+    the bump to 151 would have inverted the range, the invert-guard skipped it,
+    and it shipped as the point band "150cc to 150cc"."""
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+
+    def _ladder(self, spec):
+        rules = []
+        for i, (s, e) in enumerate(spec):
+            rules.append(
+                _make_rule(
+                    f"R{i}",
+                    i,
+                    state=["andhra-pradesh"],
+                    vehicle_sub_class=["bike"],
+                    vehicle_make=[f"MAKE{i}"],
+                    cc_start_range=s,
+                    cc_end_range=e,
+                )
+            )
+        return rules
+
+    def test_chola_tw_rung_multiplicity_from_doc_b6b085b3(self):
+        # The real shape: 3 rules on "150cc", 1 on "150_350cc", 7 on "350cc".
+        # Old behaviour left 2 of the 150s and 6 of the 350s as point bands.
+        rules = self._ladder(
+            [(150, 150)] * 3 + [(150, 350)] + [(350, 350)] * 7,
+        )
+        self.t._dedupe_range_overlaps(rules)
+        bands = sorted(
+            (r.conditions.cc_start_range, r.conditions.cc_end_range) for r in rules
+        )
+        self.assertEqual(bands, [(0, 150)] * 3 + [(151, 350)] + [(351, 99999)] * 7)
+
+    def test_every_rule_on_a_rung_moves_together(self):
+        rules = self._ladder([(0, 1000), (0, 1000), (1000, 1500), (1000, 1500)])
+        self.t._dedupe_range_overlaps(rules)
+        starts = [r.conditions.cc_start_range for r in rules]
+        self.assertEqual(starts, [0, 0, 1001, 1001])
+
+    def test_single_rung_repeated_is_left_alone(self):
+        # One distinct band cannot overlap itself, however many rules carry it —
+        # and it must NOT be floor-promoted by treating a duplicate as "the next
+        # rung", which is what walking rules used to do.
+        rules = self._ladder([(150, 150), (150, 150), (150, 150)])
+        self.t._dedupe_range_overlaps(rules)
+        bands = [
+            (r.conditions.cc_start_range, r.conditions.cc_end_range) for r in rules
+        ]
+        self.assertEqual(bands, [(150, 150)] * 3)
+
+
+class CholaTwLadderEndToEndTests(TestCase):
+    """The client-stated contract for the Chola TW cc ladder, in ONE place:
+
+        150cc      -> 0 - 150
+        150_350CC  -> 151 - 350
+        350cc      -> 351 - 99999
+
+    Every other test here covers one half — the sandbox helper's header parse
+    (test_sandbox_helpers.ParseCcRangeUnderscoreBandTests) or the band walk
+    (DedupeMultiRuleRungTests). This runs the whole chain, so a regression in
+    EITHER half fails it: grid header -> parse_cc_range -> _parse_range_field
+    -> _dedupe_range_overlaps -> _normalize_boundary_overlaps."""
+
+    HEADERS = ("150cc", "150_350CC", "350cc")
+    EXPECTED = [(0, 150), (151, 350), (351, 99999)]
+
+    @classmethod
+    def setUpClass(cls):
+        ns: dict = {}
+        exec(compile(_SANDBOX_HELPERS, "<helpers>", "exec"), ns)
+        cls.parse_cc_range = staticmethod(ns["parse_cc_range"])
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+
+    def _band(self, header):
+        start, end = self.t._parse_range_field(
+            self.parse_cc_range(header), strict_bounds=True
+        )
+        return (0 if start is None else start, 99999 if end is None else end)
+
+    def _walk(self, counts):
+        rules, i = [], 0
+        for header, n in zip(self.HEADERS, counts):
+            start, end = self._band(header)
+            for _ in range(n):
+                i += 1
+                rules.append(
+                    _make_rule(
+                        f"R{i}",
+                        i,
+                        state=["andhra-pradesh"],
+                        vehicle_sub_class=["bike"],
+                        vehicle_make=[f"MAKE{i}"],
+                        cc_start_range=start,
+                        cc_end_range=end,
+                    )
+                )
+        self.t._dedupe_range_overlaps(rules)
+        self.t._normalize_boundary_overlaps(rules)
+        return rules
+
+    def test_one_rule_per_column(self):
+        rules = self._walk((1, 1, 1))
+        bands = [
+            (r.conditions.cc_start_range, r.conditions.cc_end_range) for r in rules
+        ]
+        self.assertEqual(bands, self.EXPECTED)
+
+    def test_real_rung_multiplicity_from_doc_b6b085b3(self):
+        # 3 makes on the low column, 1 on the middle, 7 on the high one. Every
+        # rule of a rung must land on that rung's band, not just the first.
+        counts = (3, 1, 7)
+        rules = self._walk(counts)
+        bands = [
+            (r.conditions.cc_start_range, r.conditions.cc_end_range) for r in rules
+        ]
+        expected = [b for b, n in zip(self.EXPECTED, counts) for _ in range(n)]
+        self.assertEqual(bands, expected)
+
+    def test_no_point_band_survives(self):
+        rules = self._walk((3, 1, 7))
+        self.t._flag_point_bands(rules, "Two Wheeler")
+        self.assertEqual(self.t.warnings, [])
+
+    def test_the_three_columns_stay_three_distinct_rungs(self):
+        # The middle column collapsing onto "350cc" is what removed the
+        # ladder's evidence and produced "150cc to 150cc" / "350cc to 350cc".
+        self.assertEqual(len({self._band(h) for h in self.HEADERS}), 3)
+
+
+class BoundaryDeadlockTests(TestCase):
+    """A rule un-bumped on TWO range dimensions at once used to be invisible on
+    both, because each dimension's group key holds the others' CURRENT values.
+
+    `_DEDUPE_RANGES` is walked one dimension at a time. A rule whose cc is still
+    (150,350) and whose NOP is still (100,500) matches no sibling on the cc walk
+    (their NOP already reads (101,500)) and none on the NOP walk (their cc
+    already reads (151,350)). Each dimension waits for the other; neither moves.
+    Range slots in the boundary key therefore compare by OVERLAP, not equality.
+
+    Measured on Chola May'26 doc b6b085b3: 18 Two Wheeler rules stuck at
+    cc (150,350) + NOP (100,500) after every other rule had converged."""
+
+    def setUp(self):
+        self.t = RawToCICSTransformer()
+
+    def _doc(self):
+        # Distinct states so _dedupe_range_overlaps cannot group them — the
+        # per-group walk is exactly what has no adjacent rung here (the grid
+        # has a "150_350cc" cell for this make but no "150cc" cell).
+        return [
+            # Supplies the cc tier edge at 150.
+            _make_rule(
+                "CC_EDGE",
+                10,
+                state=["gujarat"],
+                cc_start_range=0,
+                cc_end_range=150,
+                policies_count_start_range=101,
+                policies_count_end_range=500,
+            ),
+            # Supplies the NOP tier edge at 100.
+            _make_rule(
+                "NOP_EDGE",
+                20,
+                state=["karnataka"],
+                cc_start_range=151,
+                cc_end_range=350,
+                policies_count_start_range=31,
+                policies_count_end_range=100,
+            ),
+            # Un-bumped on both dimensions at once.
+            _make_rule(
+                "STUCK",
+                30,
+                state=["tamil-nadu"],
+                cc_start_range=150,
+                cc_end_range=350,
+                policies_count_start_range=100,
+                policies_count_end_range=500,
+            ),
+        ]
+
+    def test_deadlocked_rule_resolves_on_both_dimensions(self):
+        rules = self._doc()
+        self.t._normalize_boundary_overlaps(rules)
+        stuck = {r.rule_id: r for r in rules}["STUCK"].conditions
+        self.assertEqual((stuck.cc_start_range, stuck.cc_end_range), (151, 350))
+        self.assertEqual(
+            (
+                stuck.policies_count_start_range,
+                stuck.policies_count_end_range,
+            ),
+            (101, 500),
+        )
+
+    def test_the_evidence_rules_are_left_alone(self):
+        rules = self._doc()
+        self.t._normalize_boundary_overlaps(rules)
+        by_id = {r.rule_id: r for r in rules}
+        edge = by_id["CC_EDGE"].conditions
+        self.assertEqual((edge.cc_start_range, edge.cc_end_range), (0, 150))
+        nop = by_id["NOP_EDGE"].conditions
+        self.assertEqual(
+            (nop.policies_count_start_range, nop.policies_count_end_range), (31, 100)
+        )
+
+    def test_non_overlapping_bands_remain_separate_contexts(self):
+        # Overlap-compatibility must not fuse ladders that genuinely differ on
+        # another dimension: a (0,150) cc rule and a (151,350) cc rule do not
+        # overlap, so a NOP boundary in one is no evidence for the other.
+        rules = [
+            _make_rule(
+                "LOW",
+                10,
+                state=["gujarat"],
+                cc_start_range=0,
+                cc_end_range=150,
+                policies_count_start_range=31,
+                policies_count_end_range=100,
+            ),
+            _make_rule(
+                "HIGH",
+                20,
+                state=["karnataka"],
+                cc_start_range=151,
+                cc_end_range=350,
+                policies_count_start_range=100,
+                policies_count_end_range=500,
+            ),
+        ]
+        self.t._normalize_boundary_overlaps(rules)
+        high = {r.rule_id: r for r in rules}["HIGH"].conditions
+        self.assertEqual(
+            (high.policies_count_start_range, high.policies_count_end_range),
+            (100, 500),
+        )

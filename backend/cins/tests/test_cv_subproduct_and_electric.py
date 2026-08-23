@@ -495,11 +495,15 @@ class CcRecoveryTests(TestCase):
         self.assertEqual((cond.cc_start_range, cond.cc_end_range), (0, 1500))
 
     def test_cc_recovered_from_gt_slug(self):
+        # GT is EXCLUSIVE and both ends are inclusive downstream, so the band
+        # starts at 1501 — its LT sibling above ends at 1500. The +1 used to be
+        # left to the boundary de-overlap, which only fires when that sibling
+        # shares a group; when it did not, the two rules overlapped at 1500.
         cond = self._cond(
             source_section="PCCV < 6",
             conditions={"vehicle_sub_class": "3_4W_GT_1500CC"},
         )
-        self.assertEqual((cond.cc_start_range, cond.cc_end_range), (1500, 99999))
+        self.assertEqual((cond.cc_start_range, cond.cc_end_range), (1501, 99999))
 
     def test_cc_recovery_gated_to_chola(self):
         # Non-Chola carrier: the LT/GT slug must NOT trigger CC recovery.

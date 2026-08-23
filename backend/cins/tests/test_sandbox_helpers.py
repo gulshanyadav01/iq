@@ -204,3 +204,47 @@ class ParseCcRangeBracketQualifierTests(TestCase):
     def test_bracket_only_label(self):
         # A label that is nothing but a bracketed qualifier yields no CC range.
         self.assertEqual(self.parse_cc_range("[ NCB GT 25%]"), "")
+
+
+class ParseCcRangeUnderscoreBandTests(TestCase):
+    """An underscore-separated CC BAND is not an ordinal-prefixed slug.
+
+    The Chola TW grid spells its middle column "150_350CC" — the sheet uses "_"
+    where other grids write "-" — so the leading "150" is the band's LOWER
+    BOUND, not an enumeration index. The ordinal strip used to eat it, leaving
+    the point "350", which collided with the "350cc" column and left the ladder
+    as two non-adjacent singletons the de-overlap passes correctly refuse to
+    touch: the "150cc to 150cc" / "350cc to 350cc" the client reported.
+
+    A real CC band never carries more than two numbers, which is what tells the
+    two shapes apart."""
+
+    @classmethod
+    def setUpClass(cls):
+        ns: dict = {}
+        exec(compile(_SANDBOX_HELPERS, "<helpers>", "exec"), ns)
+        cls.parse_cc_range = staticmethod(ns["parse_cc_range"])
+
+    def test_underscore_band_keeps_its_lower_bound(self):
+        self.assertEqual(self.parse_cc_range("150_350CC"), "150-350")
+        self.assertEqual(self.parse_cc_range("150_350cc"), "150-350")
+
+    def test_ordinal_prefixed_band_still_strips_the_ordinal(self):
+        # Three numbers is one too many for a band, so the first is an index.
+        self.assertEqual(self.parse_cc_range("1_150_350CC"), "150-350")
+
+    def test_non_numeric_qualifier_still_strips_the_ordinal(self):
+        # The wheel/LT/GT tokens are the unambiguous ordinal-slug signal.
+        self.assertEqual(self.parse_cc_range("2_4W_LT_1500CC"), "0-1500")
+        self.assertEqual(self.parse_cc_range("3_4W_GT_1500CC"), ">1500")
+
+    def test_bare_single_column_labels_unchanged(self):
+        self.assertEqual(self.parse_cc_range("150cc"), "150")
+        self.assertEqual(self.parse_cc_range("350cc"), "350")
+
+    def test_full_tw_ladder_is_three_distinct_rungs(self):
+        # The three columns must parse to three DIFFERENT bands — the whole
+        # point. Collapsing any two is what removed the ladder's evidence.
+        bands = [self.parse_cc_range(h) for h in ("150cc", "150_350CC", "350cc")]
+        self.assertEqual(bands, ["150", "150-350", "350"])
+        self.assertEqual(len(set(bands)), 3)
