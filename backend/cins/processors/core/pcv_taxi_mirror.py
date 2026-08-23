@@ -16,10 +16,10 @@ not a re-classification.
 
 Three deliberate boundaries:
 
-* **Only the exact ``taxi`` slug qualifies.** ``greater-than-six-seater`` (Big
-  Taxi), ``maxi-cab``, ``kaali-peeli-taxi``, ``auto-rickshaw`` and
-  ``e-rickshaw`` all stay commercial-only. A 13-seat Maxi Cab has no Private Car
-  counterpart, and the hierarchy master does not list one.
+* **Only the exact ``taxi`` slug qualifies.** ``big-taxi``,
+  ``greater-than-six-seater``, ``maxi-cab``, ``kaali-peeli-taxi``,
+  ``auto-rickshaw`` and ``e-rickshaw`` all stay commercial-only. A 9-seat Maxi
+  Cab has no Private Car counterpart, and the hierarchy master does not list one.
 * **The clone is a NEW product, never merged into an existing Private Car
   product.** ``rule_overlap_checker`` scopes overlap detection by
   ``product_code``, so folding PCV rates into a genuine Private Car product

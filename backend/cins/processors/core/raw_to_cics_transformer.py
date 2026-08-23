@@ -239,6 +239,19 @@ VEHICLE_SUB_CLASS_MAPPINGS = {
     "jetting-machine": "jetting-machine",
     "fire vehicles": "fire-vehicles",
     "fire-vehicles": "fire-vehicles",
+    # Chola's OWN misspellings, as they appear in their product hierarchy
+    # workbook. The master is stored carrier-verbatim on purpose, so the fix
+    # belongs here rather than in the CSV: a value that fails to normalize is
+    # silently absent from `canonical_subclass_slugs`, which both narrows the
+    # MISC-D merge's widened body list AND makes CholaProductHierarchyValidator
+    # reject the correctly-spelled slug a rule legitimately produced
+    # ("Earth Movers" -> excavators was flagged as invalid for CV/MISC-D because
+    # the master only had "Excavaters"). Keep the correct spellings above too.
+    "excavaters": "excavators",
+    "excavater": "excavators",
+    "buldozer": "bulldozer",
+    "tranist mixer": "transit-mixer",
+    "refridgerated van": "refrigerated-van",
     # Chola MSV / PCCV>6 sub-segment bodies (grid-verbatim aliases).
     "earth movers": "excavators",
     "earth mover": "excavators",
@@ -247,8 +260,9 @@ VEHICLE_SUB_CLASS_MAPPINGS = {
     "maxi cab": "maxicab",
     "maxi-cab": "maxicab",
     "maxicab": "maxicab",
-    "big taxis": "taxi",
-    "big taxi": "taxi",
+    "big taxis": "big-taxi",
+    "big taxi": "big-taxi",
+    "big-taxi": "big-taxi",
     "others": "others",
 }
 
@@ -4518,11 +4532,13 @@ class RawToCICSTransformer:
                     f"resolve it against: {shown}{more}"
                 )
 
-    # Chola PCV seating bands, supplied by the client. The grids only ever say
-    # "UPTO 5" / "ABOVE 6", so the segment label picks the body class and these
-    # bands supply the real seating range the label implies.
-    _PCV_MAXI_CAB_SEATING = (13, 16)
-    _PCV_BIG_TAXI_SEATING = (6, 12)
+    # Chola PCV seating bands, supplied by the client: 0-5 is a Normal Taxi
+    # (split further by CC), 6-12 a Maxi Cab, 13-16 a Big Taxi. The grids only
+    # ever say "UPTO 5" / "ABOVE 6", so the segment label picks the body class
+    # and these bands supply the real seating range the label implies — never
+    # the reverse, since "ABOVE 6" spans both upper bands.
+    _PCV_MAXI_CAB_SEATING = (6, 12)
+    _PCV_BIG_TAXI_SEATING = (13, 16)
 
     def _apply_chola_pcv_subclass(
         self,
@@ -4541,9 +4557,14 @@ class RawToCICSTransformer:
           Electric row beside the plain one), so this labels each row rather
           than fanning one row into two — a fan-out would copy one rate onto
           both bodies.
-        * A PCV taxi seating 13-16 is a Maxi Cab.
-        * A PCV taxi seating 6-12 is a Big Taxi, which Chola's own hierarchy
-          master calls "Greater Than Six Seater".
+        * A PCV taxi seating 6-12 is a Maxi Cab.
+        * A PCV taxi seating 13-16 is a Big Taxi. Chola's hierarchy master has
+          no row for it — its only >6 body is "Greater Than Six Seater", one
+          bucket its MMV book maps BOTH a 12- and a 16-seater onto, so it cannot
+          express the client's 6-12 / 13-16 split. Emitting the client's name
+          raises a MEDIUM from CholaProductHierarchyValidator, exactly as
+          ``maxicab`` already does; the alternative is exporting a label that
+          merges the two bands.
         * A 4-wheel PCV seating <=5 is an ordinary Taxi. The grid identifies
           those rows only by their CC band ("2_4W_LT_1500CC"), which carries no
           body word at all.
@@ -4570,6 +4591,31 @@ class RawToCICSTransformer:
                 seat_end,
             )
 
+        # The two body-keyed arms run BEFORE the 4W gate: they key on a body the
+        # source already named, which is a stronger signal than the wheel count,
+        # and the "PCCV > 6" rows carry NO number_of_wheels at all (the overlay
+        # sets wheels only on the "PCCV < 6" table). Gating them on
+        # "4w-and-above" made both bands dead code on the only rows that can
+        # reach them — every Maxi Cab and Big Taxi kept the raw "ABOVE 6" (6, 99)
+        # sentinel, and the Big Taxis kept the bare "taxi" slug and were then
+        # cloned into Private Car by pcv_taxi_mirror. Both bodies are 4-wheelers
+        # by definition (cf. _FOUR_WHEEL_ONLY_SUBCLASS_STEMS, which lists
+        # maxicab), so there is nothing for a wheel check to protect here.
+        if "maxicab" in current:
+            return vehicle_sub_class, *self._PCV_MAXI_CAB_SEATING
+        if "big-taxi" in current or ("taxi" in current and (seat_start or 0) >= 6):
+            # "Big Taxi" — the source says only "ABOVE 6", i.e. (6, 99), which
+            # spans both upper bands; the segment label is what tells them
+            # apart, so the band is supplied here rather than read off seats.
+            # The seat_start >= 6 test is what keeps the "PCCV < 6" taxis, which
+            # carry (0, 5), out of this arm. The explicit "big-taxi" arm catches
+            # the other spelling: a grid that writes "Big Taxis" in the body cell
+            # normalizes straight to the slug and never passes through "taxi",
+            # and it must still pick up the band.
+            return ["big-taxi"], *self._PCV_BIG_TAXI_SEATING
+
+        # The remaining arm INFERS a body the source did not name, so it does
+        # need the 4W signal.
         if "4w-and-above" not in wheels:
             return vehicle_sub_class, seat_start, seat_end
 
@@ -4577,12 +4623,6 @@ class RawToCICSTransformer:
         # no body class of their own, so "maxi cab" is never overwritten.
         if not current and (seat_end is not None and seat_end <= 5):
             return ["taxi"], seat_start, seat_end
-
-        if "maxicab" in current:
-            return vehicle_sub_class, *self._PCV_MAXI_CAB_SEATING
-        if "taxi" in current and (seat_start or 0) >= 6:
-            # "Big Taxi" — the source says only "ABOVE 6", i.e. (6, 99).
-            return ["greater-than-six-seater"], *self._PCV_BIG_TAXI_SEATING
 
         return vehicle_sub_class, seat_start, seat_end
 

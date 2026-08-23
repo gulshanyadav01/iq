@@ -12,7 +12,7 @@
     "setup:env": "bash ./scripts/generate-env.sh",
     "dev:up": "docker compose up",
     "dev:down": "docker compose down",
-    "dev:prune": "docker compose -v",
+    "dev:prune": "docker compose down -v",
     "prod:up": "docker compose -f ./docker-compose.prod.yml up -d",
     "prod:down": "docker compose -f ./docker-compose.prod.yml down",
     "prod:prune": "docker compose -f ./docker-compose.prod.yml down -v",

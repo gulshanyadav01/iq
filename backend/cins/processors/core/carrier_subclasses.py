@@ -36,11 +36,19 @@ import re
 from typing import Callable, List, Optional
 
 # "PrivateCar" -> "Private Car". The master spells some values without the
-# mapping dict's spacing; a cheap camelCase split closes that gap. A handful of
-# the source's OWN typos ("Excavaters", "Tranist Mixer") still fail to
-# normalize, which is correct and self-consistent: a grid rule spelling the
-# same typo would fail through the identical dict in the transformer, so it
-# could never produce a matching slug either.
+# mapping dict's spacing; a cheap camelCase split closes that gap.
+#
+# The source's OWN typos ("Excavaters", "Buldozer", "Tranist Mixer",
+# "Refridgerated Van") are handled as aliases in VEHICLE_SUB_CLASS_MAPPINGS, NOT
+# left to fail. This comment used to claim leaving them unmapped was "correct
+# and self-consistent" because a grid rule spelling the same typo would fail
+# through the identical dict — which was wrong in both directions. The rule side
+# reaches the correct slug through a DIFFERENT alias (the grid cell says "Earth
+# Movers", not "Excavaters"), so the master was the only side failing: it
+# narrowed the MISC-D merge's widened body list AND made
+# CholaProductHierarchyValidator reject the slug the rule correctly produced.
+# Fix a non-normalizing master value with an alias, never by editing the CSV —
+# the master is stored carrier-verbatim on purpose.
 CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])")
 
 # Chola's own "no body class recorded" row. It is a real master value, but it

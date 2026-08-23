@@ -405,11 +405,27 @@ it exactly like that, qualifier before the number):
 
 - `1_SCHOOL_BUS` → `product_type = "Buses"`, `conditions["vehicle_sub_class"] = "school bus"`
 - `2_STAFF_BUS` → `product_type = "Buses"`, `conditions["vehicle_sub_class"] = "staff bus"`
-- `3_BIG_TAXIS` → `product_type = "PCV"`, `conditions["vehicle_sub_class"] = "taxi"`
+- `3_BIG_TAXIS` → `product_type = "PCV"`, `conditions["vehicle_sub_class"] = "big taxi"`.
+  Write "big taxi", NOT plain "taxi" — a Big Taxi seats 13-16 and is a different deal from the
+  0-5 seat Normal Taxi in the `PCCV < 6` table. (The plain-taxi spelling is still accepted and
+  corrected downstream, but do not rely on that.)
 - `4_MAXI_CAB` → `product_type = "PCV"`, `conditions["vehicle_sub_class"] = "maxi cab"`
+- `5_BUS` → `product_type = "Buses"`, `conditions["vehicle_sub_class"] = "passenger bus"`.
+  This is the generic bus body, distinct from the school-bus and staff-bus rows above. It is
+  normally an **all-zero row** — emit it anyway with its zero rates, exactly like `4_OTHERS`
+  in the MSV table (see "declined rows" below). Do **NOT** skip it.
 
-**DO fold big-taxi / maxi-cab rows into PCV** (they are taxis, not buses). Only the school-bus
-and staff-bus rows are Buses. This corrects the earlier blanket "PCCV > 6 → Buses" mapping.
+**DO fold big-taxi / maxi-cab rows into PCV** (they are taxis, not buses). Only the school-bus,
+staff-bus and generic-bus rows are Buses. This corrects the earlier blanket
+"PCCV > 6 → Buses" mapping.
+
+**Declined rows — `5_BUS` and `4_OTHERS` — must ALWAYS be emitted.** A row whose rate cells are
+all `0` (or blank) is not a missing row: it is the carrier explicitly declining that segment,
+and the booking system needs the zero-payout rule to match against. Emit one rule per such row,
+carrying the row's own zero rates and its own `vehicle_sub_class`, and do NOT set `deal_type`.
+Do not "tidy up" a table by dropping its zero rows — a silently missing segment is far worse
+than a zero-rate rule. Verified on the Apr-26 grid: `5_BUS` and `4_OTHERS` each carry four `0`
+cells and were both being dropped, leaving Buses and MISC-D short a documented segment each.
 
 ### Chola — MSV (misc-D) rows
 

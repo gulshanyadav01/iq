@@ -119,9 +119,67 @@ class CholaProductHierarchyLoaderTests(TestCase):
         )
         self.assertEqual(CarrierProductHierarchyMaster.objects.count(), 0)
 
-    def test_committed_csv_loads_all_56_rows(self):
+    def test_committed_csv_loads_all_58_rows(self):
         self.assertTrue(CHOLA_PRODUCT_HIERARCHY_CSV_PATH.exists())
         loader = MasterDataLoader()
         loader._load_chola_product_hierarchy()
-        self.assertEqual(CarrierProductHierarchyMaster.objects.count(), 56)
+        self.assertEqual(CarrierProductHierarchyMaster.objects.count(), 58)
         self.assertEqual(loader.result.sheets["CarrierProductHierarchy"].skipped, 0)
+
+    def test_pcv_carries_maxi_cab_and_big_taxi(self):
+        # The client prices PCV taxis in three seating bands: 0-5 Normal Taxi,
+        # 6-12 Maxi Cab, 13-16 Big Taxi. The carrier's OWN source workbook has
+        # neither of the upper two — its only >6 body is "Greater Than Six
+        # Seater", one bucket its MMV book maps both a 12- and a 16-seater onto.
+        # These two rows were added to the committed CSV by hand, so a re-derive
+        # from chola_product_hierarchy_source.xlsx would silently drop them and
+        # every Maxi Cab / Big Taxi rule would go back to raising a MEDIUM from
+        # CholaProductHierarchyValidator. This test is that tripwire.
+        loader = MasterDataLoader()
+        loader._load_chola_product_hierarchy()
+        bodies = set(
+            CarrierProductHierarchyMaster.objects.filter(
+                carrier="Chola", product="CV", sub_product="PCV"
+            ).values_list("vehicle_subclass", flat=True)
+        )
+        self.assertIn("Maxi Cab", bodies)
+        self.assertIn("Big Taxi", bodies)
+        # The carrier's own value stays — it is still what their MMV book uses.
+        self.assertIn("Greater Than Six Seater", bodies)
+
+    def test_every_master_body_normalizes_to_a_slug(self):
+        # The master is stored carrier-verbatim, misspellings included
+        # ("Excavaters", "Buldozer", "Tranist Mixer", "Refridgerated Van"). A
+        # value that does NOT normalize is silently absent from
+        # canonical_subclass_slugs, which has two consequences that both look
+        # like unrelated bugs: the MISC-D merge widens to a SHORTER body list
+        # than the carrier actually books, and CholaProductHierarchyValidator
+        # rejects a correctly-spelled slug the grid legitimately produced
+        # ("Earth Movers" -> excavators was reported invalid for CV/MISC-D).
+        # The fix is an alias in VEHICLE_SUB_CLASS_MAPPINGS, never a rewrite of
+        # the carrier's data — so this asserts the two stay in sync.
+        from cins.processors.core.carrier_subclasses import CAMEL_SPLIT_RE
+        from cins.processors.core.raw_to_cics_transformer import (
+            VEHICLE_SUB_CLASS_MAPPINGS,
+            RawToCICSTransformer,
+        )
+
+        loader = MasterDataLoader()
+        loader._load_chola_product_hierarchy()
+        transformer = RawToCICSTransformer()
+        unmapped = []
+        for row in CarrierProductHierarchyMaster.objects.filter(carrier="Chola"):
+            raw = row.vehicle_subclass or ""
+            produced = transformer._normalize_list_field(
+                CAMEL_SPLIT_RE.sub(" ", raw),
+                VEHICLE_SUB_CLASS_MAPPINGS,
+                "vehicle_sub_class",
+            )
+            if not produced:
+                unmapped.append(f"{row.product}/{row.sub_product}: {raw!r}")
+        self.assertEqual(
+            unmapped,
+            [],
+            "Chola hierarchy master values with no slug — add an alias to "
+            f"VEHICLE_SUB_CLASS_MAPPINGS: {unmapped}",
+        )

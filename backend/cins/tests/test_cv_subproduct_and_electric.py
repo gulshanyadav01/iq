@@ -593,8 +593,12 @@ class MsvDistinctRulesTests(TestCase):
         subs = set(cond.vehicle_sub_class or [])
         self.assertIn("excavators", subs)  # earth movers -> excavators
         self.assertIn("bulldozer", subs)  # bullgraders -> bulldozer
-        self.assertIn("taxi", subs)  # big taxis -> taxi
+        self.assertIn("big-taxi", subs)  # big taxis -> big-taxi (NOT plain taxi)
         self.assertIn("maxicab", subs)  # maxi cab -> maxicab
+        # "Big Taxis" must not fold onto the plain taxi slug: that is the slug
+        # pcv_taxi_mirror clones into Private Car, and a 13-16 seat commercial
+        # vehicle has no Private Car counterpart.
+        self.assertNotIn("taxi", subs)
 
     def test_excavator_model_enumeration_to_subclass(self):
         e = RawCommissionEntry(
