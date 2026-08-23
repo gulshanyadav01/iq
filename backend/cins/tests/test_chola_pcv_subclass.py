@@ -10,9 +10,10 @@ be derived:
   the plain one (verified on doc 733711bd: 20 rows each, e.g. AN ACT 35% vs
   7.5%). So each row is labelled; fanning one row into two would copy a single
   rate onto both bodies.
-* A PCV taxi seating 13-16 is a Maxi Cab.
-* A PCV taxi seating 6-12 is a Big Taxi — "Greater Than Six Seater" in Chola's
-  own hierarchy master, which is also the enum value.
+* A PCV taxi seating 6-12 is a Maxi Cab.
+* A PCV taxi seating 13-16 is a Big Taxi. Chola's hierarchy master has no row
+  for it (its only >6 body, "Greater Than Six Seater", covers both bands), so
+  the client's name is emitted and the master gap is a MEDIUM finding.
 * A 4-wheel PCV seating <=5 is an ordinary Taxi; those rows carry only a CC band
   slug ("2_4W_LT_1500CC") and no body word at all.
 
@@ -82,15 +83,54 @@ class CholaPCVSubclassTests(TestCase):
 
     # ---- rules 2 and 3: taxi seating bands ---------------------------------
 
-    def test_maxi_cab_gets_13_to_16_seating(self):
+    def test_maxi_cab_gets_6_to_12_seating(self):
         sc, s, e = self._apply(sub_class=["maxicab"], seating=(6, 99))
         self.assertEqual(sc, ["maxicab"])
+        self.assertEqual((s, e), (6, 12))
+
+    def test_big_taxi_slug_with_13_to_16(self):
+        sc, s, e = self._apply(sub_class=["taxi"], seating=(6, 99))
+        self.assertEqual(sc, ["big-taxi"])
         self.assertEqual((s, e), (13, 16))
 
-    def test_big_taxi_becomes_greater_than_six_seater_with_6_to_12(self):
-        sc, s, e = self._apply(sub_class=["taxi"], seating=(6, 99))
-        self.assertEqual(sc, ["greater-than-six-seater"])
+    def test_big_taxi_spelled_directly_still_gets_the_band(self):
+        # A grid that writes "Big Taxis" in the body cell normalizes straight to
+        # the slug and never passes through "taxi", so the arm must accept both
+        # spellings or that row keeps the raw (6, 99) sentinel.
+        sc, s, e = self._apply(sub_class=["big-taxi"], seating=(6, 99), wheels=())
+        self.assertEqual(sc, ["big-taxi"])
+        self.assertEqual((s, e), (13, 16))
+
+    def test_maxi_cab_band_applies_without_a_wheel_count(self):
+        # The real "PCCV > 6" rows carry NO number_of_wheels — the overlay sets
+        # wheels only on the "PCCV < 6" table. Gating the body-keyed arms on
+        # "4w-and-above" made both bands dead code on live documents.
+        sc, s, e = self._apply(sub_class=["maxicab"], seating=(6, 99), wheels=())
+        self.assertEqual(sc, ["maxicab"])
         self.assertEqual((s, e), (6, 12))
+
+    def test_big_taxi_band_applies_without_a_wheel_count(self):
+        sc, s, e = self._apply(sub_class=["taxi"], seating=(6, 99), wheels=())
+        self.assertEqual(sc, ["big-taxi"])
+        self.assertEqual((s, e), (13, 16))
+
+    def test_wheel_less_small_taxi_is_not_invented(self):
+        # The <=5 inference arm still needs the 4W signal: it NAMES a body the
+        # source did not, unlike the two arms above which only refine one.
+        sc, s, e = self._apply(sub_class=None, seating=(0, 5), wheels=())
+        self.assertIsNone(sc)
+        self.assertEqual((s, e), (0, 5))
+
+    def test_maxi_cab_and_big_taxi_bands_do_not_overlap(self):
+        # The two upper bands are adjacent and disjoint, so a seat count picks
+        # exactly one body. A swap of these constants is invisible in
+        # VehicleSubClass and shows up only in the seating columns, which is
+        # how the original inversion survived — pin both together.
+        _, mc_start, mc_end = self._apply(sub_class=["maxicab"], seating=(6, 99))
+        _, bt_start, bt_end = self._apply(sub_class=["taxi"], seating=(6, 99))
+        self.assertEqual((mc_start, mc_end), (6, 12))
+        self.assertEqual((bt_start, bt_end), (13, 16))
+        self.assertLess(mc_end, bt_start)
 
     def test_small_taxi_is_not_promoted_to_big_taxi(self):
         # A <=5 seat row already labelled "taxi" stays a plain taxi.
@@ -132,11 +172,13 @@ class CholaPCVSubclassTests(TestCase):
         self.assertEqual((s, e), (6, 99))
 
     def test_values_are_valid_for_chola_pcv(self):
-        # Every value this rule can emit must exist in the CICS enum. All but
-        # 'maxicab' are also in Chola's PCV hierarchy allowlist (the master has
-        # no Maxi Cab row — a known, reported gap).
+        # Every value this rule can emit must exist in the CICS enum. 'maxicab'
+        # and 'big-taxi' are NOT in Chola's PCV hierarchy allowlist — the master
+        # carries only Taxi / Greater Than Six Seater / Kaali Peeli Taxi, so it
+        # cannot express the client's 6-12 / 13-16 split. Each raises a MEDIUM
+        # from CholaProductHierarchyValidator, which is non-blocking by design.
         from cins.schema.cics_model import RuleConditions
 
-        for slug in ("auto-rickshaw", "e-rickshaw", "taxi", "greater-than-six-seater"):
+        for slug in ("auto-rickshaw", "e-rickshaw", "taxi", "big-taxi"):
             with self.subTest(slug=slug):
                 RuleConditions(vehicle_sub_class=[slug])

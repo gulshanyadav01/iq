@@ -204,7 +204,76 @@ def _env_int(name: str, default: int) -> int:
 #         drop rows the guard was already written to drop.
 #         Cached documents must re-extract or they keep serving the per-body
 #         MISC-D rows, the bare "renewal" cell and the phantom auto-rickshaws.
-CICS_PIPELINE_VERSION = "1.10.0"
+# 1.11.0 - The two upper Chola PCV seating bands were attached to the OPPOSITE
+#         bodies. The client's spec is: 0-5 seats is a Normal Taxi (split further
+#         by CC), 6-12 a Maxi Cab, 13-16 a Big Taxi. _PCV_MAXI_CAB_SEATING held
+#         (13, 16) and _PCV_BIG_TAXI_SEATING held (6, 12), so every Maxi Cab deal
+#         exported SeatingCapacityStartRange/EndRange of 13/16 and every Big Taxi
+#         deal 6/12 — a downstream system matching a 9-seater to a rate card
+#         found the wrong body class. The 0-5 half was always correct.
+#         VehicleSubClass is UNCHANGED by this fix: the arms' conditions are
+#         untouched, so the same rules resolve to the same bodies (maxicab, and
+#         greater-than-six-seater for Big Taxi, which is Chola's own hierarchy
+#         master spelling and stays literally true of a 13-16 seater). Only the
+#         two seating integers move, which is exactly how the inversion survived
+#         review. Rule counts hold, so CINS_REGRESSION_GUARD will not trip.
+#         Direction of inference is unchanged and load-bearing: the segment label
+#         picks the body and the constants supply the band, never the reverse —
+#         Chola's grids only write "UPTO 5" / "ABOVE 6", and "ABOVE 6" parses to
+#         (6, 99), which spans BOTH upper bands and cannot tell them apart.
+#         No prompt file was touched (an edit under cins/prompts/ would
+#         invalidate the whole cross-carrier cache via prompt_version_hash), and
+#         no flag was added — this is a bug fix to an existing unflagged
+#         transform, and a flag would only let someone re-enable wrong output.
+#         SECOND defect, found on doc 5f29236b: the bands were unreachable. Both
+#         body-keyed arms sat behind a `"4w-and-above" not in wheels` early
+#         return, but the overlay sets number_of_wheels only on the "PCCV < 6"
+#         table — every "PCCV > 6" row (Big Taxi, Maxi Cab) carries NO wheels, so
+#         the arms were dead code on the only rows that can reach them. Live
+#         output showed 24 maxicab and 18 taxi rules all still on the raw
+#         "ABOVE 6" (6, 99) sentinel. The two arms now run BEFORE the wheel gate:
+#         they only REFINE a body the source already named, and both bodies are
+#         4-wheelers by definition. The <=5 arm, which INFERS a body the source
+#         did not name, stays behind the gate.
+#         Consequence worth noting: because the Big Taxis never became
+#         greater-than-six-seater, they kept the exact "taxi" slug and
+#         pcv_taxi_mirror cloned all 18 into the Private Car / Taxi product — a
+#         13-16 seat commercial vehicle exported as a Private Car deal. That
+#         product drops from 70 rules to 52 (the 52 genuine 0-5 taxis). This is
+#         a real rule-count DROP, so the first re-extraction of an already-cached
+#         Chola document MAY trip CINS_REGRESSION_GUARD and refuse to pin. No
+#         segment disappears — expected and one-time, same shape as 1.10.0(b).
+#         THIRD change: the 13-16 band now exports the new slug "big-taxi"
+#         instead of "greater-than-six-seater", and "big taxi"/"big taxis" in a
+#         grid body cell normalize to it rather than folding onto plain "taxi".
+#         "Greater Than Six Seater" is Chola's ONLY >6 PCV body — its MMV book
+#         maps both a 12-seater and a 16-seater onto it — so it cannot express
+#         the client's 6-12 / 13-16 split and read as Maxi Cab territory anyway.
+#         The hierarchy master carries neither "Big Taxi" nor "Maxi Cab", so both
+#         raise a MEDIUM from CholaProductHierarchyValidator; that check is
+#         MEDIUM by design and does not block the cache pin. The real fix is for
+#         the carrier to add both rows to their product hierarchy master.
+#         Folding "big taxis" onto plain "taxi" was also load-bearing in the
+#         wrong direction: "taxi" is the exact slug pcv_taxi_mirror clones into
+#         Private Car.
+#         FOURTH change, master-data side: Chola's product hierarchy gains
+#         "Maxi Cab" and "Big Taxi" rows for CV/PCV (their source workbook has
+#         neither), and VEHICLE_SUB_CLASS_MAPPINGS learns four of the carrier's
+#         OWN misspellings as they appear in that master — "Excavaters",
+#         "Buldozer", "Tranist Mixer", "Refridgerated Van". A master value that
+#         does not normalize is silently absent from canonical_subclass_slugs,
+#         which was doing two things at once: making
+#         CholaProductHierarchyValidator reject correctly-spelled slugs the grid
+#         legitimately produced (excavators/bulldozer flagged invalid for
+#         CV/MISC-D), and narrowing the MISC-D merge's widened body list.
+#         So this DOES change export output: the MISC-D rest-bucket
+#         VehicleSubClass cell goes from 22 to 25 bodies (gaining bulldozer,
+#         excavators, transit-mixer) and GCV's widen-list from 13 to 14. Both
+#         are corrections — the carrier does book those bodies — but a cached
+#         document keeps serving the short list until it re-extracts.
+#         Cached documents must re-extract or they keep serving the swapped
+#         seating columns, the (6, 99) sentinel and the mirrored Big Taxis.
+CICS_PIPELINE_VERSION = "1.11.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"
