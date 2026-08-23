@@ -340,7 +340,25 @@ def _env_int(name: str, default: int) -> int:
 #         document keeps serving the short list until it re-extracts.
 #         Cached documents must re-extract or they keep serving the swapped
 #         seating columns, the (6, 99) sentinel and the mirrored Big Taxis.
-CICS_PIPELINE_VERSION = "1.14.0"
+# 1.15.0 - The NCB base twin splits in two. _pair_ncb_tiers used to hand the
+#         unbanded base twin of a marked "NCB GT 25%" rule the whole complement
+#         (0, 24) as ncb=False, which conflated two commercially different
+#         deals: a policy that earned NO bonus, and one that earned a bonus
+#         below the marked threshold. The base twin now narrows to the no-bonus
+#         point band (0, 0) / ncb=False, and a MIRROR of it is emitted at
+#         (0, base_end) / ncb=True carrying the same rate — the grid publishes
+#         one base rate for everything under the threshold, so both are priced
+#         off it. Rule counts RISE on any NCB-bearing product (one extra rule
+#         per base twin), so the first re-extraction of an affected document is
+#         a count increase, not the drop CINS_REGRESSION_GUARD watches for.
+#         The ncb boolean is no longer strictly derivable from the band — the
+#         mirror is ncb=True on a band _ncb_bool_from_range reads as False — so
+#         it is now authoritative and must not be re-derived post-transform.
+#         Degenerate case: a marked tier starting at 1 leaves no room below it,
+#         so the mirror is skipped and a warning names the rule. No env flag,
+#         by decision. Cached documents must re-extract or they keep serving
+#         the single 0-24 / No row.
+CICS_PIPELINE_VERSION = "1.15.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"

@@ -380,19 +380,19 @@
         },
         "ncb": {
           "type": "boolean",
-          "description": "No Claim Bonus tier flag, DERIVED from ncb_start_range/ncb_end_range: true = a band constrained above the base floor, false = the base band, null = no NCB dimension. Retained for backward compatibility — prefer the range fields."
+          "description": "No Claim Bonus tier flag: true = the policy earned a bonus, false = it earned none, null = no NCB dimension. Derived from the band at parse time, then set explicitly by the base-twin split — the no-bonus row is (0, 0) false and its mirror is (0, base_end) TRUE, so the two cannot be told apart from the range alone. Authoritative; do not re-derive it."
         },
         "ncb_start_range": {
           "type": "integer",
           "minimum": 0,
           "maximum": 100,
-          "description": "Start of the No Claim Bonus percentage band, inclusive (0-100). 'NCB GT OR Equal to 25%' -> 25; its paired base grid -> 0. Null = no NCB dimension on this rule."
+          "description": "Start of the No Claim Bonus percentage band, inclusive (0-100). 'NCB GT OR Equal to 25%' -> 25; its paired base grid -> 0, for both the no-bonus row and its bonus-bearing mirror. Null = no NCB dimension on this rule."
         },
         "ncb_end_range": {
           "type": "integer",
           "minimum": 0,
           "maximum": 100,
-          "description": "End of the No Claim Bonus percentage band, inclusive (0-100). 'NCB GT OR Equal to 25%' -> 100; its paired base grid -> 24."
+          "description": "End of the No Claim Bonus percentage band, inclusive (0-100). 'NCB GT OR Equal to 25%' -> 100; its paired base grid splits into the no-bonus row -> 0 and its ncb=true mirror -> 24."
         },
         "cpa": {
           "type": "string",

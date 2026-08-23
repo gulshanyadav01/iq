@@ -488,11 +488,21 @@ class MirrorSignatureNcbTests(TestCase):
 
     def test_ncb_tiers_have_distinct_signatures(self):
         base = _cov_rule("c1", "comprehensive", 42.5)
-        base["conditions"].update(ncb=False, ncb_start_range=0, ncb_end_range=24)
+        base["conditions"].update(ncb=False, ncb_start_range=0, ncb_end_range=0)
         marked = _cov_rule("c2", "comprehensive", 42.5)
         marked["conditions"].update(ncb=True, ncb_start_range=25, ncb_end_range=100)
         # Same dims, same payout — the band is the ONLY difference.
         self.assertNotEqual(_mirror_signature(base), _mirror_signature(marked))
+
+    def test_no_bonus_row_and_its_mirror_have_distinct_signatures(self):
+        # _pair_ncb_tiers emits these two at the SAME rate with the SAME floor,
+        # so only ncb_end_range separates them. The ncb boolean is deliberately
+        # NOT in _MIRROR_DIM_KEYS, so the end of the band has to carry it.
+        no_bonus = _cov_rule("c1", "comprehensive", 42.5)
+        no_bonus["conditions"].update(ncb=False, ncb_start_range=0, ncb_end_range=0)
+        mirror = _cov_rule("c2", "comprehensive", 42.5)
+        mirror["conditions"].update(ncb=True, ncb_start_range=0, ncb_end_range=24)
+        self.assertNotEqual(_mirror_signature(no_bonus), _mirror_signature(mirror))
 
     def test_third_party_not_dropped_against_ncb_tiered_comprehensive(self):
         # The ACT rate is statutory: it carries no NCB dimension and its value

@@ -1335,14 +1335,16 @@ class RawToCICSTransformer:
         if self._carrier_code == "Chola" and product_subproduct == "commercial-gcv":
             self._recover_gcv_3w_electric(rules)
 
-        # Pair NCB>25% rows with their base twins BEFORE any dedupe/bifurcation.
-        # ncb is a _DEDUPE_SCALAR_FIELD, so running this first lets the two
-        # ladders (True / False) normalize their CC boundaries independently;
-        # running after dedupe would fuse them. Depends on Change A2 — without
-        # the bracket-qualifier fix the NCB>25% label 'UPTO 1000 CC[ NCB GT 25%]'
-        # parses to cc=(1000,25) and never shares a condition key with its base
-        # twin, so pairing finds nothing.
-        self._pair_ncb_tiers(rules)
+        # Pair NCB>25% rows with their base twins BEFORE any dedupe/bifurcation,
+        # narrowing each base twin to the no-bonus point band and appending its
+        # ncb=True mirror. Every NCB field is a _DEDUPE_SCALAR_FIELD, so running
+        # this first lets the three ladders (marked / no-bonus / mirror)
+        # normalize their CC boundaries independently; running after dedupe would
+        # fuse them. Depends on Change A2 — without the bracket-qualifier fix the
+        # NCB>25% label 'UPTO 1000 CC[ NCB GT 25%]' parses to cc=(1000,25) and
+        # never shares a condition key with its base twin, so pairing finds
+        # nothing.
+        rules = self._pair_ncb_tiers(rules)
 
         # De-overlap GVW / CC / seating-capacity boundaries within groups of
         # rules that share every other condition. Source documents express
@@ -2270,7 +2272,8 @@ class RawToCICSTransformer:
         # left alone both land with no NCB dimension and collide on an identical
         # condition key. Parse the band from the raw value first, then from the
         # marker in source_section / rule_text (which is where it survives after
-        # codegen). _pair_ncb_tiers then gives the base twin the complement.
+        # codegen). _pair_ncb_tiers then narrows the base twin to the no-bonus
+        # point band and mirrors it onto the complement as ncb=True.
         #
         # Absent NCB stays (None, None) — deliberately NOT the open (0, 100) used
         # by gvw/cc/seating. _is_range_constrained and _has_conditions both key
@@ -3275,7 +3278,7 @@ class RawToCICSTransformer:
     #
     # The GT/GTE distinction is why _parse_range_field is NOT reused: it cannot
     # tell ">" from ">=", and for NCB that one-off decides the band AND the
-    # complement handed to the base twin in _pair_ncb_tiers.
+    # complement mirrored off the base twin in _pair_ncb_tiers.
     #
     # Two guards, both load-bearing (this parser runs against the probe of EVERY
     # rule of EVERY carrier, not just Chola):
@@ -3294,6 +3297,10 @@ class RawToCICSTransformer:
     # ``"ncb": "Yes"``/``"No"`` that carries no numeric label; never used to
     # decide whether a parsed band is the high tier.
     _NCB_LEGACY_THRESHOLD = 25
+    # rule_id suffix for the bonus-bearing mirror of a narrowed base twin (see
+    # _pair_ncb_tiers). Stays inside the schema's ^[A-Za-z0-9_-]+$ rule_id
+    # pattern, and is excluded from _duplicate_collapse_key like every rule_id.
+    _NCB_YES_SUFFIX = "_NCBY"
 
     # Anchor: the literal token, then optional separator punctuation.
     _NCB_ANCHOR = r"ncb\b[\s:\-–—]*"
@@ -3403,8 +3410,15 @@ class RawToCICSTransformer:
 
             (25, 100) -> True    a band above the base floor
             (0,   24) -> False   the base band
+            (0,    0) -> False   the no-bonus point band
             (0,  100) -> fallback   unconstrained: not a tier at all
             (None, None) -> fallback   no NCB dimension
+
+        Only called at parse time, from _transform_conditions — BEFORE
+        _pair_ncb_tiers runs. The mirror that pass emits carries ncb=True on the
+        base band (0, base_end), which this function reads as False; the boolean
+        there is SET explicitly and is deliberately not re-derivable. Do not
+        "restore" the invariant by re-deriving it after the split.
         """
         if start is None and end is None:
             return fallback
@@ -3585,8 +3599,36 @@ class RawToCICSTransformer:
                 f"fuel=electric from the base/electric rate pair"
             )
 
-    def _pair_ncb_tiers(self, rules: List[CommissionRule]) -> None:
-        """Give the unbanded base twin of a marked NCB rule the complement band.
+    def _clone_ncb_yes_twin(
+        self, rule: CommissionRule, base_end: int
+    ) -> CommissionRule:
+        """Clone a narrowed base twin into its bonus-bearing mirror.
+
+        Same conditions, same rate, same dates — only the NCB dimension moves:
+        the source keeps the no-bonus point band (0, 0) and the clone takes the
+        rest of the base grid, (0, base_end), as an explicit ncb=True. The
+        boolean is SET, not derived: _ncb_bool_from_range reads (0, base_end)
+        as the base band and would return False."""
+        if rule.conditions is not None:
+            cond = rule.conditions.model_copy(deep=True)
+        else:
+            cond = RuleConditions()
+        cond.ncb = True
+        cond.ncb_start_range = self._NCB_MIN
+        cond.ncb_end_range = base_end
+        return CommissionRule(
+            rule_id=f"{rule.rule_id}{self._NCB_YES_SUFFIX}",
+            priority=rule.priority,
+            conditions=cond,
+            outcome=rule.outcome,
+            valid_from=rule.valid_from,
+            valid_to=rule.valid_to,
+            rule_description=rule.rule_description,
+        )
+
+    def _pair_ncb_tiers(self, rules: List[CommissionRule]) -> List[CommissionRule]:
+        """Split the unbanded base twin of a marked NCB rule into a no-bonus row
+        and a bonus-bearing mirror.
 
         Chola PC grids ship parallel table sets: a base set and one or more
         marked sets ('… - NCB GT 25%') at higher rates. The marked rows get a
@@ -3596,18 +3638,31 @@ class RawToCICSTransformer:
         a marked member, the unbanded members are the base twins.
 
             group (same conditions except NCB)
-            ├── marked   NCB >= 25%  ->  (25, 100)   ncb=True   ─┐
-            ├── marked   NCB >= 45%  ->  (45, 100)   ncb=True    │ min start = 25
-            └── unbanded (base grid) ->  (0,  24)    ncb=False  ─┘ base_end = 24
+            ├── marked   NCB >= 25%  ->  (25, 100)  ncb=True   ─┐
+            ├── marked   NCB >= 45%  ->  (45, 100)  ncb=True    │ min start = 25
+            ├── base twin            ->  (0,   0)   ncb=False   │ base_end = 24
+            └── mirrored twin (new)  ->  (0,  24)   ncb=True   ─┘ base twin's rate
+
+        The base twin used to take the whole complement (0, 24) as ncb=False,
+        which conflated two different deals: a policy that earned NO bonus, and
+        one that earned a bonus below the marked threshold. The first is the
+        point band (0, 0); the second is the mirror, priced identically because
+        the grid prices them identically — it publishes one base rate for
+        everything under the threshold.
 
         base_end is min(marked starts) - 1, NOT max: the base grid is everything
-        below the LOWEST marked tier, so a three-tier ladder complements to
+        below the LOWEST marked tier, so a three-tier ladder mirrors to
         (0, 24) here, not (0, 44).
 
         Scoped by condition collision, NOT by product: a marked Package rule
         must not stamp a band on unrelated SOD rules with a different condition
-        key (that would under-match in prod). Runs before dedupe so the tier
-        ladders normalize their CC boundaries independently."""
+        key (that would under-match in prod). Runs before dedupe so the three
+        ladders normalize their CC boundaries independently — every NCB field is
+        a _DEDUPE_SCALAR_FIELD, so the mirror keys apart from both its source
+        and the marked tier.
+
+        Returns the rule list with the mirrors appended; the narrowing is done
+        in place on the existing rules."""
         groups: Dict[str, List[CommissionRule]] = {}
         for rule in rules:
             groups.setdefault(self._ncb_tier_pair_key(rule), []).append(rule)
@@ -3615,6 +3670,7 @@ class RawToCICSTransformer:
         n_paired = 0
         n_backfilled = 0
         base_ends: Set[int] = set()
+        mirrors: List[CommissionRule] = []
         for group in groups.values():
             # A rule is "marked" if it carries a band above the base floor OR,
             # for a rule that predates the band (a legacy blob, or a bool set
@@ -3632,6 +3688,13 @@ class RawToCICSTransformer:
             if not marked_starts:
                 continue
             base_end = min(marked_starts) - 1
+            # A mirror already in the group means this list has been through the
+            # split once. The narrowing below is self-idempotent (a base twin
+            # that already carries (0, 0) is skipped by the band test), but the
+            # suffix check also covers a source rule_id that ends in _NCBY.
+            already_mirrored = any(
+                (r.rule_id or "").endswith(self._NCB_YES_SUFFIX) for r in group
+            )
 
             for r in group:
                 cond = r.conditions
@@ -3647,18 +3710,34 @@ class RawToCICSTransformer:
                     n_backfilled += 1
                     continue
                 cond.ncb_start_range = self._NCB_MIN
-                cond.ncb_end_range = base_end
+                cond.ncb_end_range = self._NCB_MIN
                 cond.ncb = False
                 n_paired += 1
+                if base_end <= self._NCB_MIN:
+                    # The marked tier starts at 1, so the mirror's band would be
+                    # (0, 0) too — the same slot as the row above, separated by
+                    # nothing but a boolean. Emit the no-bonus row alone and say
+                    # so, rather than shipping an ambiguous pair.
+                    self.warnings.append(
+                        f"NCB tier: rule '{r.rule_id}' has a marked twin "
+                        f"starting at {min(marked_starts)}, leaving no room "
+                        f"below it — no ncb=True mirror emitted"
+                    )
+                    continue
+                if already_mirrored:
+                    continue
+                mirrors.append(self._clone_ncb_yes_twin(r, base_end))
                 base_ends.add(base_end)
         if n_paired:
             # One aggregated line, not one per rule: notices flow unfiltered to
             # the DB and the detail page, and a large grid has hundreds of twins.
             bands = ", ".join(f"0-{e}" for e in sorted(base_ends))
             self.notices.append(
-                f"NCB tier: {n_paired} base twin(s) given the complement band "
-                f"{bands} (ncb=False), paired with a marked NCB rule"
+                f"NCB tier: {n_paired} base twin(s) narrowed to 0-0 (ncb=False) "
+                f"and mirrored as {len(mirrors)} ncb=True rule(s) on band "
+                f"{bands or 'n/a'}, paired with a marked NCB rule"
             )
+        return rules + mirrors
 
     def _bifurcate_make_buckets(
         self, rules: List[CommissionRule]

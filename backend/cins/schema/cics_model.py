@@ -36,11 +36,18 @@ class RuleConditions(BaseModel):
     Do not roll back code-only. See the deploy runbook.
 
     NCB range (ncb_start_range / ncb_end_range) does NOT carry that hazard: the
-    derived ``ncb`` boolean is retained alongside it and still encodes the tier,
-    so old code reading a new blob drops the band but keeps True/False and the
-    two tiers stay distinguishable. The boolean is therefore NOT vestigial — it
-    is also a member of ``_DEDUPE_SCALAR_FIELDS`` in the transformer, where it is
+    ``ncb`` boolean is retained alongside it and still encodes the tier, so old
+    code reading a new blob drops the band but keeps True/False and the two
+    tiers stay distinguishable. The boolean is therefore NOT vestigial — it is
+    also a member of ``_DEDUPE_SCALAR_FIELDS`` in the transformer, where it is
     what keeps a two-tier ladder's CC buckets in separate de-overlap groups.
+
+    The boolean is AUTHORITATIVE, not merely derived. It is derived from the
+    band at parse time, but ``_pair_ncb_tiers`` then splits a base twin into two
+    rows that share a floor of 0: the no-bonus row ``(0, 0)`` with ``ncb=False``,
+    and its mirror ``(0, base_end)`` with ``ncb=True`` at the same rate. Reading
+    the band alone cannot tell the mirror from the base band it occupies, so
+    never re-derive the boolean from the range after transformation.
     """
 
     vehicle_sub_class: Optional[List[str]] = Field(
@@ -89,17 +96,19 @@ class RuleConditions(BaseModel):
     ncb: Optional[bool] = Field(
         None,
         description=(
-            "No Claim Bonus tier flag, DERIVED from ncb_start_range/ncb_end_range: "
-            "true = a band constrained above the base floor, false = the base band, "
-            "null = no NCB dimension. Retained for backward compatibility with blobs "
-            "extracted before the numeric band existed — prefer the range fields."
+            "No Claim Bonus tier flag: true = the policy earned a bonus, false = it "
+            "earned none, null = no NCB dimension. Derived from the band at parse "
+            "time, then set explicitly by the base-twin split — the no-bonus row is "
+            "(0, 0) false and its mirror is (0, base_end) TRUE, so the two cannot be "
+            "told apart from the range alone. Authoritative; do not re-derive it."
         ),
     )
     ncb_start_range: Optional[int] = Field(
         None,
         description=(
             "Start of the No Claim Bonus percentage band, inclusive (0-100). "
-            "'NCB GT OR Equal to 25%' -> 25; its paired base grid -> 0. "
+            "'NCB GT OR Equal to 25%' -> 25; its paired base grid -> 0, for both "
+            "the no-bonus row and its bonus-bearing mirror. "
             "Null = no NCB dimension on this rule."
         ),
     )
@@ -107,7 +116,8 @@ class RuleConditions(BaseModel):
         None,
         description=(
             "End of the No Claim Bonus percentage band, inclusive (0-100). "
-            "'NCB GT OR Equal to 25%' -> 100; its paired base grid -> 24."
+            "'NCB GT OR Equal to 25%' -> 100; its paired base grid splits into the "
+            "no-bonus row -> 0 and its ncb=true mirror -> 24."
         ),
     )
     cpa: Optional[str] = Field(None, description="CPA type: with-cpa, without-cpa")
