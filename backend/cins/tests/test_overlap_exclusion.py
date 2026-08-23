@@ -304,10 +304,19 @@ class NcbBandOverlapTests(TestCase):
         return self.c.overlaps
 
     def test_disjoint_bands_do_not_overlap(self):
-        # The base twin and its marked tier: adjacent, non-overlapping bands.
-        a = _dense(state=["MH"], ncb=False, ncb_start_range=0, ncb_end_range=24)
+        # The mirrored base twin and its marked tier: adjacent, non-overlapping
+        # bands, both ncb=True.
+        a = _dense(state=["MH"], ncb=True, ncb_start_range=0, ncb_end_range=24)
         b = _dense(state=["MH"], ncb=True, ncb_start_range=25, ncb_end_range=100)
         self.assertEqual(self._pair(a, b), [])
+
+    def test_no_bonus_row_does_not_overlap_its_mirror(self):
+        # _pair_ncb_tiers splits a base twin into (0, 0) ncb=False and its
+        # mirror (0, 24) ncb=True. The two share a floor of 0, so the BANDS
+        # overlap — only the boolean tells them apart, and it must be enough.
+        no_bonus = _dense(state=["MH"], ncb=False, ncb_start_range=0, ncb_end_range=0)
+        mirror = _dense(state=["MH"], ncb=True, ncb_start_range=0, ncb_end_range=24)
+        self.assertEqual(self._pair(no_bonus, mirror), [])
 
     def test_identical_bands_are_a_complete_overlap(self):
         # Two rules on the same tier with everything else equal are a genuine

@@ -208,12 +208,35 @@ class ExportColumnAlignmentTests(DjangoTestCase):
         self.assertEqual(str(cell["NCBStartRange"]), "0")
         self.assertEqual(str(cell["NCBEndRange"]), "100")
 
-    def test_base_twin_band_renders(self):
+    def test_no_bonus_row_renders_the_zero_point_band(self):
+        """_pair_ncb_tiers narrows the base twin to (0, 0): NCB = No means the
+        policy earned no bonus at all, not "some bonus below the threshold"."""
         ws = self._sheet(
             _doc(
                 {
                     "deal_parameter": "net",
                     "ncb": False,
+                    "ncb_start_range": 0,
+                    "ncb_end_range": 0,
+                }
+            )
+        )
+        headers = self._headers(ws)
+        row = list(ws.iter_rows(min_row=2, values_only=True))[0]
+        cell = {h: row[i] for i, h in enumerate(headers)}
+        self.assertEqual(str(cell["NCB"]), "No")
+        self.assertEqual(str(cell["NCBStartRange"]), "0")
+        self.assertEqual(str(cell["NCBEndRange"]), "0")
+
+    def test_mirrored_base_twin_renders_yes_on_the_base_band(self):
+        """The other half of the split: same rate, ncb=True on (0, 24). The
+        boolean is set explicitly, so the export must render it verbatim rather
+        than inferring "No" from a band that starts at 0."""
+        ws = self._sheet(
+            _doc(
+                {
+                    "deal_parameter": "net",
+                    "ncb": True,
                     "ncb_start_range": 0,
                     "ncb_end_range": 24,
                 }
@@ -222,6 +245,6 @@ class ExportColumnAlignmentTests(DjangoTestCase):
         headers = self._headers(ws)
         row = list(ws.iter_rows(min_row=2, values_only=True))[0]
         cell = {h: row[i] for i, h in enumerate(headers)}
-        self.assertEqual(str(cell["NCB"]), "No")
+        self.assertEqual(str(cell["NCB"]), "Yes")
         self.assertEqual(str(cell["NCBStartRange"]), "0")
         self.assertEqual(str(cell["NCBEndRange"]), "24")

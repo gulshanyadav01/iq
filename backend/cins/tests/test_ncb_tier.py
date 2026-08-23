@@ -5,8 +5,11 @@ Chola Private Car ships each CC-band grid twice: a base set and a
 '… - NCB GT 25%' set at higher rates. Both previously landed ncb=None and
 collided on an identical condition key (250/467 exported PC rows ambiguous).
 The NCB>25% rows are now marked ncb=True from the marker in source_section /
-rule_text; _pair_ncb_tiers flips the paired base twin to ncb=False. cv()
-renders True->"Yes", False->"No", so the export needs no change.
+rule_text; _pair_ncb_tiers then SPLITS the paired base twin in two — the
+no-bonus row (0, 0) ncb=False, and a mirror of it at (0, base_end) ncb=True
+carrying the same rate, because the grid publishes one base rate for everything
+under the threshold. cv() renders True->"Yes", False->"No", so the export needs
+no change.
 
 Run from the backend container:
     python manage.py test cins.tests.test_ncb_tier -v 2
@@ -232,16 +235,21 @@ class PairNcbTiersTests(TestCase):
             _rule("NCB", ncb=True, rate=25.0, cc_start_range=0, cc_end_range=1000),
             _rule("BASE", ncb=None, rate=15.0, cc_start_range=0, cc_end_range=1000),
         ]
-        self.t._pair_ncb_tiers(rules)
+        rules = self.t._pair_ncb_tiers(rules)
         by_id = {r.rule_id: r for r in rules}
         self.assertIs(by_id["NCB"].conditions.ncb, True)
         self.assertIs(by_id["BASE"].conditions.ncb, False)
-        # A legacy bool-only marked rule gets its implied band backfilled, and
-        # the twin gets the complement.
+        # A legacy bool-only marked rule gets its implied band backfilled; the
+        # twin narrows to the no-bonus point band and mirrors onto (0, 25).
         ncb_cond = by_id["NCB"].conditions
         base_cond = by_id["BASE"].conditions
         self.assertEqual((ncb_cond.ncb_start_range, ncb_cond.ncb_end_range), (26, 100))
-        self.assertEqual((base_cond.ncb_start_range, base_cond.ncb_end_range), (0, 25))
+        self.assertEqual((base_cond.ncb_start_range, base_cond.ncb_end_range), (0, 0))
+        mirror_cond = by_id["BASE_NCBY"].conditions
+        self.assertIs(mirror_cond.ncb, True)
+        self.assertEqual(
+            (mirror_cond.ncb_start_range, mirror_cond.ncb_end_range), (0, 25)
+        )
 
     def test_banded_marked_rule_gives_twin_the_complement(self):
         rules = [
@@ -256,10 +264,101 @@ class PairNcbTiersTests(TestCase):
             ),
             _rule("BASE", ncb=None, rate=15.0, cc_start_range=0, cc_end_range=1000),
         ]
-        self.t._pair_ncb_tiers(rules)
-        base = {r.rule_id: r for r in rules}["BASE"].conditions
-        self.assertEqual((base.ncb_start_range, base.ncb_end_range), (0, 24))
+        rules = self.t._pair_ncb_tiers(rules)
+        by_id = {r.rule_id: r for r in rules}
+        base = by_id["BASE"].conditions
+        # "NCB = No" is the no-bonus point band, not the whole complement.
+        self.assertEqual((base.ncb_start_range, base.ncb_end_range), (0, 0))
         self.assertIs(base.ncb, False)
+        # The complement lives on the mirror instead, as ncb=True.
+        mirror = by_id["BASE_NCBY"].conditions
+        self.assertEqual((mirror.ncb_start_range, mirror.ncb_end_range), (0, 24))
+        self.assertIs(mirror.ncb, True)
+
+    def test_mirror_carries_the_base_rate_not_the_marked_rate(self):
+        rules = [
+            _rule(
+                "NCB",
+                ncb=True,
+                rate=25.0,
+                ncb_start_range=25,
+                ncb_end_range=100,
+                cc_start_range=0,
+                cc_end_range=1000,
+            ),
+            _rule("BASE", ncb=None, rate=15.0, cc_start_range=0, cc_end_range=1000),
+        ]
+        rules = self.t._pair_ncb_tiers(rules)
+        by_id = {r.rule_id: r for r in rules}
+        # The grid publishes ONE base rate for everything below the threshold,
+        # so the mirror is priced off the base twin, not the marked tier.
+        self.assertEqual(by_id["BASE_NCBY"].outcome.percentage_value, 15.0)
+        self.assertEqual(by_id["BASE_NCBY"].priority, by_id["BASE"].priority)
+        # Every other condition is carried across verbatim.
+        self.assertEqual(by_id["BASE_NCBY"].conditions.cc_start_range, 0)
+        self.assertEqual(by_id["BASE_NCBY"].conditions.cc_end_range, 1000)
+
+    def test_mirror_conditions_are_a_deep_copy(self):
+        rules = [
+            _rule(
+                "NCB",
+                ncb=True,
+                rate=25.0,
+                ncb_start_range=25,
+                ncb_end_range=100,
+                policy_type=["comprehensive"],
+            ),
+            _rule("BASE", ncb=None, rate=15.0, policy_type=["comprehensive"]),
+        ]
+        rules = self.t._pair_ncb_tiers(rules)
+        by_id = {r.rule_id: r for r in rules}
+        by_id["BASE_NCBY"].conditions.policy_type.append("saod")
+        self.assertEqual(by_id["BASE"].conditions.policy_type, ["comprehensive"])
+
+    def test_no_room_below_the_marked_tier_skips_the_mirror(self):
+        # A marked tier starting at 1 leaves base_end = 0, so the mirror would
+        # occupy the same (0, 0) slot as the no-bonus row.
+        rules = [
+            _rule(
+                "NCB",
+                ncb=True,
+                rate=25.0,
+                ncb_start_range=1,
+                ncb_end_range=100,
+                cc_start_range=0,
+                cc_end_range=1000,
+            ),
+            _rule("BASE", ncb=None, rate=15.0, cc_start_range=0, cc_end_range=1000),
+        ]
+        rules = self.t._pair_ncb_tiers(rules)
+        self.assertEqual({r.rule_id for r in rules}, {"NCB", "BASE"})
+        base = {r.rule_id: r for r in rules}["BASE"].conditions
+        self.assertEqual((base.ncb_start_range, base.ncb_end_range), (0, 0))
+        self.assertIs(base.ncb, False)
+        self.assertTrue(
+            any("no ncb=True mirror emitted" in w for w in self.t.warnings),
+            self.t.warnings,
+        )
+
+    def test_split_is_idempotent(self):
+        rules = [
+            _rule(
+                "NCB",
+                ncb=True,
+                rate=25.0,
+                ncb_start_range=25,
+                ncb_end_range=100,
+                cc_start_range=0,
+                cc_end_range=1000,
+            ),
+            _rule("BASE", ncb=None, rate=15.0, cc_start_range=0, cc_end_range=1000),
+        ]
+        once = self.t._pair_ncb_tiers(rules)
+        twice = self.t._pair_ncb_tiers(once)
+        self.assertEqual(len(twice), 3)
+        self.assertEqual(
+            [r.rule_id for r in twice].count("BASE_NCBY"), 1, [r.rule_id for r in twice]
+        )
 
     def test_pairing_notice_is_aggregated(self):
         rules = [
@@ -283,10 +382,12 @@ class PairNcbTiersTests(TestCase):
             )
             for i in range(3)
         ]
-        self.t._pair_ncb_tiers(rules)
+        rules = self.t._pair_ncb_tiers(rules)
         tier_notices = [n for n in self.t.notices if "NCB tier" in n]
         self.assertEqual(len(tier_notices), 1, tier_notices)
         self.assertIn("3 base twin(s)", tier_notices[0])
+        self.assertIn("3 ncb=True rule(s)", tier_notices[0])
+        self.assertEqual(len([r for r in rules if r.rule_id.endswith("_NCBY")]), 3)
 
     def test_unpaired_rules_keep_none(self):
         # No marked member in the group -> ncb stays None (no NCB dimension).
@@ -294,7 +395,8 @@ class PairNcbTiersTests(TestCase):
             _rule("A", ncb=None, cc_start_range=0, cc_end_range=1000),
             _rule("B", ncb=None, cc_start_range=1000, cc_end_range=1500),
         ]
-        self.t._pair_ncb_tiers(rules)
+        rules = self.t._pair_ncb_tiers(rules)
+        self.assertEqual(len(rules), 2)
         self.assertTrue(all(r.conditions.ncb is None for r in rules))
         self.assertTrue(
             all(
@@ -333,7 +435,7 @@ class PairNcbTiersTests(TestCase):
                 cc_end_range=1000,
             ),
         ]
-        self.t._pair_ncb_tiers(rules)
+        rules = self.t._pair_ncb_tiers(rules)
         by_id = {r.rule_id: r for r in rules}
         self.assertIs(by_id["PKG_BASE"].conditions.ncb, False)
         self.assertIsNone(by_id["SOD"].conditions.ncb)
@@ -341,23 +443,34 @@ class PairNcbTiersTests(TestCase):
         # rule stays out of the Package group.
         self.assertIsNone(by_id["SOD"].conditions.ncb_start_range)
         self.assertIsNone(by_id["SOD"].conditions.ncb_end_range)
+        # ...and that it gains no mirror of its own.
+        self.assertNotIn("SOD_NCBY", by_id)
+        self.assertIn("PKG_BASE_NCBY", by_id)
 
     def test_tiers_dedupe_independently(self):
-        # ncb is a dedupe scalar field, so the True and False ladders normalize
-        # their CC boundaries separately after pairing.
+        # Every NCB field is a dedupe scalar field, so the marked, no-bonus and
+        # mirror ladders normalize their CC boundaries separately after pairing.
         rules = [
             _rule("N1", ncb=True, cc_start_range=0, cc_end_range=1000),
             _rule("N2", ncb=True, cc_start_range=1000, cc_end_range=1500),
             _rule("B1", ncb=None, cc_start_range=0, cc_end_range=1000),
             _rule("B2", ncb=None, cc_start_range=1000, cc_end_range=1500),
         ]
-        self.t._pair_ncb_tiers(rules)
+        rules = self.t._pair_ncb_tiers(rules)
         self.t._dedupe_range_overlaps(rules)
         by_id = {r.rule_id: r for r in rules}
-        # Each ladder bumps its own upper rung; they do not fuse.
+        # Each of the three ladders bumps its own upper rung; they do not fuse.
         self.assertEqual(by_id["N2"].conditions.cc_start_range, 1001)
         self.assertEqual(by_id["B2"].conditions.cc_start_range, 1001)
+        self.assertEqual(by_id["B2_NCBY"].conditions.cc_start_range, 1001)
         self.assertIs(by_id["B1"].conditions.ncb, False)
+        self.assertEqual(
+            (
+                by_id["B1_NCBY"].conditions.ncb_start_range,
+                by_id["B1_NCBY"].conditions.ncb_end_range,
+            ),
+            (0, 25),
+        )
 
 
 class NcbRangeParseTests(TestCase):
@@ -467,6 +580,8 @@ class NcbBoolFromRangeTests(TestCase):
         self.assertIs(f(45, 100), True)
         self.assertIs(f(0, 24), False)
         self.assertIs(f(0, 20), False)
+        # The no-bonus point band the base twin narrows to.
+        self.assertIs(f(0, 0), False)
         self.assertIsNone(f(0, 100))
         self.assertIsNone(f(None, None))
 
@@ -521,14 +636,22 @@ class NcbThreeTierTests(TestCase):
 
     def test_base_complements_against_lowest_marked_tier(self):
         rules = self._ladder()
-        self.t._pair_ncb_tiers(rules)
-        base = {r.rule_id: r for r in rules}["BASE"]
-        # min(marked starts) - 1 = 24. Using max would wrongly give (0, 44) and
-        # swallow the entire middle tier.
+        rules = self.t._pair_ncb_tiers(rules)
+        by_id = {r.rule_id: r for r in rules}
+        base = by_id["BASE"]
         self.assertEqual(
-            (base.conditions.ncb_start_range, base.conditions.ncb_end_range), (0, 24)
+            (base.conditions.ncb_start_range, base.conditions.ncb_end_range), (0, 0)
         )
         self.assertIs(base.conditions.ncb, False)
+        # min(marked starts) - 1 = 24. Using max would wrongly give (0, 44) and
+        # swallow the entire middle tier.
+        mirror = by_id["BASE_NCBY"]
+        self.assertEqual(
+            (mirror.conditions.ncb_start_range, mirror.conditions.ncb_end_range),
+            (0, 24),
+        )
+        self.assertIs(mirror.conditions.ncb, True)
+        self.assertEqual(mirror.outcome.percentage_value, 15.0)
 
     def test_tiers_do_not_fuse_in_the_cc_boundary_walk(self):
         # CRITICAL. _dedupe_group_key is built from EXPLICIT field tuples, not a
@@ -555,7 +678,7 @@ class NcbThreeTierTests(TestCase):
                 cc_end_range=1500,
             ),
         ]
-        self.t._pair_ncb_tiers(rules)
+        rules = self.t._pair_ncb_tiers(rules)
         self.t._dedupe_range_overlaps(rules)
         by_id = {r.rule_id: r for r in rules}
         # Each NCB band bumps its OWN upper rung; the two bands stay separate.
