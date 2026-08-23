@@ -194,3 +194,86 @@ class GvwSlugParityTests(TestCase):
                     self.transformer._gvw_slug_or_empty(header),
                     self.parse_gvw_range(header),
                 )
+
+
+class StrictBoundsTests(TestCase):
+    """`strict_bounds=True` makes an EXCLUSIVE operator inclusive.
+
+    Both ends of a range are inclusive everywhere downstream (the export,
+    `rule_overlap_checker._ranges_overlap`), so ">150" has to become 151 or a
+    150cc vehicle matches both it and the "UPTO 150 CC" rule that ends there.
+    That +1 used to happen only in the de-overlap passes, which need a sibling
+    rung as evidence — so an isolated ">150cc" rule shipped overlapping.
+    """
+
+    def setUp(self):
+        self.transformer = RawToCICSTransformer()
+
+    def test_strict_gt_bumps_start(self):
+        self.assertEqual(
+            self.transformer._parse_range_field(">150", strict_bounds=True),
+            (151, None),
+        )
+
+    def test_strict_gte_does_not_bump(self):
+        # ">=" already includes its boundary — bumping it would LOSE a value.
+        self.assertEqual(
+            self.transformer._parse_range_field(">=150", strict_bounds=True),
+            (150, None),
+        )
+
+    def test_strict_above_word_bumps_start(self):
+        self.assertEqual(
+            self.transformer._parse_range_field("ABOVE 1500 CC", strict_bounds=True),
+            (1501, None),
+        )
+
+    def test_strict_above_tonnage_bumps_after_conversion(self):
+        # The +1 is applied in the converted unit (kg), not to the tonnage.
+        self.assertEqual(
+            self.transformer._parse_range_field("ABOVE 3.5T", strict_bounds=True),
+            (3501, None),
+        )
+
+    def test_strict_lt_drops_end(self):
+        self.assertEqual(
+            self.transformer._parse_range_field("< 1500", strict_bounds=True),
+            (None, 1499),
+        )
+
+    def test_strict_lte_and_upto_unchanged(self):
+        self.assertEqual(
+            self.transformer._parse_range_field("<= 1500", strict_bounds=True),
+            (None, 1500),
+        )
+        self.assertEqual(
+            self.transformer._parse_range_field("UPTO 1500 CC", strict_bounds=True),
+            (None, 1500),
+        )
+
+    def test_strict_does_not_touch_closed_bands(self):
+        self.assertEqual(
+            self.transformer._parse_range_field("150-350", strict_bounds=True),
+            (150, 350),
+        )
+
+    def test_strict_does_not_touch_bare_number(self):
+        # A bare "150cc" header is genuinely ambiguous (open low or open high);
+        # only a sibling column resolves it, so parsing must not guess.
+        self.assertEqual(
+            self.transformer._parse_range_field("150", strict_bounds=True),
+            (150, 150),
+        )
+
+    def test_default_is_off_so_seating_and_ncb_are_untouched(self):
+        # Seating deliberately reads "ABOVE 6" as (6, 99) — the 6-seater belongs
+        # to the upper band (see _recover_seating_range). The flag is opt-in
+        # precisely so that call site keeps its grid-verbatim behaviour.
+        self.assertEqual(
+            self.transformer._parse_range_field("ABOVE 6"),
+            (6, None),
+        )
+        self.assertEqual(
+            self.transformer._parse_range_field("ABOVE 40T"),
+            (40000, None),
+        )
