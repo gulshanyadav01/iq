@@ -1448,6 +1448,34 @@ class RawToCICSTransformer:
             # are.
             rules = self._collapse_duplicate_rules(rules)
 
+        # THIRD (final) boundary-normalization pass — the ONLY one that runs
+        # after _strip_gcv_subclass, and the reason it has to exist. Both passes
+        # above group rules by all their non-range conditions, and
+        # vehicle_sub_class is one of them (_DEDUPE_LIST_FIELDS). So a GCV
+        # weight ladder whose rungs are told apart ONLY by a body word sits in
+        # one group per body, each a singleton, and NEITHER earlier pass can see
+        # the pair — the rungs kept their shared boundary all the way to the
+        # export. The strip then nulls the body on every one of them, which is
+        # exactly what makes them siblings; walk them now.
+        #
+        # (_imply_rollover_on_renewal also rewrites a group-key field, but it
+        # runs BEFORE the first dedupe, so its widening is already settled by
+        # then and it needs nothing here.)
+        #
+        # Safe to add for the same reason the second call at the fuel-completeness
+        # step is: the pass is evidence-gated and idempotent, so re-running never
+        # bumps an already-monotonic ladder.
+        self._normalize_boundary_overlaps(rules)
+
+        # Any range band that is STILL a point after all three passes is
+        # reported, not guessed at. A lone (150, 150) cc band is genuinely
+        # ambiguous — the grid header "150cc" means "0-150" in a ladder whose
+        # next column is "150_350cc" and ">150" in one whose previous column is
+        # "UPTO 150 CC" — and only a sibling column disambiguates it. Widening
+        # on a coin flip would silently misprice; a flag puts it in front of a
+        # human. (Sentinels and legitimately-zero bands are excluded.)
+        self._flag_point_bands(rules, product_key)
+
         # Determine sub-category. For a split commercial group the segment is
         # the canonical SubProduct (GCV / PCV / Buses / MISC-D) — use it
         # verbatim so the export SubProduct column matches PRODUCT_FIELD_VALUES.
@@ -2368,7 +2396,9 @@ class RawToCICSTransformer:
                     rto = sorted(set((rto or []) + raw_items))
 
         # Integer range fields
-        gvw_start, gvw_end = self._parse_range_field(entry_conditions.get("gvw"))
+        gvw_start, gvw_end = self._parse_range_field(
+            entry_conditions.get("gvw"), strict_bounds=True
+        )
         if gvw_start is None and gvw_end is None:
             gvw_start, gvw_end = 0, 0
         elif gvw_start is None:
@@ -2412,7 +2442,7 @@ class RawToCICSTransformer:
             gvw_start, gvw_end = 0, 999999
 
         cc_start, cc_end = self._parse_range_field(
-            self._cc_or_leaked_rate(entry_conditions.get("cc"))
+            self._cc_or_leaked_rate(entry_conditions.get("cc")), strict_bounds=True
         )
         if cc_start is None and cc_end is None:
             cc_start, cc_end = 0, 99999
@@ -2477,7 +2507,7 @@ class RawToCICSTransformer:
                 vehicle_make = real_makes or None
             if band_from_make is not None:
                 band_norm = band_from_make.replace("cc", "").replace("_", "-")
-                bs, be = self._parse_range_field(band_norm)
+                bs, be = self._parse_range_field(band_norm, strict_bounds=True)
                 cc_start = bs if bs is not None else 0
                 cc_end = be if be is not None else 99999
             if body_from_make:
@@ -2869,7 +2899,7 @@ class RawToCICSTransformer:
         return (canonical_makes if makes else makes), canonical_models
 
     def _parse_range_field(
-        self, text: Optional[str]
+        self, text: Optional[str], strict_bounds: bool = False
     ) -> Tuple[Optional[int], Optional[int]]:
         """Parse a range text into start/end integers.
 
@@ -2879,6 +2909,29 @@ class RawToCICSTransformer:
         gvwRange buckets in PRODUCT_FIELD_VALUES.md. Underscore separators
         from indexer slugs ("3.5T_TO_7.5T") are normalised to whitespace
         before pattern matching.
+
+        ``strict_bounds`` makes an EXCLUSIVE operator inclusive: "> 150" ->
+        start 151, "< 150" -> end 149, while ">=" / "<=" / "UPTO" / "BELOW"
+        keep their number. Both bounds are inclusive everywhere downstream
+        (``rule_overlap_checker._ranges_overlap``, the export), so without this
+        an "ABOVE 150 CC" rule starts at 150 and double-matches the "UPTO 150
+        CC" rule that ends there. That correction used to happen ONLY in
+        _dedupe_range_overlaps / _normalize_boundary_overlaps, which need a
+        sibling rung in a compatible group as evidence — so an isolated
+        ">150cc" rule, or one whose lower rung was dropped by collapse, shipped
+        overlapping by one point. The operator says so on its own; no evidence
+        is needed.
+
+        Opt-in rather than default because it is NOT universally right:
+
+        - **seating** deliberately reads "ABOVE 6" as (6, 99) — the 6-seater
+          belongs to the upper band. See _recover_seating_range and
+          _PCV_BIG_TAXI_SEATING; that is a grid-verbatim domain rule, not an
+          off-by-one.
+        - **NCB** never comes through here at all (_NCB_ARMS owns the GT/GTE
+          distinction itself, for the same reason).
+
+        So only the cc and gvw call sites pass it.
         """
         if text is None:
             return None, None
@@ -2919,23 +2972,36 @@ class RawToCICSTransformer:
         if range_match:
             return _to_int(range_match.group(1)), _to_int(range_match.group(2))
 
-        # Pattern: "> 12", ">= 12", "above 12", "above 20T".
+        # Pattern: "> 12", ">= 12", "above 12", "above 20T". The operator is
+        # captured so strict_bounds can tell ">" from ">=" — the whole point of
+        # the flag, and the reason this is not one flat alternation any more.
+        # ">=" is listed first so the longer operator wins.
         above_match = re.search(
-            r"(?:>=|>|above|greater than|more than)\s*(\d+(?:\.\d+)?)",
+            r"(>=|>|above|greater than|more than)\s*(\d+(?:\.\d+)?)",
             stripped,
             re.IGNORECASE,
         )
         if above_match:
-            return _to_int(above_match.group(1)), None
+            value = _to_int(above_match.group(2))
+            if strict_bounds and above_match.group(1).strip().lower() != ">=":
+                value += 1
+            return value, None
 
         # Pattern: "< 12", "<= 12", "upto 12", "up to 12", "UPTO 3.5T".
+        # Only the bare "<" is treated as exclusive. "below" / "less than" are
+        # left inclusive on purpose: parse_cc_range already folds those words
+        # into a "0-N" band before they reach here, so shifting them would only
+        # move the LLM path out of step with the codegen path.
         below_match = re.search(
-            r"(?:<=|<|below|less than|upto|up to)\s*(\d+(?:\.\d+)?)",
+            r"(<=|<|below|less than|upto|up to)\s*(\d+(?:\.\d+)?)",
             stripped,
             re.IGNORECASE,
         )
         if below_match:
-            return None, _to_int(below_match.group(1))
+            value = _to_int(below_match.group(2))
+            if strict_bounds and below_match.group(1).strip() == "<":
+                value = max(0, value - 1)
+            return None, value
 
         # Single bare number (optionally decimal). Use fullmatch so we don't
         # accidentally swallow a fragment from a larger string.
@@ -4096,13 +4162,28 @@ class RawToCICSTransformer:
         ranges within rules that share all other conditions. Mutates rules
         in place.
 
-        Also promotes ladder-edge singletons: if the lowest rule in a group
-        has start == end and shares its boundary with the next rule's
+        Also promotes ladder-edge singletons: if the lowest BAND in a group
+        has start == end and shares its boundary with the next band's
         start, it's the "UPTO N" bucket — extend its start to 0. Same for
-        the highest rule against the prior rule's end — extend to the
+        the highest band against the prior band's end — extend to the
         canonical ceiling. Source: Chola TW July grid encodes CC buckets
         as headers "150cc | 150_350cc | 350cc" where the bare singletons
         are open-ended boundary buckets, not point ranges.
+
+        **The walk runs over DISTINCT BANDS, not over rules — a rung of the
+        ladder is routinely more than one rule.** A grid column is published
+        once per make and per rate, and vehicle_make/vehicle_model are
+        deliberately excluded from the group key, so the Chola TW ladder
+        arrives as (say) three rules on "150cc", one on "150_350cc" and seven
+        on "350cc" — all in ONE group. Walking rules directly normalised the
+        first rule of each rung and left every sibling behind: the second
+        (150,150) hit ``start <= prev_end`` with ``prev_end`` already 150, so
+        the bump to 151 inverted the range, the invert-guard skipped it, and it
+        shipped as the point band "150cc to 150cc". Measured on Chola May'26
+        doc b6b085b3: 538 rules stuck at (150,150) and 650 at (350,350), while
+        exactly one rule of each rung came out correct. Collapsing to distinct
+        bands first, then applying the result to every rule that carried that
+        band, fixes the rung as a unit.
         """
         for start_field, end_field in self._DEDUPE_RANGES:
             sentinels = self._RANGE_SENTINELS.get((start_field, end_field), set())
@@ -4124,48 +4205,61 @@ class RawToCICSTransformer:
             ceiling = self._RANGE_CEILINGS.get(end_field)
 
             for group_rules in groups.values():
-                if len(group_rules) < 2:
-                    continue
-                group_rules.sort(
-                    key=lambda r: (
-                        getattr(r.conditions, start_field),
-                        getattr(r.conditions, end_field),
-                    )
+                # Collapse to the ladder's DISTINCT rungs. Several rules share
+                # one rung whenever they differ only on a field outside the
+                # group key (vehicle_make/vehicle_model) or only on their rate.
+                bands = sorted(
+                    {
+                        (
+                            getattr(r.conditions, start_field),
+                            getattr(r.conditions, end_field),
+                        )
+                        for r in group_rules
+                    }
                 )
+                # One rung cannot overlap itself, however many rules carry it.
+                if len(bands) < 2:
+                    continue
+
+                walked = list(bands)
 
                 # Ladder-edge singleton promotion (before overlap-bump so
                 # the bump step normalises the resulting shared boundary).
-                first = group_rules[0].conditions
-                first_start = getattr(first, start_field)
-                first_end = getattr(first, end_field)
-                if (
-                    first_start == first_end
-                    and getattr(group_rules[1].conditions, start_field) == first_end
-                ):
-                    setattr(first, start_field, 0)
+                if walked[0][0] == walked[0][1] and walked[1][0] == walked[0][1]:
+                    walked[0] = (0, walked[0][1])
 
-                last = group_rules[-1].conditions
-                last_start = getattr(last, start_field)
-                last_end = getattr(last, end_field)
                 if (
                     ceiling is not None
-                    and last_start == last_end
-                    and getattr(group_rules[-2].conditions, end_field) == last_start
+                    and walked[-1][0] == walked[-1][1]
+                    and walked[-2][1] == walked[-1][0]
                 ):
-                    setattr(last, end_field, ceiling)
+                    walked[-1] = (walked[-1][0], ceiling)
 
-                prev_end = getattr(group_rules[0].conditions, end_field)
-                for rule in group_rules[1:]:
-                    start = getattr(rule.conditions, start_field)
-                    end = getattr(rule.conditions, end_field)
+                prev_end = walked[0][1]
+                for i in range(1, len(walked)):
+                    start, end = walked[i]
                     if start <= prev_end:
                         new_start = prev_end + 1
                         # Don't create an inverted range; skip the bump
                         # and let validator surface the genuine overlap.
                         if new_start <= end:
-                            setattr(rule.conditions, start_field, new_start)
-                            start = new_start
+                            walked[i] = (new_start, end)
                     prev_end = max(prev_end, end)
+
+                # Apply the walked ladder to every rule on each rung.
+                moved = {old: new for old, new in zip(bands, walked) if old != new}
+                if not moved:
+                    continue
+                for rule in group_rules:
+                    old = (
+                        getattr(rule.conditions, start_field),
+                        getattr(rule.conditions, end_field),
+                    )
+                    new = moved.get(old)
+                    if new is None:
+                        continue
+                    setattr(rule.conditions, start_field, new[0])
+                    setattr(rule.conditions, end_field, new[1])
 
     def _dedupe_group_key(
         self, conditions: RuleConditions, skip_start: str, skip_end: str
@@ -4213,12 +4307,18 @@ class RawToCICSTransformer:
             value = getattr(conditions, field, None)
             lists.append(tuple(sorted(value)) if value else None)
         scalars = [getattr(conditions, f, None) for f in self._DEDUPE_SCALAR_FIELDS]
+        # Ranges are kept as (start, end) PAIRS, not flattened, so compatibility
+        # can compare them as intervals rather than as two independent numbers.
         ranges: List[Any] = []
         for start_field, end_field in self._DEDUPE_RANGES:
             if start_field == skip_start:
                 continue
-            ranges.append(getattr(conditions, start_field, None))
-            ranges.append(getattr(conditions, end_field, None))
+            ranges.append(
+                (
+                    getattr(conditions, start_field, None),
+                    getattr(conditions, end_field, None),
+                )
+            )
         return _BoundaryKey(tuple(lists), tuple(scalars), tuple(ranges))
 
     @staticmethod
@@ -4226,11 +4326,30 @@ class RawToCICSTransformer:
         """Two boundary keys describe the same ladder for evidence purposes when
         every slot is compatible. A list slot is compatible if either side is
         None (wildcard: unset means all values) or the two sets intersect; a
-        scalar/range slot is compatible if either side is None or they are equal.
+        scalar slot is compatible if either side is None or they are equal; a
+        RANGE slot is compatible if the two intervals OVERLAP.
 
         This keeps ['petrol'] and ['electric'] ladders disjoint (empty
         intersection) while matching a fuel-less None to both — the exact case
         the fuel-less 40000-43000 band needs to see the fuel-tagged 40001 rung.
+
+        **Ranges overlap rather than match exactly, because the OTHER dimensions
+        are mid-normalization while this one is being walked, and demanding
+        equality deadlocks any rule that is un-bumped on two dimensions at
+        once.** `_DEDUPE_RANGES` is walked one dimension at a time, and each
+        dimension's group key contains the others' CURRENT values. A rule whose
+        cc is still (150,350) and whose NOP is still (100,500) is therefore
+        invisible on both: on the cc walk its NOP (100,500) matches no sibling's
+        (101,500), and on the NOP walk its cc (150,350) matches no sibling's
+        (151,350). Each dimension waits for the other and neither moves.
+        Measured on Chola May'26 doc b6b085b3: 18 Two Wheeler rules stuck at
+        cc (150,350) + NOP (100,500) after every other rule in the document had
+        converged — the make/state combinations whose grid has a "150_350cc"
+        cell but no "150cc" cell, so the per-group walk had no adjacent rung.
+        Two bands that overlap describe the same region of the same ladder, so
+        treating them as one context is what the evidence gate meant all along;
+        non-overlapping bands (0-150 vs 151-350) stay separate contexts exactly
+        as before. The bump itself is still gated on a real shared tier edge.
         """
         for la, lb in zip(a.lists, b.lists):
             if la is None or lb is None:
@@ -4242,10 +4361,10 @@ class RawToCICSTransformer:
                 continue
             if sa != sb:
                 return False
-        for ra, rb in zip(a.ranges, b.ranges):
-            if ra is None or rb is None:
+        for (sa, ea), (sb, eb) in zip(a.ranges, b.ranges):
+            if sa is None or ea is None or sb is None or eb is None:
                 continue
-            if ra != rb:
+            if sa > eb or sb > ea:
                 return False
         return True
 
@@ -4304,8 +4423,15 @@ class RawToCICSTransformer:
                 )
 
             for key, group_rules in groups.items():
-                if len(group_rules) < 2:
-                    continue
+                # No size guard: evidence comes from every COMPATIBLE key, not
+                # from this group alone, so a singleton group is a legitimate
+                # bump candidate — and it is precisely the shape a stuck rule
+                # takes (its un-normalized band is what makes its key unique).
+                # In the exact-key fallback a singleton is a strict no-op
+                # anyway: its only evidence is its own (start, end), and
+                # neither arm below can fire on that — the floor arm needs a
+                # wider band starting at X, and the bump arm needs start < end
+                # AND start == some end.
                 if wildcard_evidence:
                     evidence_keys = [
                         k for k in keys if self._boundary_keys_compatible(key, k)
@@ -4339,6 +4465,58 @@ class RawToCICSTransformer:
                             f"Boundary bump {start_field} {start} -> {new_start} "
                             f"(shared tier edge in ladder)"
                         )
+
+    # Range fields whose surviving point band is worth reporting. Only the two
+    # that come off a grid COLUMN HEADER, where a bare "150cc" / "3.5T" is an
+    # open-ended bucket label and never a literal point. Seating is excluded on
+    # purpose: a real grid does price the single "16 SEATER".
+    _POINT_BAND_FIELDS = (
+        ("cc_start_range", "cc_end_range", "cc"),
+        ("gvw_start_range", "gvw_end_range", "GVW"),
+    )
+
+    def _flag_point_bands(self, rules: List[CommissionRule], product_key: str) -> None:
+        """Warn on any cc/GVW band still collapsed to a single point.
+
+        Runs after all three boundary passes. A surviving ``(150, 150)`` means
+        the ladder-edge promotion in ``_dedupe_range_overlaps`` and the
+        evidence-gated one in ``_normalize_boundary_overlaps`` both found no
+        sibling rung to disambiguate against — so the band is a grid header the
+        pipeline could not resolve, and it matches essentially no policy.
+
+        Deliberately a report, not a repair: "150cc" means ``0-150`` in a ladder
+        whose next column is ``150_350cc`` and ``>150`` in one whose previous
+        column is ``UPTO 150 CC``. Both passes already widen it whenever the
+        evidence exists; when it does not, a coin flip would silently misprice a
+        deal, while a warning routes it to review.
+
+        MEDIUM (``self.warnings``), never HIGH: ``cics_cache.should_cache``
+        refuses to pin an output carrying a CRITICAL/HIGH, so a HIGH here would
+        wall a whole document out of the cache over one unresolved header.
+        """
+        for start_field, end_field, label in self._POINT_BAND_FIELDS:
+            offenders: List[str] = []
+            for rule in rules:
+                cond = rule.conditions
+                if cond is None:
+                    continue
+                start = getattr(cond, start_field, None)
+                end = getattr(cond, end_field, None)
+                # start > 0 skips the (0, 0) "no GVW filter" sentinel; a real
+                # band is never zero-width at zero.
+                if start is None or end is None or start != end or start <= 0:
+                    continue
+                offenders.append(rule.rule_id)
+            if offenders:
+                shown = ", ".join(offenders[:5])
+                more = f" (+{len(offenders) - 5} more)" if len(offenders) > 5 else ""
+                self.warnings.append(
+                    f"Unresolved {label} point band on {len(offenders)} rule(s) in "
+                    f"'{product_key}' — a band whose start equals its end matches "
+                    f"a single value and almost no policy; the grid header was "
+                    f"probably an open-ended bucket with no sibling column to "
+                    f"resolve it against: {shown}{more}"
+                )
 
     # Chola PCV seating bands, supplied by the client. The grids only ever say
     # "UPTO 5" / "ABOVE 6", so the segment label picks the body class and these
@@ -4718,7 +4896,7 @@ class RawToCICSTransformer:
             slug = self._gvw_slug_or_empty(cand)
             if not slug:
                 continue
-            rs, re_ = self._parse_range_field(slug)
+            rs, re_ = self._parse_range_field(slug, strict_bounds=True)
             if rs is None and re_ is None:
                 continue
             start = 0 if rs is None else rs
@@ -4767,7 +4945,12 @@ class RawToCICSTransformer:
         """Recover the CC band from a Chola PCCV<6 4W taxi sub-class slug
         (``2_4W_LT_1500CC`` / ``3_4W_GT_1500CC``) when conditions["cc"] was
         absent (sentinel ``(0, 99999)``). ``LT`` → ``(0, N)``; ``GT`` →
-        ``(N, 99999)`` (the boundary de-overlap bumps the GT start to N+1).
+        ``(N + 1, 99999)`` — both ends are inclusive downstream, so the strict
+        GT boundary is applied HERE. It used to be left to the boundary
+        de-overlap, which only fires when a sibling LT rung exists in a
+        compatible group; when it did not, the GT rule shipped starting at N
+        and overlapping the LT rule that ends there. Mirrors
+        ``_parse_range_field(strict_bounds=True)``.
         Chola-gated and slug-anchored: the ``lt``/``gt`` token must sit at a
         word boundary (start or after ``_``/whitespace) so a legit make/model
         that merely contains those letters before a CC number (e.g. a
@@ -4783,7 +4966,7 @@ class RawToCICSTransformer:
             return 0, n
         gt = re.search(r"(?:^|[_\s])gt[_\s]*(\d+)\s*cc", probe)
         if gt:
-            n = int(gt.group(1))
+            n = int(gt.group(1)) + 1
             self.notices.append(f"CC recovered from GT slug -> ({n}, 99999)")
             return n, 99999
         return None
