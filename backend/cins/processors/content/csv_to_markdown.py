@@ -27,7 +27,7 @@ reconstruct the hierarchy from multiple header rows.
 import csv
 import io
 import re
-from typing import List
+from typing import List, Tuple
 
 # A header cell that is a bare number / percentage is never a *label* — it is a
 # rate value from a data row that Pass 0C swallowed into the header band (see
@@ -154,6 +154,93 @@ def _build_compound_headers(header_rows: List[List[str]]) -> List[str]:
     return compound
 
 
+# A banner must head at least this many columns before it is treated as one. A
+# segment spanning two or three columns is a real parent label (a make group,
+# a coverage group), not a table-wide banner.
+_BANNER_MIN_COLUMNS = 4
+
+# ...and at least this share of the table's populated columns. Not 100%: the
+# side-by-side split's column bands do NOT line up with the banner bands. On the
+# real Chola `PROP TW Apr-26` sheet, block 1 is 39 columns of
+# "TW Make Grid for the month of Apr 26" plus ONE column that leaked in from the
+# neighbouring "TW Electric" grid — an all-columns rule declines on that single
+# dissenter and the whole fix does nothing. Well clear of a make group: the
+# largest of those heads 4 of 40 columns (10%).
+_BANNER_DOMINANCE = 0.8
+
+
+def _strip_shared_header_banner(labels: List[str]) -> Tuple[List[str], List[str]]:
+    """Drop the leading ">" segment shared by the bulk of a table's columns.
+
+    `_build_compound_headers` suppresses a label repeated VERTICALLY (a merged
+    parent above its children). It has no notion of one repeated HORIZONTALLY,
+    across every column — which is exactly what a merged banner row spanning the
+    whole table produces once `expand_merged_cells` copies it into each cell:
+
+        TW Make Grid for the month of Apr 26 > Hero OEM > 150cc
+        TW Make Grid for the month of Apr 26 > Hero OEM > SCOOTER
+
+    A banner discriminates nothing (it heads the whole table by construction) and
+    it shifts every real segment one position right. That broke the Two-Wheeler
+    grid: the carrier overlay reads `part[0]` as the vehicle make and `part[1]` as
+    the CC band, so with the banner in front NO column parsed as a make, codegen
+    dropped the entire make grid, and the sheet shipped 272 make-less electric
+    rules instead of ~1400 make x CC-band rules (doc 1457d5e8, `PROP TW Apr-26`).
+    The same workbook's unbannered sheets were always correct, which is why this
+    read as an intermittent LLM defect for so long.
+
+    Three guards keep a genuinely meaningful shared parent from being eaten:
+
+    - It must head at least `_BANNER_MIN_COLUMNS` columns and `_BANNER_DOMINANCE`
+      of the populated ones. A make group (`Hero OEM`) heads 4 of 40 columns on
+      the real sheet and comes nowhere near.
+    - At least two of the columns it heads must keep TWO further segments once
+      it is removed. A banner sits ABOVE a real hierarchy — on the live sheet 30
+      of 40 columns are `banner > make > band`. If stripping the top segment
+      would leave most columns with a single segment, that segment WAS the
+      grouping dimension: a table publishing one make (`Hero OEM > 150cc`,
+      `Hero OEM > SCOOTER`, ...) is otherwise indistinguishable from a bannered
+      one, and eating its make row is exactly the failure this fixes.
+    - The strip is by whole `>` segment, never a substring, so a column whose
+      first segment merely STARTS with the banner text is untouched.
+
+    Only the columns that actually carry the banner are stripped; a dissenting
+    column keeps its label, where the segment does discriminate.
+
+    **At most ONE segment is ever stripped.** No sheet in the corpus stacks two
+    banner rows, and every extra pass is another chance to eat a real dimension
+    on a grid shape nobody has looked at. A silently eaten make row misprices.
+
+    Returns:
+        (labels with the banner segment removed, [banner] or []).
+        Columns that were ONLY the banner (the blank spacer columns between make
+        groups) become "", this module's existing "no label" convention.
+    """
+    split = [label.split(" > ") if label else [] for label in labels]
+    populated = [parts for parts in split if parts]
+    if len(populated) < _BANNER_MIN_COLUMNS:
+        return list(labels), []
+
+    counts: dict = {}
+    for parts in populated:
+        counts[parts[0]] = counts.get(parts[0], 0) + 1
+    banner, heads = max(counts.items(), key=lambda kv: kv[1])
+
+    if heads < _BANNER_MIN_COLUMNS or heads < len(populated) * _BANNER_DOMINANCE:
+        return list(labels), []
+    # A banner sits above a real hierarchy. If removing it would leave most
+    # columns with a lone segment, it WAS the hierarchy (a single-make table, or
+    # a flat header repeating one label) and must stay.
+    if sum(1 for p in populated if p[0] == banner and len(p) >= 3) < 2:
+        return list(labels), []
+
+    stripped = [
+        " > ".join(parts[1:] if parts and parts[0] == banner else parts)
+        for parts in split
+    ]
+    return stripped, [banner]
+
+
 def csv_to_markdown(csv_content: str, header_row_count: int = 0) -> str:
     """
     Convert CSV string to markdown table format.
@@ -226,8 +313,22 @@ def csv_to_markdown(csv_content: str, header_row_count: int = 0) -> str:
     data_rows = padded[header_row_count:]
 
     compound_labels = _build_compound_headers(header_rows)
+    compound_labels, banners = _strip_shared_header_banner(compound_labels)
 
     markdown_lines = []
+
+    # The banner is not discarded — some are load-bearing (a grid whose columns
+    # all sit under a meaningful "GVW" parent). It is re-emitted as a caption so
+    # the text stays in the pass-3 content codegen reads, while the per-column
+    # labels keep the shape the carrier overlays parse positionally.
+    if banners:
+        # Commas are neutralised because count_rate_bearing_rows_markdown splits
+        # a pipe-less line on them, and a banner ending in a bare number would
+        # otherwise read as a rate cell and inflate the coverage gate's expected
+        # row count by one per table.
+        caption = banners[0].replace("|", "\\|").replace(",", " -")
+        markdown_lines.append(f"_Section: {caption}_")
+        markdown_lines.append("")
 
     # Synthetic single header row
     escaped_header = [label.replace("|", "\\|") for label in compound_labels]

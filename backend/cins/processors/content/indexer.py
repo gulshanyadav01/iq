@@ -151,7 +151,19 @@ def sanitize_sheet_key(name: str) -> str:
 # SHAPE changes, not the content; ``IndexedDocument._resolve_sheet_key`` falls
 # back to the legacy key so documents indexed at <= 1.8 keep loading without a
 # re-index.
-INDEXER_VERSION = "1.9"
+#
+# 1.10 — a merged banner row spanning a whole table is stripped from the compound
+# column labels and re-emitted as a `_Section: ..._` caption above the table.
+# `expand_merged_cells` copies such a banner into every cell of the row, and
+# `_build_compound_headers` only suppresses VERTICAL repeats, so every column of
+# Chola's `PROP TW Apr-26` grid came out as
+# `TW Make Grid for the month of Apr 26 > Hero OEM > 150cc`. The carrier overlay
+# parses `part[0]` as the vehicle make and `part[1]` as the CC band, so with the
+# banner in front no column parsed as a make at all: codegen dropped the entire
+# make grid and the sheet shipped 272 make-less `fuel_type=electric` rules
+# against ~1400 on the same workbook's unbannered sheets. The banner text is
+# preserved in the caption; only the per-column labels change.
+INDEXER_VERSION = "1.10"
 
 
 def _retag_single_commission_table(content_str: str, sheet_name: str) -> str:

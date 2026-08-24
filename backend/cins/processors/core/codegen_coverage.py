@@ -188,8 +188,21 @@ class CoverageReport:
         return not self.passed
 
 
+# A side-by-side block ordinal, after _norm has fused it onto its keyword.
+_BLOCK_ORDINAL_RE = re.compile(r"\bblock(\d+)\b")
+
+
 def _norm(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+    normed = re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+    # Fuse a side-by-side block ordinal onto its keyword: "block 2" -> "block2".
+    # _name_tokens drops tokens shorter than 4 chars, so the bare ordinal — the
+    # ONLY thing telling two blocks of one grid apart — was discarded and both
+    # "... (block 1)" and "... (block 2)" reduced to the same token set. Every
+    # block-2 rule then attributed to block 1 as well, so a wholly dropped block
+    # never reached the `attributed == 0` arm and shipped silently (Chola
+    # `PROP TW Apr-26`: the make grid vanished, only the electric block survived,
+    # and the gate reported full coverage).
+    return re.sub(r"\bblock (\d+)\b", r"block\1", normed)
 
 
 def _name_tokens(table_name: str) -> List[str]:
@@ -214,13 +227,24 @@ def _attributes_to(rule_src: str, table: dict) -> bool:
     token (fuzzy). Attribution is only ever used to *confirm* a table was covered —
     a table with zero attributed rules is a drop *candidate*, promoted to a failure
     only when attribution is demonstrably working sheet-wide (see report logic).
+
+    The two halves of a side-by-side split share every name token but their
+    ordinal (``"<grid> (block 1)"`` / ``"(block 2)"``), so the fuzzy arm alone
+    cross-credited them and a wholly dropped block always looked covered. When a
+    table name carries a block ordinal, the rule must name the SAME one; a rule
+    naming no block at all is declined for both halves, which fails open through
+    the ``attribution_working`` guard rather than blaming an arbitrary half.
     """
     if not rule_src:
         return False
     idx = table.get("table_index")
     if idx is not None and re.search(rf"\btable\s*{re.escape(str(idx))}\b", rule_src):
         return True
-    for tok in _name_tokens(table.get("table_name", "")):
+    table_name = table.get("table_name", "")
+    table_block = _BLOCK_ORDINAL_RE.search(_norm(table_name))
+    if table_block:
+        return table_block.group(1) in set(_BLOCK_ORDINAL_RE.findall(rule_src))
+    for tok in _name_tokens(table_name):
         if tok in rule_src:
             return True
     return False
