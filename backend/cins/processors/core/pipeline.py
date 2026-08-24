@@ -29,6 +29,9 @@ from cins.processors.content.indexer import (
     digest_suffixed_key,
     sanitize_sheet_key,
 )
+from cins.processors.core.boundary_normalize import (
+    materialize_boundary_normalization,
+)
 from cins.processors.core.cpa_split import materialize_cpa_split
 from cins.processors.core.pcv_taxi_mirror import materialize_pcv_taxi_mirror
 from cins.processors.core.rule_priority import normalize_rule_priorities
@@ -878,6 +881,13 @@ class Pipeline:
             raw_extraction
         )
         cics_json = cics_doc.model_dump(exclude_none=False)
+        # Document-level boundary normalization. A no-op here (this path
+        # transforms one RawExtraction, so every product was already normalized
+        # in _transform_product), kept so all three CICS-building paths run the
+        # same chain. Safe because the pass is evidence-gated and idempotent.
+        cics_json = materialize_boundary_normalization(
+            cics_json, notices=transformer.notices
+        )
         # Materialize CPA-deduction rules into With/Without-CPA variants so the
         # canonical document, the validators, and every consumer see the split.
         cics_json = materialize_cpa_split(cics_json)
@@ -1031,6 +1041,17 @@ class Pipeline:
             except Exception:
                 parsed_result = {}
 
+        transform_notices = (
+            list(pass_result.get("transform_notices") or [])
+            if isinstance(pass_result, dict)
+            else []
+        )
+        # Document-level boundary normalization — see the multi-sheet call site
+        # for why it exists. Evidence-gated and idempotent, so on this
+        # single-document path it is a no-op.
+        parsed_result = materialize_boundary_normalization(
+            parsed_result, notices=transform_notices
+        )
         parsed_result = materialize_cpa_split(parsed_result)
         parsed_result = materialize_pcv_taxi_mirror(parsed_result)
         parsed_result = normalize_rule_priorities(parsed_result)
@@ -1046,9 +1067,7 @@ class Pipeline:
             warnings=(pass_result.get("transform_warnings") or [])
             if isinstance(pass_result, dict)
             else [],
-            notices=(pass_result.get("transform_notices") or [])
-            if isinstance(pass_result, dict)
-            else [],
+            notices=transform_notices,
             validation_issues=schema_result.errors if schema_result else [],
             overlap_issues=overlap_result.overlaps if overlap_result else [],
             duration=duration,
@@ -1487,6 +1506,15 @@ class Pipeline:
         if successful_results:
             combined_data = _merge_sheet_jsons(
                 successful_results, base_name, output_dir
+            )
+            # Every boundary pass in _transform_product runs PER SHEET, so a
+            # range ladder split across sheets is never normalized: the sheet
+            # holding the upper rungs has no lower rung to use as evidence.
+            # Re-run the evidence-gated pass now that the sheets are one
+            # document, and BEFORE the CPA split / taxi mirror so their clones
+            # inherit corrected boundaries. See boundary_normalize.py.
+            combined_data = materialize_boundary_normalization(
+                combined_data, notices=sheet_transform_notices
             )
             combined_data = materialize_cpa_split(combined_data)
             combined_data = materialize_pcv_taxi_mirror(combined_data)
