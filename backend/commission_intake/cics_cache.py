@@ -381,7 +381,20 @@ def _env_int(name: str, default: int) -> int:
 #         dropped and no product or segment disappears, so
 #         CINS_REGRESSION_GUARD should not fire. Cached documents must
 #         re-extract or they keep serving the overlapping band.
-CICS_PIPELINE_VERSION = "1.16.0"
+#
+# 1.17.0 — a Two-Wheeler rule whose vehicle_make names an electric bucket
+#         ("All Electric Make") is tagged fuel_type=["electric"] host-side.
+#         The Chola electric grid prices every electric two-wheeler under that
+#         one bucket column and `chola_pass3.md` tells codegen to set the fuel
+#         from it, but the prose does not hold: on doc 1457d5e8 all 84 raw
+#         rules of the block came back with the bucket in vehicle_make and
+#         fuel_type UNSET, so an electric-only segment exported as
+#         fuel-agnostic (all five fuels) and overlapped the petrol make grid
+#         beside it. Runs only when no fuel was parsed, so an explicit fuel
+#         always wins. Cached documents must re-extract or they keep serving
+#         the untagged rows. Pairs with INDEXER_VERSION 1.10, which is what
+#         made the electric block extract at all.
+CICS_PIPELINE_VERSION = "1.17.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"

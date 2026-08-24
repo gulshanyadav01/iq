@@ -111,6 +111,42 @@ class SharedHeaderBannerStripTests(TestCase):
         )
         self.assertEqual(banners, ["TW Electric"])
 
+    def test_mixed_block_strips_on_hierarchical_columns_only(self):
+        # The REAL block 2 shape: the side-by-side split lumped the electric
+        # grid together with a couple of neighbouring make columns. "TW Electric"
+        # heads only 7 of 12 columns (58%) — below the floor if dominance is
+        # measured over every column — but 4 of the 4 that are three deep.
+        labels = [
+            "TW Electric > State",
+            "TW Electric > Type",
+            "TW Electric > All Electric Make > 7 KW Bike",
+            "TW Electric > All Electric Make > 7 KW SCOOTER",
+            "TW Electric > All Electric Make > 7 KW - 16 KW",
+            "TW Electric > All Electric Make > > 16 KW",
+            "TW Electric",
+            "Hero vs Bajaj > SCOOTER",
+            "Hero vs Bajaj > 150_350cc",
+            "Bajaj > SCOOTER",
+            "Bajaj > 150_350cc",
+            "Bajaj > 350cc",
+        ]
+        stripped, banners = _strip_shared_header_banner(labels)
+        self.assertEqual(banners, ["TW Electric"])
+        self.assertEqual(
+            stripped[:7],
+            [
+                "State",
+                "Type",
+                "All Electric Make > 7 KW Bike",
+                "All Electric Make > 7 KW SCOOTER",
+                "All Electric Make > 7 KW - 16 KW",
+                "All Electric Make > > 16 KW",
+                "",
+            ],
+        )
+        # The neighbouring grid's columns are not touched.
+        self.assertEqual(stripped[7:], labels[7:])
+
     def test_only_one_segment_is_ever_stripped(self):
         # Stacked banners are NOT collapsed. Once the outer one is gone, a table
         # publishing a single make group is indistinguishable from a bannered

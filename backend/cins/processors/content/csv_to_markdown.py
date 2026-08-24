@@ -159,14 +159,19 @@ def _build_compound_headers(header_rows: List[List[str]]) -> List[str]:
 # a coverage group), not a table-wide banner.
 _BANNER_MIN_COLUMNS = 4
 
-# ...and at least this share of the table's populated columns. Not 100%: the
-# side-by-side split's column bands do NOT line up with the banner bands. On the
-# real Chola `PROP TW Apr-26` sheet, block 1 is 39 columns of
-# "TW Make Grid for the month of Apr 26" plus ONE column that leaked in from the
-# neighbouring "TW Electric" grid — an all-columns rule declines on that single
-# dissenter and the whole fix does nothing. Well clear of a make group: the
-# largest of those heads 4 of 40 columns (10%).
+# ...and it must head at least this share of the table's HIERARCHICAL columns
+# (see below). Not 100%: the side-by-side split's column bands do NOT line up
+# with the banner bands. On the real Chola `PROP TW Apr-26` sheet, block 1 is 39
+# columns of "TW Make Grid for the month of Apr 26" plus ONE that leaked in from
+# the neighbouring "TW Electric" grid — an all-columns rule declines on that
+# single dissenter and the whole fix does nothing.
 _BANNER_DOMINANCE = 0.8
+
+# A table needs at least this many `a > b > c` columns before it is judged to
+# have a hierarchy a banner could be the root of. Below it, a shared leading
+# segment IS the grouping dimension (a single-make grid's `Hero OEM > <band>`,
+# a `GVW > <band>` ladder) and stripping it would be the very defect this fixes.
+_MIN_HIERARCHICAL_COLUMNS = 2
 
 
 def _strip_shared_header_banner(labels: List[str]) -> Tuple[List[str], List[str]]:
@@ -191,16 +196,13 @@ def _strip_shared_header_banner(labels: List[str]) -> Tuple[List[str], List[str]
 
     Three guards keep a genuinely meaningful shared parent from being eaten:
 
-    - It must head at least `_BANNER_MIN_COLUMNS` columns and `_BANNER_DOMINANCE`
-      of the populated ones. A make group (`Hero OEM`) heads 4 of 40 columns on
-      the real sheet and comes nowhere near.
-    - At least two of the columns it heads must keep TWO further segments once
-      it is removed. A banner sits ABOVE a real hierarchy — on the live sheet 30
-      of 40 columns are `banner > make > band`. If stripping the top segment
-      would leave most columns with a single segment, that segment WAS the
-      grouping dimension: a table publishing one make (`Hero OEM > 150cc`,
-      `Hero OEM > SCOOTER`, ...) is otherwise indistinguishable from a bannered
-      one, and eating its make row is exactly the failure this fixes.
+    - The table must have at least `_MIN_HIERARCHICAL_COLUMNS` columns of depth
+      >= 3, and the banner must head `_BANNER_DOMINANCE` of THOSE. A banner is
+      the root of a `banner > make > band` hierarchy; a table publishing one
+      make (`Hero OEM > 150cc`, `Hero OEM > SCOOTER`, ...) or one dimension
+      (`GVW > UPTO 3.5T`) is only two deep, so its grouping segment can never be
+      mistaken for a banner however many columns it heads.
+    - It must still span `_BANNER_MIN_COLUMNS` columns of the table overall.
     - The strip is by whole `>` segment, never a substring, so a column whose
       first segment merely STARTS with the banner text is untouched.
 
@@ -221,17 +223,26 @@ def _strip_shared_header_banner(labels: List[str]) -> Tuple[List[str], List[str]
     if len(populated) < _BANNER_MIN_COLUMNS:
         return list(labels), []
 
-    counts: dict = {}
-    for parts in populated:
-        counts[parts[0]] = counts.get(parts[0], 0) + 1
-    banner, heads = max(counts.items(), key=lambda kv: kv[1])
-
-    if heads < _BANNER_MIN_COLUMNS or heads < len(populated) * _BANNER_DOMINANCE:
+    # Dominance is measured over the columns that HAVE a hierarchy, not over
+    # every column. A banner is the root of one: `banner > make > band`. Key
+    # columns (`banner > State`), spacer columns and any neighbouring grid the
+    # side-by-side split lumped in are all shallower, and counting them buries
+    # the signal — on the live electric block `TW Electric` heads 7 of 12
+    # columns (58%, below the floor) but 4 of the 4 three-deep ones.
+    deep = [parts for parts in populated if len(parts) >= 3]
+    if len(deep) < _MIN_HIERARCHICAL_COLUMNS:
         return list(labels), []
-    # A banner sits above a real hierarchy. If removing it would leave most
-    # columns with a lone segment, it WAS the hierarchy (a single-make table, or
-    # a flat header repeating one label) and must stay.
-    if sum(1 for p in populated if p[0] == banner and len(p) >= 3) < 2:
+
+    counts: dict = {}
+    for parts in deep:
+        counts[parts[0]] = counts.get(parts[0], 0) + 1
+    banner, deep_heads = max(counts.items(), key=lambda kv: kv[1])
+
+    if deep_heads < len(deep) * _BANNER_DOMINANCE:
+        return list(labels), []
+    # ...but it must still span a real slice of the table. Without this a
+    # three-deep label on a couple of columns of a wide grid would qualify.
+    if sum(1 for p in populated if p[0] == banner) < _BANNER_MIN_COLUMNS:
         return list(labels), []
 
     stripped = [

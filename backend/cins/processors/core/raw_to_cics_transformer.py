@@ -2396,6 +2396,23 @@ class RawToCICSTransformer:
             vehicle_make_exclude, vehicle_model_exclude
         )
 
+        # Electric MAKE-BUCKET recovery (Chola Two-Wheeler electric grid). That
+        # grid prices every electric two-wheeler under ONE bucket column whose
+        # make cell reads "All Electric Make", and `chola_pass3.md` tells codegen
+        # to set fuel_type from it. The prose alone does not hold: on doc
+        # 1457d5e8 all 84 raw rules of that block came back with the bucket in
+        # vehicle_make and fuel_type UNSET, so an electric-only segment exported
+        # as fuel-agnostic and overlapped the petrol make grid beside it. The
+        # bucket is a literal the transformer already carries verbatim (like
+        # "All Other Make/Models"), so recognise it host-side instead.
+        #
+        # Placed after `_canonicalize_make_model` so the check sees the final
+        # spelling, and before the cc block below, whose electric-two-wheeler
+        # reset keys off fuel_type (kW power bands are not engine CC).
+        if not fuel_type and vehicle_make:
+            if any("electric" in str(m).lower() for m in vehicle_make):
+                fuel_type = ["electric"]
+
         # RTO from conditions dict — expand categories via master data.
         # The LLM may use "rto", "rto_category", "rto_zone", or similar — accept any.
         cond_rto_text = None
