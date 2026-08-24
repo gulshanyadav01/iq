@@ -27,7 +27,7 @@ reconstruct the hierarchy from multiple header rows.
 import csv
 import io
 import re
-from typing import List
+from typing import List, Tuple
 
 # A header cell that is a bare number / percentage is never a *label* — it is a
 # rate value from a data row that Pass 0C swallowed into the header band (see
@@ -154,6 +154,104 @@ def _build_compound_headers(header_rows: List[List[str]]) -> List[str]:
     return compound
 
 
+# A banner must head at least this many columns before it is treated as one. A
+# segment spanning two or three columns is a real parent label (a make group,
+# a coverage group), not a table-wide banner.
+_BANNER_MIN_COLUMNS = 4
+
+# ...and it must head at least this share of the table's HIERARCHICAL columns
+# (see below). Not 100%: the side-by-side split's column bands do NOT line up
+# with the banner bands. On the real Chola `PROP TW Apr-26` sheet, block 1 is 39
+# columns of "TW Make Grid for the month of Apr 26" plus ONE that leaked in from
+# the neighbouring "TW Electric" grid — an all-columns rule declines on that
+# single dissenter and the whole fix does nothing.
+_BANNER_DOMINANCE = 0.8
+
+# A table needs at least this many `a > b > c` columns before it is judged to
+# have a hierarchy a banner could be the root of. Below it, a shared leading
+# segment IS the grouping dimension (a single-make grid's `Hero OEM > <band>`,
+# a `GVW > <band>` ladder) and stripping it would be the very defect this fixes.
+_MIN_HIERARCHICAL_COLUMNS = 2
+
+
+def _strip_shared_header_banner(labels: List[str]) -> Tuple[List[str], List[str]]:
+    """Drop the leading ">" segment shared by the bulk of a table's columns.
+
+    `_build_compound_headers` suppresses a label repeated VERTICALLY (a merged
+    parent above its children). It has no notion of one repeated HORIZONTALLY,
+    across every column — which is exactly what a merged banner row spanning the
+    whole table produces once `expand_merged_cells` copies it into each cell:
+
+        TW Make Grid for the month of Apr 26 > Hero OEM > 150cc
+        TW Make Grid for the month of Apr 26 > Hero OEM > SCOOTER
+
+    A banner discriminates nothing (it heads the whole table by construction) and
+    it shifts every real segment one position right. That broke the Two-Wheeler
+    grid: the carrier overlay reads `part[0]` as the vehicle make and `part[1]` as
+    the CC band, so with the banner in front NO column parsed as a make, codegen
+    dropped the entire make grid, and the sheet shipped 272 make-less electric
+    rules instead of ~1400 make x CC-band rules (doc 1457d5e8, `PROP TW Apr-26`).
+    The same workbook's unbannered sheets were always correct, which is why this
+    read as an intermittent LLM defect for so long.
+
+    Three guards keep a genuinely meaningful shared parent from being eaten:
+
+    - The table must have at least `_MIN_HIERARCHICAL_COLUMNS` columns of depth
+      >= 3, and the banner must head `_BANNER_DOMINANCE` of THOSE. A banner is
+      the root of a `banner > make > band` hierarchy; a table publishing one
+      make (`Hero OEM > 150cc`, `Hero OEM > SCOOTER`, ...) or one dimension
+      (`GVW > UPTO 3.5T`) is only two deep, so its grouping segment can never be
+      mistaken for a banner however many columns it heads.
+    - It must still span `_BANNER_MIN_COLUMNS` columns of the table overall.
+    - The strip is by whole `>` segment, never a substring, so a column whose
+      first segment merely STARTS with the banner text is untouched.
+
+    Only the columns that actually carry the banner are stripped; a dissenting
+    column keeps its label, where the segment does discriminate.
+
+    **At most ONE segment is ever stripped.** No sheet in the corpus stacks two
+    banner rows, and every extra pass is another chance to eat a real dimension
+    on a grid shape nobody has looked at. A silently eaten make row misprices.
+
+    Returns:
+        (labels with the banner segment removed, [banner] or []).
+        Columns that were ONLY the banner (the blank spacer columns between make
+        groups) become "", this module's existing "no label" convention.
+    """
+    split = [label.split(" > ") if label else [] for label in labels]
+    populated = [parts for parts in split if parts]
+    if len(populated) < _BANNER_MIN_COLUMNS:
+        return list(labels), []
+
+    # Dominance is measured over the columns that HAVE a hierarchy, not over
+    # every column. A banner is the root of one: `banner > make > band`. Key
+    # columns (`banner > State`), spacer columns and any neighbouring grid the
+    # side-by-side split lumped in are all shallower, and counting them buries
+    # the signal — on the live electric block `TW Electric` heads 7 of 12
+    # columns (58%, below the floor) but 4 of the 4 three-deep ones.
+    deep = [parts for parts in populated if len(parts) >= 3]
+    if len(deep) < _MIN_HIERARCHICAL_COLUMNS:
+        return list(labels), []
+
+    counts: dict = {}
+    for parts in deep:
+        counts[parts[0]] = counts.get(parts[0], 0) + 1
+    banner, deep_heads = max(counts.items(), key=lambda kv: kv[1])
+
+    if deep_heads < len(deep) * _BANNER_DOMINANCE:
+        return list(labels), []
+    # ...but it must still span a real slice of the table. Without this a
+    # three-deep label on a couple of columns of a wide grid would qualify.
+    if sum(1 for p in populated if p[0] == banner) < _BANNER_MIN_COLUMNS:
+        return list(labels), []
+
+    stripped = [
+        " > ".join(parts[1:] if parts and parts[0] == banner else parts)
+        for parts in split
+    ]
+    return stripped, [banner]
+
+
 def csv_to_markdown(csv_content: str, header_row_count: int = 0) -> str:
     """
     Convert CSV string to markdown table format.
@@ -226,8 +324,22 @@ def csv_to_markdown(csv_content: str, header_row_count: int = 0) -> str:
     data_rows = padded[header_row_count:]
 
     compound_labels = _build_compound_headers(header_rows)
+    compound_labels, banners = _strip_shared_header_banner(compound_labels)
 
     markdown_lines = []
+
+    # The banner is not discarded — some are load-bearing (a grid whose columns
+    # all sit under a meaningful "GVW" parent). It is re-emitted as a caption so
+    # the text stays in the pass-3 content codegen reads, while the per-column
+    # labels keep the shape the carrier overlays parse positionally.
+    if banners:
+        # Commas are neutralised because count_rate_bearing_rows_markdown splits
+        # a pipe-less line on them, and a banner ending in a bare number would
+        # otherwise read as a rate cell and inflate the coverage gate's expected
+        # row count by one per table.
+        caption = banners[0].replace("|", "\\|").replace(",", " -")
+        markdown_lines.append(f"_Section: {caption}_")
+        markdown_lines.append("")
 
     # Synthetic single header row
     escaped_header = [label.replace("|", "\\|") for label in compound_labels]

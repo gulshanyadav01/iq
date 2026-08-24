@@ -133,6 +133,90 @@ class GateTwoTableDropTests(unittest.TestCase):
         self.assertTrue(r.failed)
 
 
+class SideBySideBlockAttributionTests(unittest.TestCase):
+    """Two blocks of ONE split grid must be told apart by their ordinal.
+
+    `_split_side_by_side_tables` names the halves "<grid> (block 1)" and
+    "(block 2)". `_name_tokens` keeps only tokens of length >= 4, so the bare
+    ordinal — the sole discriminator — used to be dropped and both names reduced
+    to {"commission", "grid", "block"}. Every block-2 rule then also attributed
+    to block 1, `attributed == 0` could never fire, and a wholly dropped block
+    reported full coverage.
+
+    That is what shipped on Chola `PROP TW Apr-26`: a merged banner row broke the
+    make grid's column labels, codegen emitted rules for the electric block only,
+    and the gate said nothing.
+    """
+
+    def test_dropped_block_one_is_caught(self):
+        shape = _shape(
+            _commission_table(1, "TW Commission Grid (block 1)", 6),
+            _commission_table(3, "TW Commission Grid (block 2)", 6),
+        )
+        rules = [_Rule("TW Commission Grid (block 2)") for _ in range(6)]
+        r = table_coverage_report(shape, rules)
+        self.assertTrue(r.failed)
+        self.assertIn("Table 1", r.gap_message)
+
+    def test_dropped_block_two_is_caught(self):
+        shape = _shape(
+            _commission_table(1, "TW Commission Grid (block 1)", 6),
+            _commission_table(3, "TW Commission Grid (block 2)", 6),
+        )
+        rules = [_Rule("TW Commission Grid (block 1)") for _ in range(6)]
+        r = table_coverage_report(shape, rules)
+        self.assertTrue(r.failed)
+        self.assertIn("Table 3", r.gap_message)
+
+    def test_both_blocks_covered_still_passes(self):
+        shape = _shape(
+            _commission_table(1, "TW Commission Grid (block 1)", 6),
+            _commission_table(3, "TW Commission Grid (block 2)", 6),
+        )
+        rules = [_Rule("TW Commission Grid (block 1)") for _ in range(6)] + [
+            _Rule("TW Commission Grid (block 2)") for _ in range(6)
+        ]
+        r = table_coverage_report(shape, rules)
+        self.assertTrue(r.passed)
+
+    def test_explicit_table_marker_still_attributes(self):
+        # The robust `Table N` path is untouched by the ordinal fusing.
+        shape = _shape(
+            _commission_table(1, "TW Commission Grid (block 1)", 6),
+            _commission_table(3, "TW Commission Grid (block 2)", 6),
+        )
+        rules = [_Rule("Table 1") for _ in range(6)] + [
+            _Rule("Table 3") for _ in range(6)
+        ]
+        r = table_coverage_report(shape, rules)
+        self.assertTrue(r.passed)
+
+    def test_rule_naming_no_block_fails_open_rather_than_blaming_a_half(self):
+        # source_section omits the ordinal, so neither half can be credited.
+        # Attribution is then not "working" sheet-wide and the per-table arm is
+        # skipped — a miss is the safe direction, since a false hard-fail costs
+        # three LLM retries and then sets requires_review.
+        shape = _shape(
+            _commission_table(1, "TW Commission Grid (block 1)", 6),
+            _commission_table(3, "TW Commission Grid (block 2)", 6),
+        )
+        rules = [_Rule("TW Commission Grid") for _ in range(12)]
+        r = table_coverage_report(shape, rules)
+        self.assertTrue(r.passed)
+
+    def test_unblocked_table_names_attribute_as_before(self):
+        # No `block N` suffix — the fuzzy name-token path must be unchanged.
+        shape = _shape(
+            _commission_table(1, "Private Car Grid", 6),
+            _commission_table(2, "Two Wheeler Grid", 6),
+        )
+        rules = [_Rule("private car grid") for _ in range(6)] + [
+            _Rule("two wheeler grid") for _ in range(6)
+        ]
+        r = table_coverage_report(shape, rules)
+        self.assertTrue(r.passed)
+
+
 class GateNoFalseFailTests(unittest.TestCase):
     """Legitimate cases that must NOT hard-fail — Eng E1/E2."""
 
