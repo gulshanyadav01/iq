@@ -358,7 +358,30 @@ def _env_int(name: str, default: int) -> int:
 #         so the mirror is skipped and a warning names the rule. No env flag,
 #         by decision. Cached documents must re-extract or they keep serving
 #         the single 0-24 / No row.
-CICS_PIPELINE_VERSION = "1.15.0"
+# 1.16.0 - Range-boundary normalization now runs once more on the MERGED
+#         document. Every boundary pass added in 1.11.0 lives inside
+#         _transform_product, which for a sheet_by_sheet workbook runs once per
+#         SHEET — so a ladder fragmented across sheets was never normalized at
+#         all. The sheet holding the upper rungs has no lower rung to use as
+#         evidence, and _merge_sheet_jsons concatenates the sheets after every
+#         pass has finished. Chola "PO Grid-Apr 26.eml" (doc 1457d5e8): the
+#         "Act Only Policy-Changes" sheet publishes a partial GCV weight table
+#         starting at 40T_TO_43T, so its 7 third-party rules (one per state)
+#         shipped GVW (40000, 43000) — overlapping by one point the
+#         20T_TO_40T rung that lives in the " CVApr26" sheet and ends at 40000,
+#         while that sheet's own 40001-43000 / 43001-47500 / 47501-999999
+#         ladder came out correct. Only the evidence-gated
+#         _normalize_boundary_overlaps is re-run (see
+#         processors/core/boundary_normalize.py); _dedupe_range_overlaps is an
+#         unconditional ladder walk and is deliberately NOT re-run, since
+#         merging two sheets' tables into one group could shift bands sharing
+#         no real tier edge. A start moves only where it already sat on a
+#         compatible band's end, so the blast radius on the reported document
+#         is exactly those 7 rules and nothing else. No rule is added or
+#         dropped and no product or segment disappears, so
+#         CINS_REGRESSION_GUARD should not fire. Cached documents must
+#         re-extract or they keep serving the overlapping band.
+CICS_PIPELINE_VERSION = "1.16.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"
