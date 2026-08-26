@@ -207,6 +207,172 @@ class MirrorIdempotencyTests(TestCase):
         self.assertEqual(len(_by_name(doc, "Private Car")), 2)
 
 
+class MirrorSeatingTests(TestCase):
+    """Private Car / Taxi is ONE deal — it is not bifurcated by seat count.
+
+    Every assertion here reads the clone AND its commercial source together. A
+    test that read only the _PCTAXI row could not tell "correctly blanked" from
+    "the commercial band went missing too", which is the failure mode that let
+    the 1.14.0 seating inversion through review.
+    """
+
+    @staticmethod
+    def _taxi_rule(rule_id, seat_start=0, seat_end=5, **conditions):
+        return _rule(
+            rule_id,
+            ["taxi"],
+            seating_capacity_start_range=seat_start,
+            seating_capacity_end_range=seat_end,
+            **conditions,
+        )
+
+    def test_mirror_drops_the_band_and_the_source_keeps_it(self):
+        doc = _doc([_product([self._taxi_rule("R1")])])
+        materialize_pcv_taxi_mirror(doc)
+
+        source = doc["products"][0]["commission_rules"][0]["conditions"]
+        self.assertEqual(source["seating_capacity_start_range"], 0)
+        self.assertEqual(source["seating_capacity_end_range"], 5)
+
+        cloned = _by_name(doc, "Private Car")[0]["commission_rules"][0]
+        self.assertIsNone(cloned["conditions"]["seating_capacity_start_range"])
+        self.assertIsNone(cloned["conditions"]["seating_capacity_end_range"])
+
+    def test_the_keys_are_nulled_not_removed(self):
+        """RuleConditions declares them Optional[int], and _has_conditions /
+        _is_range_constrained both test null-ness rather than presence."""
+        doc = _doc([_product([self._taxi_rule("R1")])])
+        materialize_pcv_taxi_mirror(doc)
+        conditions = _by_name(doc, "Private Car")[0]["commission_rules"][0][
+            "conditions"
+        ]
+        self.assertIn("seating_capacity_start_range", conditions)
+        self.assertIn("seating_capacity_end_range", conditions)
+
+    def test_every_other_condition_survives_the_blanking(self):
+        doc = _doc(
+            [
+                _product(
+                    [
+                        self._taxi_rule(
+                            "R1",
+                            cc_start_range=0,
+                            cc_end_range=1500,
+                            coverage_type=["comprehensive"],
+                        )
+                    ]
+                )
+            ]
+        )
+        materialize_pcv_taxi_mirror(doc)
+        conditions = _by_name(doc, "Private Car")[0]["commission_rules"][0][
+            "conditions"
+        ]
+        self.assertEqual(conditions["cc_start_range"], 0)
+        self.assertEqual(conditions["cc_end_range"], 1500)
+        self.assertEqual(conditions["coverage_type"], ["comprehensive"])
+        self.assertEqual(conditions["vehicle_sub_class"], ["taxi"])
+        self.assertEqual(conditions["state"], "maharashtra")
+
+    def test_the_cc_split_still_yields_two_distinct_mirrored_rules(self):
+        """Only SEATING must not bifurcate — engine CC is a real dimension and
+        the 0-5 band's two CC rungs stay two deals."""
+        doc = _doc(
+            [
+                _product(
+                    [
+                        self._taxi_rule("R1", cc_start_range=0, cc_end_range=1500),
+                        self._taxi_rule(
+                            "R2", cc_start_range=1501, cc_end_range=99999, pct=12.0
+                        ),
+                    ]
+                )
+            ]
+        )
+        materialize_pcv_taxi_mirror(doc)
+        rules = _by_name(doc, "Private Car")[0]["commission_rules"]
+        self.assertEqual(len(rules), 2)
+        self.assertEqual([r["conditions"]["cc_start_range"] for r in rules], [0, 1501])
+
+    def test_rules_separated_only_by_seat_band_keep_theirs(self):
+        """Blanking here would make the pair _conditions_identical — a CRITICAL
+        complete_overlap, which stops should_cache pinning the document."""
+        doc = _doc(
+            [
+                _product(
+                    [
+                        self._taxi_rule("R1", seat_start=0, seat_end=4),
+                        self._taxi_rule("R2", seat_start=5, seat_end=5, pct=12.0),
+                    ]
+                )
+            ]
+        )
+        with self.assertLogs("cins.pcv_taxi_mirror", level="WARNING") as logs:
+            materialize_pcv_taxi_mirror(doc)
+
+        rules = _by_name(doc, "Private Car")[0]["commission_rules"]
+        self.assertEqual(
+            [r["conditions"]["seating_capacity_end_range"] for r in rules], [4, 5]
+        )
+        self.assertIn("R1", "".join(logs.output))
+        self.assertIn("R2", "".join(logs.output))
+
+    def test_a_collision_at_the_same_rate_still_counts(self):
+        """rule_overlap_checker compares CONDITIONS and ignores the payout, so
+        the guard must not be keyed on the rate — an equal-rate pair collides
+        just the same."""
+        doc = _doc(
+            [
+                _product(
+                    [
+                        self._taxi_rule("R1", seat_start=0, seat_end=4),
+                        self._taxi_rule("R2", seat_start=5, seat_end=5),
+                    ]
+                )
+            ]
+        )
+        with self.assertLogs("cins.pcv_taxi_mirror", level="WARNING"):
+            materialize_pcv_taxi_mirror(doc)
+        rules = _by_name(doc, "Private Car")[0]["commission_rules"]
+        self.assertEqual(
+            [r["conditions"]["seating_capacity_end_range"] for r in rules], [4, 5]
+        )
+
+    def test_same_band_duplicates_are_not_a_collision(self):
+        """Two rules identical in every dimension INCLUDING the band already
+        conflict today — the blanking neither creates nor worsens that."""
+        doc = _doc([_product([self._taxi_rule("R1"), self._taxi_rule("R2", pct=12.0)])])
+        materialize_pcv_taxi_mirror(doc)
+        for rule in _by_name(doc, "Private Car")[0]["commission_rules"]:
+            self.assertIsNone(rule["conditions"]["seating_capacity_start_range"])
+
+    def test_the_guard_is_scoped_to_one_product(self):
+        colliding = _product(
+            [
+                self._taxi_rule("A1", seat_start=0, seat_end=4),
+                self._taxi_rule("A2", seat_start=5, seat_end=5, pct=12.0),
+            ],
+            code="PA",
+        )
+        clean = _product([self._taxi_rule("B1")], code="PB")
+        doc = _doc([colliding, clean])
+        with self.assertLogs("cins.pcv_taxi_mirror", level="WARNING"):
+            materialize_pcv_taxi_mirror(doc)
+
+        mirrors = {p["product_code"]: p for p in _by_name(doc, "Private Car")}
+        kept = mirrors["PA" + MIRROR_SUFFIX]["commission_rules"][0]["conditions"]
+        blanked = mirrors["PB" + MIRROR_SUFFIX]["commission_rules"][0]["conditions"]
+        self.assertEqual(kept["seating_capacity_end_range"], 4)
+        self.assertIsNone(blanked["seating_capacity_end_range"])
+
+    def test_blanking_is_idempotent(self):
+        doc = _doc([_product([self._taxi_rule("R1")])])
+        materialize_pcv_taxi_mirror(doc)
+        after_first = copy.deepcopy(doc)
+        materialize_pcv_taxi_mirror(doc)
+        self.assertEqual(doc, after_first)
+
+
 class MirrorSourceTraceTests(TestCase):
     def test_product_trace_is_cloned_onto_the_mirror(self):
         traces = [

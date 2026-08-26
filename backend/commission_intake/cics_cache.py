@@ -394,7 +394,25 @@ def _env_int(name: str, default: int) -> int:
 #         always wins. Cached documents must re-extract or they keep serving
 #         the untagged rows. Pairs with INDEXER_VERSION 1.10, which is what
 #         made the electric block extract at all.
-CICS_PIPELINE_VERSION = "1.17.0"
+# 1.18.0 — a mirrored Private Car / Taxi rule carries NO seating band. The
+#         client does not bifurcate Taxi by seating capacity on the Private Car
+#         side: there is one Private Car / Taxi deal and it exists only for the
+#         up-to-5-seat taxi (which is already all pcv_taxi_mirror clones, since
+#         it keys on the exact {"taxi"} slug). The mirror was a verbatim
+#         deepcopy, so every _PCTAXI row exported
+#         SeatingCapacityStartRange/EndRange = 0/5 — asserting a seat-based
+#         scoping the client never books. The COMMERCIAL twin is untouched;
+#         there the band is the only thing separating Normal Taxi (0-5) from
+#         Maxi Cab (6-12) and Big Taxi (13-16), and it shipped inverted once
+#         already (1.14.0). Guarded: nulling a dimension makes two rules
+#         separated only by that dimension _conditions_identical, i.e. a
+#         CRITICAL complete_overlap that would stop should_cache pinning the
+#         document, so a product whose taxi rules collide that way keeps its
+#         seat band and logs a warning. No rule is added or dropped and no
+#         product or segment disappears, so CINS_REGRESSION_GUARD should not
+#         fire. Cached documents must re-extract or they keep serving the
+#         populated seating cells.
+CICS_PIPELINE_VERSION = "1.18.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"
