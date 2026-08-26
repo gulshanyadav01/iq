@@ -412,7 +412,30 @@ def _env_int(name: str, default: int) -> int:
 #         product or segment disappears, so CINS_REGRESSION_GUARD should not
 #         fire. Cached documents must re-extract or they keep serving the
 #         populated seating cells.
-CICS_PIPELINE_VERSION = "1.18.0"
+# 1.19.0 - The Chola CPA-deduction footnote is now gap-filled onto GCV rules it
+#         never reached. A rule only splits if the clause reaches IT, and two
+#         shapes never carry it in their own other_conditions: synthesized
+#         0%-backstop rules (declined segments, no notes at all) and rules
+#         extracted from a SEPARATE SHEET of the workbook — Chola's "Act Only
+#         Policy-Changes" publishes a heavy-GVW ACT ladder while the footnote
+#         sits on the main CV sheet. Both stayed cpa-unconstrained and exported
+#         ONE row labelled the merged "With CPA,Without CPA" at the undeducted
+#         rate. cpa_split._propagate_cpa_clause_within_product now copies a
+#         product's own detected clause onto its unconstrained, NOTE-LESS rules
+#         before the split. Scoped to Chola / commercial-gcv, unlike the split
+#         itself which is deliberately carrier-agnostic: that path only splits
+#         rules whose own text states the deduction, this one INFERS it, which
+#         is a stronger claim and is evidenced only here. Measured on the stored
+#         corpus: 265 rules filled (+265 exported rows), 21 of them at real
+#         rates; the other 244 are 0% rows whose deduction floors back to 0, so
+#         they change label only. Rules whose notes are NON-empty are left
+#         alone — 96 such rules in "June PO Grid - Chola MS.eml" are duplicates
+#         of the real grid extracted from stale CV AUG-25 / DIFF sheets, a
+#         separate defect this must not paper over. Rule counts RISE on Chola
+#         GCV, so the first re-extraction is a count increase, not the drop
+#         CINS_REGRESSION_GUARD watches for. Cached documents must re-extract or
+#         they keep serving the single merged-label row.
+CICS_PIPELINE_VERSION = "1.19.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"

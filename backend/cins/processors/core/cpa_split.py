@@ -29,6 +29,43 @@ not be conflated:
   both variants carry the undeducted rate, because a 0% ACT payout is a number
   the carrier never published while the grid rate at least appears on the grid.
   The count is logged at WARNING so the frequency stays visible in real data.
+
+Gap-fill: the clause does not always reach every rule
+-----------------------------------------------------
+``_propagate_cpa_clause_within_product`` closes a hole in the above. A rule only
+splits if the clause reaches IT, and two shapes of rule never carry the footnote
+in their own ``other_conditions``: synthesized 0%-backstop rules (declined
+segments, which have no notes at all) and rules extracted from a SEPARATE SHEET
+of the same workbook (Chola's ``Act Only Policy-Changes`` publishes a heavy-GVW
+ACT ladder while the footnote lives on the main CV sheet). Both stayed
+cpa-unconstrained and exported ONE row labelled the merged "With CPA,Without
+CPA" at the undeducted rate. Measured on the stored corpus: 265 Chola GCV rules,
+21 of them at real rates.
+
+Four things are deliberate and none of them is a tuning knob:
+
+* **Carrier-gated to Chola, and sub-product-gated to commercial-gcv.** This
+  contradicts the "only clause-carrying rules split, so no carrier check" note
+  above ON PURPOSE, and the distinction is the whole point: that rule governs
+  rules whose OWN text states the deduction, where carrier-agnosticism costs
+  nothing. This one INFERS a deduction for rules whose text never stated it,
+  which is a strictly stronger claim, and Chola GCV is the only population in
+  the corpus where it is evidenced. Do not "fix" the inconsistency by widening
+  it. Chola's PCV / Buses / MISC-D are already 100% split and need nothing.
+* **Product-scoped, not document-scoped.** A product is the narrowest unit that
+  provably shares a rate card; document scope would let a Two Wheeler footnote
+  reach a CV product.
+* **Only rules with EMPTY ``other_conditions`` are filled.** A rule that HAS
+  notes has text that was already examined and found not to carry the footnote —
+  overriding that is a guess. A rule with NO notes had nothing to examine. This
+  is also what excludes a real defect the gap-fill must not paper over: 96 rules
+  in ``June PO Grid - Chola MS.eml`` carry a Private-Car summary-sheet blurb and
+  are duplicates (68 exact, 24 same-slot-different-rate) of the real grid,
+  extracted from stale ``CV AUG-25`` / ``DIFF`` sheets. Deducting 1.5% from
+  those would polish rows that should not be in the export at all.
+* **Conflicting deduction values disable the fill for that product.** A product
+  publishing two amounts is a detection failure, not a gap; guessing which
+  applies would misprice silently.
 """
 
 import collections
@@ -264,6 +301,105 @@ def _split_rule(rule, stats=None):
     return [variant("with-cpa", False), variant("without-cpa", True)]
 
 
+# Gap-fill scope. Both gates are load-bearing — see the module docstring for why
+# this pass is carrier-scoped while the split itself deliberately is not.
+_GAP_FILL_CARRIER = "Chola"
+_GAP_FILL_SUBPRODUCT = "commercial-gcv"
+
+
+def _document_carrier(cics_doc):
+    """Canonical carrier short code for a CICS document, or None.
+
+    Reads ``provider.provider_id`` (already a short code) and falls back to the
+    free-text ``provider_name``. Fails safe: an absent or unrecognised provider
+    yields None, which makes every carrier-scoped pass a no-op.
+    """
+    from cins.schema.carriers import normalize_carrier
+
+    provider = (cics_doc or {}).get("provider")
+    if not isinstance(provider, dict):
+        return None
+    for key in ("provider_id", "provider_name"):
+        carrier = normalize_carrier(provider.get(key))
+        if carrier:
+            return carrier
+    return None
+
+
+def _resolved_cpa_clause(rule):
+    """The without-cpa deduction clause a rule resolves on its own, or None.
+
+    Exactly what ``_split_rule`` consults, in the same order — structured clause
+    first, free-text notes second. Shared so the gap-fill can never disagree
+    with the split about which rules already have a clause.
+    """
+    outcome = rule.get("outcome") or {}
+    return cpa_deduction_clause(
+        outcome.get("qualifying_clauses")
+    ) or _cpa_clause_from_notes(outcome.get("other_conditions"))
+
+
+def _propagate_cpa_clause_within_product(product, carrier):
+    """Attach a product's CPA deduction clause to its note-less unconstrained rules.
+
+    Scoped to ``_GAP_FILL_CARRIER`` / ``_GAP_FILL_SUBPRODUCT``. A rule is filled
+    only when its ``conditions.cpa`` is unconstrained, it resolves no clause of
+    its own, and its ``outcome.other_conditions`` is EMPTY — see the module
+    docstring for why the empty-notes test is the discriminator rather than a
+    convenience. Returns the number of rules filled.
+
+    Mutates ``product`` in place. Idempotent by construction: ``_split_rule``
+    runs straight after and gives every filled rule an explicit ``cpa``, so a
+    second pass finds nothing unconstrained left to fill.
+    """
+    if carrier != _GAP_FILL_CARRIER:
+        return 0
+    if (product or {}).get("product_subproduct") != _GAP_FILL_SUBPRODUCT:
+        return 0
+    rules = product.get("commission_rules") or []
+    if not rules:
+        return 0
+
+    clauses = {}
+    for rule in rules:
+        clause = _resolved_cpa_clause(rule)
+        if clause is not None:
+            value = ((clause.get("effect") or {}).get("deduction") or {}).get("value")
+            clauses.setdefault(value, clause)
+    if not clauses:
+        return 0
+    if len(clauses) > 1:
+        logger.warning(
+            "cpa_split: product %s publishes %d different CPA deduction values (%s); "
+            "skipping the gap-fill for it rather than guessing which applies",
+            product.get("product_code") or product.get("product_name"),
+            len(clauses),
+            sorted(str(v) for v in clauses),
+        )
+        return 0
+
+    clause = next(iter(clauses.values()))
+    filled = 0
+    for rule in rules:
+        conditions = rule.get("conditions") or {}
+        if conditions.get("cpa") is not None:
+            continue
+        outcome = rule.get("outcome") or {}
+        if str(outcome.get("other_conditions") or "").strip():
+            continue
+        if _resolved_cpa_clause(rule) is not None:
+            continue
+        import copy
+
+        out = rule.setdefault("outcome", {})
+        # Not setdefault: the key is routinely present and explicitly null, in
+        # which case setdefault hands back None and the append blows up.
+        existing = out.get("qualifying_clauses") or []
+        out["qualifying_clauses"] = existing + [copy.deepcopy(clause)]
+        filled += 1
+    return filled
+
+
 # Condition dimensions that identify a rule's coverage-independent grid slot.
 # policy_type is deliberately excluded — it is the coverage axis we compare across.
 _MIRROR_DIM_KEYS = (
@@ -372,19 +508,35 @@ def materialize_cpa_split(cics_doc):
     the split would compare a deducted without-cpa value against its
     comprehensive twin, stop recognising the mirror, and let the fabricated pair
     through as two rows instead of zero.
+
+    ``_propagate_cpa_clause_within_product`` runs per product BETWEEN the two:
+    after the dedup, so a fabricated third-party duplicate is deleted rather
+    than gap-filled and then split into two exported rows; before the split, so
+    a filled rule bifurcates in the same pass as every other.
     """
     if not isinstance(cics_doc, dict):
         return cics_doc
     drop_mirrored_third_party(cics_doc)
+    carrier = _document_carrier(cics_doc)
     stats = collections.Counter()
     for product in cics_doc.get("products") or []:
         rules = product.get("commission_rules")
         if not rules:
             continue
+        stats["gap_filled"] += _propagate_cpa_clause_within_product(product, carrier)
+        rules = product.get("commission_rules")
         expanded = []
         for rule in rules:
             expanded.extend(_split_rule(rule, stats))
         product["commission_rules"] = expanded
+    if stats["gap_filled"]:
+        logger.info(
+            "cpa_split: gap-filled the CPA deduction clause onto %d note-less "
+            "%s %s rule(s) that the footnote never reached",
+            stats["gap_filled"],
+            _GAP_FILL_CARRIER,
+            _GAP_FILL_SUBPRODUCT,
+        )
     if stats["tp_skipped_negative"]:
         logger.warning(
             "cpa_split: %d third-party without-CPA row(s) kept UNDEDUCTED because the "
