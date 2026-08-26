@@ -27,7 +27,88 @@ from typing import Dict, List, Tuple, Any, Optional
 from dataclasses import dataclass
 import re
 
+import logging
+
 from cins.processors.core.sheet_visibility import VISIBLE_SHEET_STATE
+from cins.processors.extractors.indicative_markers import (
+    IndicativeMarkerMatch,
+    scan_csv_file,
+)
+
+logger = logging.getLogger("excel_to_csv")
+
+#: Written by :func:`_apply_indicative_override`. Kept as a literal rather than
+#: importing ``SheetType`` because the classifier is an optional dependency
+#: here (see the guarded import below) and this path must work without it.
+INDICATIVE_DATA = "indicative_data"
+
+
+def _apply_indicative_override(
+    classification: Optional[Dict[str, Any]],
+    sheet_name: str,
+    marker: IndicativeMarkerMatch,
+) -> Dict[str, Any]:
+    """Relabel a sheet that declares it is not the authoritative payout grid.
+
+    Overrides ``commission_data`` AND ``master_data``, uniformly. Not just
+    commission: a self-declared non-authoritative rate grid labelled master
+    still has its full content concatenated into ``master_context`` and
+    injected into every sibling sheet's Pass 1 and Pass 2 prompt, which is the
+    pollution this exists to prevent. One rule — if the marker fires the label
+    is ``indicative_data`` — is one test rather than a matrix.
+
+    The prior verdict is preserved under ``override``, together with the
+    sentence that triggered this. ``sheet_metadata`` is free-form JSONB passed
+    through verbatim by the serializer, so that evidence reaches the frontend
+    with no extra plumbing — and when a sheet's whole output disappears, a
+    reviewer has to be able to read the reason without opening a shell.
+    """
+    prior = classification or {}
+    prior_type = prior.get("sheet_type")
+    prior_confidence = prior.get("confidence")
+
+    logger.warning(
+        "Sheet '%s': self-declared non-authoritative grid; classification "
+        "overridden %s(%s) -> %s. Matched '%s' + '%s' on CSV line %d: %r",
+        sheet_name,
+        prior_type or "unclassified",
+        prior_confidence if prior_confidence is not None else "n/a",
+        INDICATIVE_DATA,
+        marker.self_ref,
+        marker.deferral,
+        marker.line_number,
+        marker.excerpt,
+    )
+
+    indicators = [
+        f"disclaimer_marker: '{marker.self_ref}' + '{marker.deferral}'",
+        f"excerpt: {marker.excerpt}",
+    ]
+    indicators.extend(prior.get("indicators") or [])
+
+    return {
+        "sheet_name": sheet_name,
+        "sheet_type": INDICATIVE_DATA,
+        "confidence": 1.0,
+        "reasoning": (
+            "Sheet self-declares it is not the authoritative payout grid. "
+            "Deterministic disclaimer marker matched; LLM verdict "
+            f"'{prior_type or 'none'}' "
+            f"(confidence {prior_confidence if prior_confidence is not None else 'n/a'}) "
+            "overridden."
+        ),
+        "indicators": indicators,
+        "override": {
+            "source": "disclaimer_marker",
+            "self_ref": marker.self_ref,
+            "deferral": marker.deferral,
+            "excerpt": marker.excerpt,
+            "line": marker.line_number,
+            "overridden_sheet_type": prior_type,
+            "overridden_confidence": prior_confidence,
+        },
+    }
+
 
 # Import sheet classifier (optional dependency)
 try:
@@ -615,17 +696,34 @@ class ExcelToCSVConverter:
         if self.classifier:
             try:
                 csv_preview = self._read_csv_preview(csv_path, lines=20)
-                classification = self.classifier.classify_sheet(
+                result_obj = self.classifier.classify_sheet(
                     sheet_name=sheet_name,
                     csv_preview=csv_preview,
                     metadata=metadata.to_dict(),
                 )
-                # Add classification to metadata
-                metadata.classification = classification.to_dict()
+                classification = result_obj.to_dict()
             except Exception as e:
                 print(
                     f"Warning: Sheet classification failed for '{sheet_name}': {str(e)}"
                 )
+
+        # Step 8b: deterministic self-declared-indicative override.
+        #
+        # Runs AFTER the LLM, never instead of it. The LLM verdict is
+        # diagnostic evidence — "said commission_data at 1.0, overridden" is
+        # what tells a future reader the prompt change did not take — so it is
+        # preserved rather than short-circuited. And it runs independently of
+        # `self.classifier`, because a sheet whose classify call threw is
+        # exactly the one that most needs a label: with none, it lands in no
+        # bucket and the empty-commission fallback resurrects it.
+        marker = scan_csv_file(csv_path)
+        if marker:
+            classification = _apply_indicative_override(
+                classification, sheet_name, marker
+            )
+
+        if classification:
+            metadata.classification = classification
 
         # Step 9: Write metadata JSON
         with open(metadata_path, "w", encoding="utf-8") as f:
@@ -648,7 +746,7 @@ class ExcelToCSVConverter:
 
         # Add classification to result if available
         if classification:
-            result["classification"] = classification.to_dict()
+            result["classification"] = classification
 
         return result
 

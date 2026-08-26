@@ -107,7 +107,7 @@ class SheetVisibilityPredicateTests(TestCase):
             "Hidden MD": _cls("master_data", "veryHidden"),
             "Unclassified": _cls(None, "visible"),
         }
-        commission, master, hidden = derive_sheet_sets(classifications)
+        commission, master, hidden, _indicative = derive_sheet_sets(classifications)
         self.assertEqual(commission, ["Visible CD"])
         self.assertEqual(master, ["Visible MD"])
         self.assertEqual(sorted(hidden), ["Hidden CD", "Hidden MD"])
@@ -304,7 +304,7 @@ class RerunParityTests(TestCase):
             "Legend": _cls("master_data", "visible"),
             "Old Legend": _cls("master_data", "veryHidden"),
         }
-        commission, master, _hidden = derive_sheet_sets(classifications)
+        commission, master, _hidden, _indicative = derive_sheet_sets(classifications)
         doc = _indexed_doc(classifications, {k: "x" for k in classifications})
         self.assertEqual(commission, doc.get_commission_sheets())
         self.assertEqual(master, doc.get_master_sheets())
@@ -379,7 +379,7 @@ class Pass3InputSourceTests(TestCase):
         from cins.processors.core.pipeline import build_pass_contents
 
         classifications = {"Grid": _cls("commission_data", "hidden")}
-        commission, _master, _hidden = derive_sheet_sets(classifications)
+        commission, _master, _hidden, _indicative = derive_sheet_sets(classifications)
 
         _p1, _p2, pass3, email_is_primary = build_pass_contents(
             sheet_name="Grid",
@@ -396,7 +396,7 @@ class Pass3InputSourceTests(TestCase):
         from cins.processors.core.pipeline import build_pass_contents
 
         classifications = {"Grid": _cls("commission_data", "visible")}
-        commission, _master, _hidden = derive_sheet_sets(classifications)
+        commission, _master, _hidden, _indicative = derive_sheet_sets(classifications)
 
         _p1, _p2, pass3, email_is_primary = build_pass_contents(
             sheet_name="Grid",

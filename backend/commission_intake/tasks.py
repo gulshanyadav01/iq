@@ -293,8 +293,9 @@ def run_extraction(document_id: str, force_refresh: bool = False):
         if indexed.sheet_contents:
             from cins.processors.core.pipeline import derive_pipeline_routing
             from cins.processors.core.sheet_visibility import (
-                all_hidden_error,
                 hidden_sheet_names,
+                indicative_sheet_names,
+                nothing_routable_error,
             )
 
             sheet_metadata = indexed.sheet_metadata or {}
@@ -307,14 +308,16 @@ def run_extraction(document_id: str, force_refresh: bool = False):
                 excel_attachments=source_meta.get("excel_attachments", []),
             )
 
-            # Nothing routable — every sheet's tab is hidden. Fail loudly here,
-            # before any LLM call, rather than completing with zero rules and a
-            # green status the reviewer would read as "no commission data".
+            # Nothing routable — every sheet is hidden, or declares it is not
+            # the payout grid. Fail loudly here, before any LLM call, rather
+            # than completing with zero rules and a green status the reviewer
+            # would read as "no commission data".
             if not sheets_to_process:
                 raise ValueError(
-                    all_hidden_error(
+                    nothing_routable_error(
                         len(indexed.sheet_contents),
                         hidden_sheet_names(classifications),
+                        indicative_sheet_names(classifications),
                     )
                 )
 
@@ -898,7 +901,9 @@ def rerun_single_pass(
         # keyed on `sheet_type` alone — two readers, one document, two different
         # Pass 2 prompts. Sharing the helper also means the rerun cannot
         # re-inject a hidden master sheet the main run excluded.
-        commission_sheets, master_sheets, _hidden = derive_sheet_sets(classifications)
+        sheet_sets = derive_sheet_sets(classifications)
+        commission_sheets = sheet_sets.commission
+        master_sheets = sheet_sets.master
 
         master_context = ""
         for ms in master_sheets:

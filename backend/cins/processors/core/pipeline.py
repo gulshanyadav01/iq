@@ -36,11 +36,12 @@ from cins.processors.core.cpa_split import materialize_cpa_split
 from cins.processors.core.pcv_taxi_mirror import materialize_pcv_taxi_mirror
 from cins.processors.core.rule_priority import normalize_rule_priorities
 from cins.processors.core.sheet_visibility import (
-    all_hidden_error,
     derive_sheet_sets,
     describe_hidden,
     hidden_sheet_names,
-    visible_sheet_names,
+    indicative_sheet_names,
+    nothing_routable_error,
+    routable_sheet_names,
 )
 
 logger = logging.getLogger("pipeline")
@@ -186,6 +187,12 @@ def derive_pipeline_routing(
     mean that hiding the one commission sheet empties it, the fallback fires,
     and every hidden sheet comes back. See `cins.processors.core.sheet_visibility`.
 
+    Self-declared indicative sheets are excluded from both sides for exactly
+    the same reason, which is why the fallback uses `routable_sheet_names`
+    rather than `visible_sheet_names`: a document whose only rate-bearing sheet
+    is a "potential products" one-pager would otherwise empty the commission
+    set and route the one-pager anyway.
+
     Args:
         source_type: indexed_doc.source_type ("email", "excel", "pdf", ...)
         sheet_classifications: {sheet_name: {"sheet_type": ..., "visibility": ...}}
@@ -195,9 +202,18 @@ def derive_pipeline_routing(
     Returns:
         (sheets_to_process, attachment_name)
     """
-    commission_sheets, _master_sheets, hidden = derive_sheet_sets(sheet_classifications)
-    visible = visible_sheet_names(sheet_names, sheet_classifications)
-    sheets_to_process = commission_sheets if commission_sheets else visible
+    sheet_sets = derive_sheet_sets(sheet_classifications)
+    commission_sheets = sheet_sets.commission
+    hidden = sheet_sets.hidden
+    routable = routable_sheet_names(sheet_names, sheet_classifications)
+    sheets_to_process = commission_sheets if commission_sheets else routable
+
+    if sheet_sets.indicative:
+        logger.info(
+            "Routing excludes %d self-declared indicative sheet(s): %s",
+            len(sheet_sets.indicative),
+            ", ".join(sheet_sets.indicative),
+        )
 
     if hidden:
         logger.info(
@@ -1133,8 +1149,10 @@ class Pipeline:
         # doc and read in the UI as "extraction succeeded, no commission data".
         if not sheets_to_process and sheet_contents:
             raise ValueError(
-                all_hidden_error(
-                    len(sheet_contents), hidden_sheet_names(classifications)
+                nothing_routable_error(
+                    len(sheet_contents),
+                    hidden_sheet_names(classifications),
+                    indicative_sheet_names(classifications),
                 )
             )
 

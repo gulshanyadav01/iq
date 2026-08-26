@@ -430,12 +430,41 @@ def _env_int(name: str, default: int) -> int:
 #         rates; the other 244 are 0% rows whose deduction floors back to 0, so
 #         they change label only. Rules whose notes are NON-empty are left
 #         alone — 96 such rules in "June PO Grid - Chola MS.eml" are duplicates
-#         of the real grid extracted from stale CV AUG-25 / DIFF sheets, a
-#         separate defect this must not paper over. Rule counts RISE on Chola
-#         GCV, so the first re-extraction is a count increase, not the drop
-#         CINS_REGRESSION_GUARD watches for. Cached documents must re-extract or
-#         they keep serving the single merged-label row.
-CICS_PIPELINE_VERSION = "1.19.0"
+#         of the real grid extracted from a self-declared non-payout sheet, a
+#         separate defect this must not paper over (fixed in 1.20.0). Rule
+#         counts RISE on Chola GCV, so the first re-extraction is a count
+#         increase, not the drop CINS_REGRESSION_GUARD watches for. Cached
+#         documents must re-extract or they keep serving the merged-label row.
+# 1.20.0 — a sheet can carry real rates and still not be the payout grid,
+#         because its own text says so. Chola's "Hero Cells -June 26"
+#         attachment ends "Please check the payout Grid for actual payout,this
+#         sheet is just to identify the potential products" and shipped 96
+#         phantom commercial-gcv rules on "June PO Grid - Chola MS.eml" — 68
+#         exact duplicates of the real CV June 26 grid and 28 with no
+#         counterpart at all, 22 of those on a degenerate 0-0 GVW band. The
+#         classifier was not wrong; the taxonomy was. SheetType had two members
+#         and the prompt says any sheet with rates is COMMISSION_DATA, so the
+#         LLM returned commission_data at confidence 1.0 and complied exactly.
+#         SheetType gains INDICATIVE_DATA, routed NOWHERE — not to extraction,
+#         and deliberately not to master_data either, since master sheets are
+#         concatenated into master_context and injected into every other
+#         sheet's Pass 1 and Pass 2 prompt. The label is set by a deterministic
+#         disclaimer scan over the FULL sheet CSV
+#         (extractors/indicative_markers.py) that overrides the LLM verdict,
+#         because a prose instruction in a prompt is not a contract — the same
+#         lesson as the TW electric make bucket and the 4_OTHERS declined row.
+#         Measured on doc 180edf61: commercial-gcv 916 -> 820, whole document
+#         5560 -> 5464. That ratio is 0.983, far above the 0.75
+#         CINS_REGRESSION_GUARD_RATIO floor, and no product goes to zero, so
+#         detect_regression (which compares WHOLE-DOCUMENT totals plus a
+#         per-product-to-zero check) does not fire and needs no relaxation. The
+#         sweep behind the phrase list hit exactly 1 of 75 stored sheets and 1
+#         of the 17 sheets in the live workbook; re-run it before adding a
+#         phrase. Rollback is CINS_INDICATIVE_SHEETS=false. NOTE the prompt file
+#         also changed, which rotates prompt_version_hash and therefore
+#         invalidates the CICS cache for EVERY carrier and document
+#         independently of this constant.
+CICS_PIPELINE_VERSION = "1.20.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"

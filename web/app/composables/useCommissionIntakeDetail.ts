@@ -95,10 +95,25 @@ export interface SheetCoverage {
 // These are module-level pure functions so they can be tested without mounting
 // the composable (see useCommissionIntakeDetail.test.ts).
 
+type ClassificationOverride = {
+  source?: string
+  self_ref?: string
+  deferral?: string
+  excerpt?: string
+  line?: number
+  overridden_sheet_type?: string | null
+  overridden_confidence?: number | null
+}
+
 type ClassificationEntry = {
   sheet_type?: string
   classification?: string
   visibility?: string
+  // Present when a deterministic marker overrode the LLM verdict — currently
+  // only the self-declared-indicative disclaimer scan. Carries the sentence
+  // that caused it, which is the only evidence a reviewer gets for why a
+  // sheet's rules are absent.
+  override?: ClassificationOverride
 }
 
 function classificationsOf(indexed: IndexedContent): Record<string, ClassificationEntry> {
@@ -114,7 +129,21 @@ export function getSheetClassBadge(sheetName: string, indexed: IndexedContent): 
   const cls = getSheetClassification(sheetName, indexed)
   if (cls === 'commission_data') return 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
   if (cls === 'master_data') return 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400'
+  // Amber, and deliberately NOT the gray fallback below: indicative_data is a
+  // deliberate classification, and rendering it identically to 'unknown' would
+  // read as a pipeline failure rather than a sheet we chose not to extract.
+  if (cls === 'indicative_data') return 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400'
   return 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400'
+}
+
+/**
+ * The disclaimer sentence that caused a sheet to be reclassified, if any.
+ *
+ * Surfaced so "why did this sheet produce no rules?" is answerable in the UI
+ * rather than only in the backend logs.
+ */
+export function getSheetOverrideReason(sheetName: string, indexed: IndexedContent): string {
+  return classificationsOf(indexed)[sheetName]?.override?.excerpt || ''
 }
 
 const VISIBILITY_INDEXER_VERSION = [1, 4]
@@ -156,9 +185,15 @@ export function isSheetHidden(sheetName: string, indexed: IndexedContent): boole
 /**
  * Mirror of the backend's `derive_pipeline_routing`: when any visible sheet is
  * classified commission_data, ONLY those sheets are extracted; otherwise every
- * visible sheet is. Counting "extracted" as "not hidden and not master" would
+ * ROUTABLE sheet is. Counting "extracted" as "not hidden and not master" would
  * over-report a visible unclassified sheet as extracted (routing skips it when
  * commission sheets exist) and under-report master sheets in the fallback case.
+ *
+ * The fallback subtracts self-declared indicative sheets as well as hidden
+ * ones, mirroring the backend's `routable_sheet_names`. Filtering only the
+ * commission set would make this UI claim a "potential products" one-pager was
+ * extracted on any document that has no commission sheet — exactly the
+ * inversion the backend guard exists to prevent.
  */
 function routedSheetNames(names: string[], indexed: IndexedContent): string[] {
   const visible = names.filter(n => !isSheetHidden(n, indexed))
@@ -169,7 +204,10 @@ function routedSheetNames(names: string[], indexed: IndexedContent): string[] {
   const commission = visible.filter(
     n => classificationsOf(indexed)[n]?.sheet_type === 'commission_data'
   )
-  return commission.length ? commission : visible
+  if (commission.length) return commission
+  return visible.filter(
+    n => classificationsOf(indexed)[n]?.sheet_type !== 'indicative_data'
+  )
 }
 
 /**
@@ -776,7 +814,7 @@ export function useCommissionIntakeDetail() {
     passesForNum, passAggregateStatus,
     sheetCoverage, showCoverageStrip, coverageStripText, excelSheets,
     isInFlight, getStatusBadgeClass, formatStatus, getPassStatusBadge, getSeverityBadge,
-    getSheetClassification, getSheetClassBadge,
+    getSheetClassification, getSheetClassBadge, getSheetOverrideReason,
     formatCommissionValue, formatConditions,
     sheetPassStatus, copyJson, downloadJson, downloadExcel, downloadOriginal, loadDoc, refresh,
     triggerIndex, triggerExtract, triggerRerunPass, triggerTransform, triggerValidate,

@@ -167,6 +167,27 @@ class HiddenSheetApiTests(DjangoTestCase):
         hidden_detail = str(self._rerun("Old Grid").data["detail"])
         self.assertIn("hidden", hidden_detail.lower())
 
+    def test_rerun_rejection_explains_an_indicative_sheet_in_its_own_terms(self):
+        # "the pipeline only extracts commission sheets" is true here but
+        # unhelpful, because this sheet visibly HAS rates. The useful fact is
+        # that the sheet itself disclaims them.
+        IndexedContent.objects.filter(document=self.doc).update(
+            sheet_contents={**SHEET_CONTENTS, "hero cells": "rows"},
+            sheet_metadata={
+                "classifications": {
+                    **CLASSIFICATIONS,
+                    "hero cells": {
+                        "sheet_type": "indicative_data",
+                        "visibility": "visible",
+                    },
+                },
+                "source_metadata": {},
+            },
+        )
+        detail = str(self._rerun("hero cells").data["detail"])
+        self.assertIn("not the authoritative payout grid", detail)
+        self.assertNotIn("hidden", detail.lower())
+
     @override_settings(CINS_SKIP_HIDDEN_SHEETS=False)
     def test_rollback_flag_lifts_the_rerun_rejection(self):
         # The flag is documented as restoring pre-change behaviour without a
@@ -313,6 +334,47 @@ class CoverageAccuracyTests(DjangoTestCase):
         self.assertEqual(fates["Legend"], "Extracted")
         self.assertEqual(fates["Old Grid"], "Skipped — hidden sheet")
         self.assertIn("1 of 2 sheet(s) extracted", _all_text(ws))
+
+    def test_indicative_sheet_is_labelled_as_such_not_as_unclassified(self):
+        # "Not extracted (unclassified)" reads as a pipeline failure. This is a
+        # deliberate skip and the cell has to say so.
+        ws = self._coverage(
+            {"Grid": "rows", "hero cells": "rows"},
+            {
+                "Grid": {"sheet_type": "commission_data", "visibility": "visible"},
+                "hero cells": {
+                    "sheet_type": "indicative_data",
+                    "visibility": "visible",
+                },
+            },
+        )
+        fates = self._fates(ws)
+        self.assertEqual(fates["Grid"], "Extracted")
+        self.assertEqual(
+            fates["hero cells"],
+            "Not extracted — indicative grid (sheet states it is not the payout grid)",
+        )
+        self.assertIn("1 of 2 sheet(s) extracted", _all_text(ws))
+
+    def test_fallback_does_not_report_an_indicative_sheet_as_extracted(self):
+        # The mirror of test_fallback_reports_master_sheets_as_extracted, and
+        # the opposite answer. With no commission sheet, routing falls back —
+        # but `routable_sheet_names` subtracts indicative sheets, so this one is
+        # genuinely NOT extracted. Reporting it as extracted would be the
+        # inversion the routing guard exists to prevent.
+        ws = self._coverage(
+            {"hero cells": "rows", "Legend": "rows"},
+            {
+                "hero cells": {
+                    "sheet_type": "indicative_data",
+                    "visibility": "visible",
+                },
+                "Legend": {"sheet_type": "master_data", "visibility": "visible"},
+            },
+        )
+        fates = self._fates(ws)
+        self.assertEqual(fates["Legend"], "Extracted")
+        self.assertNotEqual(fates["hero cells"], "Extracted")
 
     def test_export_omits_the_coverage_sheet_when_there_are_no_sheets(self):
         doc = CommissionDocument.objects.create(

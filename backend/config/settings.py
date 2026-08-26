@@ -47,6 +47,7 @@ env = environ.Env(
     POLICY_EXTRACT_GEMINI_MODEL=(str, "gemini-2.5-flash-lite"),
     POLICY_EXTRACT_GEMINI_SEED=(int, 42),
     CINS_SKIP_HIDDEN_SHEETS=(bool, True),
+    CINS_INDICATIVE_SHEETS=(bool, True),
 )
 environ.Env.read_env(os.path.join(BASE_DIR, ".env"))
 
@@ -81,6 +82,13 @@ POLICY_EXTRACT_GEMINI_SEED = env("POLICY_EXTRACT_GEMINI_SEED")
 # extraction. Rollout switch — set to False to restore the previous behaviour
 # (every indexed sheet is routable) without a redeploy.
 CINS_SKIP_HIDDEN_SHEETS = env("CINS_SKIP_HIDDEN_SHEETS")
+
+# Exclude worksheets that declare in their own text that they are not the
+# authoritative payout grid (a sales one-pager, a "potential products" teaser).
+# Rollout switch — set to False to restore the previous behaviour (such a sheet
+# is classified and routed like any other rate-bearing sheet) without a
+# redeploy. See cins/processors/extractors/indicative_markers.py.
+CINS_INDICATIVE_SHEETS = env("CINS_INDICATIVE_SHEETS")
 
 # Application definition
 

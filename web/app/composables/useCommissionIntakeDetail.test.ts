@@ -4,7 +4,9 @@ import {
   computeSheetCoverage,
   coverageText,
   formatConditions,
+  getSheetClassBadge,
   getSheetClassification,
+  getSheetOverrideReason,
   getSheetVisibility,
   isSheetHidden,
   partitionSheetNames,
@@ -321,5 +323,55 @@ describe('formatConditions', () => {
 
   it('still falls back to the humanised key for an unknown field', () => {
     expect(formatConditions({ some_new_field: 'x' })).toBe('some new field: x')
+  })
+})
+
+/**
+ * Self-declared indicative sheets — a sheet that carries real rates and still
+ * is not the payout grid, because its own text says so. See
+ * `.claude/rules/cins.md` and `cins/processors/extractors/indicative_markers.py`.
+ */
+const VISIBLE_HERO_CELLS = { sheet_type: 'indicative_data', visibility: 'visible' }
+
+describe('indicative sheets', () => {
+  it('gives indicative_data its own badge, not the unknown fallback', () => {
+    const doc = indexed({ 'hero cells': VISIBLE_HERO_CELLS, Mystery: {} })
+    const indicativeBadge = getSheetClassBadge('hero cells', doc)
+    const unknownBadge = getSheetClassBadge('Mystery', doc)
+
+    expect(indicativeBadge).toContain('amber')
+    // The point of the arm: a deliberate classification must not render
+    // identically to "we have no idea", which reads as a pipeline failure.
+    expect(indicativeBadge).not.toBe(unknownBadge)
+  })
+
+  it('does not count an indicative sheet as extracted when a commission sheet exists', () => {
+    const coverage = computeSheetCoverage(
+      indexed({ Grid: VISIBLE_GRID, 'hero cells': VISIBLE_HERO_CELLS })
+    )
+    expect(coverage).toMatchObject({ total: 2, extracted: 1, referenceCount: 1 })
+  })
+
+  it('does not resurrect an indicative sheet through the no-commission fallback', () => {
+    // The case that matters. With no commission sheet the backend falls back to
+    // every ROUTABLE sheet — hidden AND indicative removed. Mirroring only the
+    // hidden half would make this UI claim the one-pager was extracted, on
+    // every document whose only rate-bearing sheet is a one-pager.
+    const coverage = computeSheetCoverage(
+      indexed({ 'hero cells': VISIBLE_HERO_CELLS, Legend: VISIBLE_LEGEND })
+    )
+    // Legend is extracted via the fallback; hero cells is not.
+    expect(coverage).toMatchObject({ total: 2, extracted: 1, referenceCount: 1 })
+  })
+
+  it('surfaces the disclaimer sentence that caused the reclassification', () => {
+    const doc = indexed({
+      'hero cells': {
+        ...VISIBLE_HERO_CELLS,
+        override: { excerpt: 'this sheet is just to identify the potential products' },
+      },
+    })
+    expect(getSheetOverrideReason('hero cells', doc)).toContain('potential products')
+    expect(getSheetOverrideReason('missing', doc)).toBe('')
   })
 })
