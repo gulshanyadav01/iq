@@ -62,7 +62,13 @@ def _doc(rules):
     }
 
 
-class ExportRendererTests(DjangoTestCase):
+class _ExportHelpers:
+    """Auth + export + worksheet-reading helpers, shared by the classes below.
+
+    A mixin rather than a base test class: subclassing a TestCase re-runs every
+    one of its tests under the subclass's name.
+    """
+
     def setUp(self):
         self.user = get_user_model().objects.create_user(
             email="t@example.com", password="x"
@@ -85,6 +91,8 @@ class ExportRendererTests(DjangoTestCase):
     def _rows(self, ws):
         return list(ws.iter_rows(min_row=2, values_only=True))
 
+
+class ExportRendererTests(_ExportHelpers, DjangoTestCase):
     def test_one_row_per_rule_no_export_side_split(self):
         # Two already-split rules + one plain rule => exactly 3 rows.
         wb = self._export(
@@ -175,3 +183,86 @@ class ExportRendererTests(DjangoTestCase):
         cols = self._cols(ws)
         rows = self._rows(ws)
         self.assertEqual(rows[0][cols["NetPercentage"] - 1], 12)
+
+
+CPA_CLAUSE = {
+    "clause_type": "conditional_deduction",
+    "text": "if CPA not collected then 1.5% of Net Payout deducted",
+    "when": {"cpa": "without-cpa"},
+    "effect": {
+        "deduction": {
+            "value": 1.5,
+            "value_type": "percentage",
+            "applied_on": "Net Payout",
+        }
+    },
+}
+
+
+def _gcv_doc(rules):
+    return {
+        "provider": {"provider_id": "Chola", "provider_name": "Cholamandalam MS"},
+        "products": [
+            {
+                "product_name": "Commercial Vehicle",
+                "product_code": "COMMERCIAL_VEHICLE_GCV",
+                "product_subproduct": "commercial-gcv",
+                "sub_category": "GCV",
+                "commission_rules": rules,
+            }
+        ],
+    }
+
+
+class ExportGapFilledCpaTests(_ExportHelpers, DjangoTestCase):
+    """A note-less Chola GCV rule exports TWO rows, not one merged-label row.
+
+    End-to-end: the transform-time gap-fill runs, then the pure renderer emits
+    what it produced. Before the fix the second rule below rendered as a single
+    "With CPA,Without CPA" row at the undeducted 10%.
+    """
+
+    def _split_and_export(self, cics_doc):
+        from cins.processors.core.cpa_split import materialize_cpa_split
+
+        return self._export(materialize_cpa_split(cics_doc))
+
+    def test_gap_filled_rule_exports_two_rows_at_deducted_rate(self):
+        wb = self._split_and_export(
+            _gcv_doc(
+                [
+                    _rule(None, 20, [CPA_CLAUSE], ["comprehensive"]),
+                    # No qualifying_clauses, no other_conditions: the gap.
+                    _rule(None, 10, None, ["comprehensive"]),
+                ]
+            )
+        )
+        ws = wb["Commission Rules"]
+        cols = self._cols(ws)
+        rows = self._rows(ws)
+        self.assertEqual(len(rows), 4, "gap-filled rule did not bifurcate")
+        self.assertNotIn(
+            "With CPA,Without CPA",
+            [r[cols["CPA"] - 1] for r in rows],
+            "a merged-label row survived the gap-fill",
+        )
+        net = cols["NetPercentage"] - 1
+        cpa = cols["CPA"] - 1
+        pairs = {(r[cpa], r[net]) for r in rows}
+        self.assertIn(("With CPA", 10), pairs)
+        self.assertIn(("Without CPA", 8.5), pairs)
+
+    def test_rule_with_unrelated_notes_still_exports_one_merged_row(self):
+        gap = _rule(None, 45, None, ["comprehensive"])
+        gap["outcome"]["other_conditions"] = (
+            "Private Car Comp ... this sheet is just to identify the potential products"
+        )
+        wb = self._split_and_export(
+            _gcv_doc([_rule(None, 20, [CPA_CLAUSE], ["comprehensive"]), gap])
+        )
+        ws = wb["Commission Rules"]
+        cols = self._cols(ws)
+        rows = self._rows(ws)
+        labels = [r[cols["CPA"] - 1] for r in rows]
+        self.assertEqual(labels.count("With CPA,Without CPA"), 1)
+        self.assertEqual(len(rows), 3)

@@ -31,6 +31,8 @@ def _rule(rule_id="R1"):
             "deal_parameter": "net",
             "state": ["andhra-pradesh"],
             "vehicle_sub_class": ["taxi"],
+            "seating_capacity_start_range": 0,
+            "seating_capacity_end_range": 5,
         },
         "outcome": {
             "commission_type": "percentage",
@@ -145,3 +147,18 @@ class ExportPcvTaxiMirrorTests(DjangoTestCase):
         ):
             self.assertEqual(cv_row[column], pc_row[column], column)
         self.assertEqual(cv_row["NetPercentage"], 12.5)
+
+    def test_seating_columns_are_blank_on_the_private_car_row_only(self):
+        """Private Car / Taxi is one deal, not a seat ladder — but the
+        commercial row's band is the only thing separating Normal Taxi from
+        Maxi Cab and Big Taxi, so both halves are asserted together."""
+        cics_doc = materialize_pcv_taxi_mirror(_pcv_doc())
+        rows = {r["Product"]: r for r in self._export(cics_doc)}
+
+        cv_row = rows["Commercial Vehicle"]
+        self.assertEqual(cv_row["SeatingCapacityStartRange"], 0)
+        self.assertEqual(cv_row["SeatingCapacityEndRange"], 5)
+
+        pc_row = rows["Private Car"]
+        self.assertIn(pc_row["SeatingCapacityStartRange"], ("", None))
+        self.assertIn(pc_row["SeatingCapacityEndRange"], ("", None))

@@ -553,3 +553,246 @@ class MirrorSignatureNcbTests(TestCase):
         )
         drop_mirrored_third_party(doc)
         self.assertEqual(len(doc["products"][0]["commission_rules"]), 1)
+
+
+# ---------------------------------------------------------------------------
+# Gap-fill: propagating a product's clause onto rules the footnote never reached
+# ---------------------------------------------------------------------------
+
+
+def _gap_rule(rule_id, pct, clauses=None, notes=None, policy_type=None, cpa=None):
+    """A CV rule in the shape the gap-fill cares about.
+
+    ``notes`` is ``outcome.other_conditions`` — the discriminator. Empty/absent
+    notes make a rule eligible; any non-empty text makes it ineligible.
+    """
+    conditions = {"deal_parameter": "net", "cpa": cpa}
+    if policy_type is not None:
+        conditions["policy_type"] = policy_type
+    outcome = {
+        "commission_type": "percentage",
+        "percentage_value": pct,
+        "applied_on": "Net Premium",
+        "qualifying_clauses": clauses,
+        "other_conditions": notes,
+    }
+    return {"rule_id": rule_id, "conditions": conditions, "outcome": outcome}
+
+
+def _gap_doc(rules, carrier="Chola", subproduct="commercial-gcv"):
+    product = {
+        "product_name": "Commercial Vehicle",
+        "product_code": "COMMERCIAL_VEHICLE_GCV",
+        "product_subproduct": subproduct,
+        "commission_rules": rules,
+    }
+    doc = {"products": [product]}
+    if carrier is not None:
+        doc["provider"] = {"provider_id": carrier, "provider_name": carrier}
+    return doc
+
+
+# The verbatim Chola CV footnote, which only _cpa_clause_from_notes can read.
+CV_FOOTNOTE = (
+    "Please note that the above payout grid - For Commercial Vehicle "
+    "Package/Liability policy is on Net Premium - CPA should be collected for "
+    "individual Name Mandatorily if CPA is not collected for individual name "
+    "then 1.5% of Net Payout will be deducted"
+)
+
+
+class ClausePropagationTests(TestCase):
+    """A note-less Chola GCV rule inherits its product's CPA deduction clause.
+
+    The population this closes: 0%-backstop rules (no notes at all) and rules
+    extracted from a separate sheet of the same workbook, both of which stayed
+    cpa-unconstrained and exported ONE merged "With CPA,Without CPA" row at the
+    undeducted rate.
+    """
+
+    def test_note_less_sibling_inherits_the_clause_and_splits(self):
+        doc = _gap_doc(
+            [
+                _gap_rule("carrier", 20.0, clauses=[CPA_CLAUSE]),
+                _gap_rule("gap", 10.0),
+            ]
+        )
+        materialize_cpa_split(doc)
+        by_id = {}
+        for rule in _rules(doc):
+            by_id.setdefault(rule["rule_id"], []).append(rule)
+        self.assertEqual(len(by_id["gap"]), 2, "note-less rule did not split")
+        rates = {
+            r["conditions"]["cpa"]: r["outcome"]["percentage_value"]
+            for r in by_id["gap"]
+        }
+        self.assertEqual(rates, {"with-cpa": 10.0, "without-cpa": 8.5})
+
+    def test_clause_detected_only_in_a_sibling_s_free_text_still_propagates(self):
+        # The live shape: Chola CV grids carry the footnote as prose in
+        # other_conditions, never as a structured qualifying_clause.
+        doc = _gap_doc(
+            [
+                _gap_rule("carrier", 20.0, notes=CV_FOOTNOTE),
+                _gap_rule("gap", 10.0),
+            ]
+        )
+        materialize_cpa_split(doc)
+        gap = [r for r in _rules(doc) if r["rule_id"] == "gap"]
+        self.assertEqual(len(gap), 2)
+        self.assertEqual({r["outcome"]["percentage_value"] for r in gap}, {10.0, 8.5})
+
+    def test_zero_rate_rule_splits_but_stays_at_zero(self):
+        # Cohort A: the 244 declined-segment backstop rules. Label-only change.
+        doc = _gap_doc(
+            [
+                _gap_rule("carrier", 20.0, clauses=[CPA_CLAUSE]),
+                _gap_rule("gap", 0.0),
+            ]
+        )
+        materialize_cpa_split(doc)
+        gap = [r for r in _rules(doc) if r["rule_id"] == "gap"]
+        self.assertEqual(len(gap), 2)
+        self.assertEqual([r["outcome"]["percentage_value"] for r in gap], [0.0, 0.0])
+        self.assertEqual(
+            {r["conditions"]["cpa"] for r in gap}, {"with-cpa", "without-cpa"}
+        )
+
+    def test_rule_with_unrelated_notes_is_left_alone(self):
+        # Cohort B: notes were examined and carry no footnote. Overriding that
+        # would polish summary-sheet duplicates of the real grid.
+        doc = _gap_doc(
+            [
+                _gap_rule("carrier", 20.0, clauses=[CPA_CLAUSE]),
+                _gap_rule(
+                    "summary",
+                    45.0,
+                    notes=(
+                        "Private Car Comp(5th to 15th year) ... this sheet is "
+                        "just to identify the potential products"
+                    ),
+                ),
+            ]
+        )
+        materialize_cpa_split(doc)
+        summary = [r for r in _rules(doc) if r["rule_id"] == "summary"]
+        self.assertEqual(len(summary), 1, "cohort-B rule was gap-filled")
+        self.assertIsNone(summary[0]["conditions"]["cpa"])
+        self.assertEqual(summary[0]["outcome"]["percentage_value"], 45.0)
+
+    def test_whitespace_only_notes_count_as_empty(self):
+        doc = _gap_doc(
+            [
+                _gap_rule("carrier", 20.0, clauses=[CPA_CLAUSE]),
+                _gap_rule("gap", 10.0, notes="   \n  "),
+            ]
+        )
+        materialize_cpa_split(doc)
+        self.assertEqual(len([r for r in _rules(doc) if r["rule_id"] == "gap"]), 2)
+
+    def test_other_carrier_is_untouched(self):
+        doc = _gap_doc(
+            [
+                _gap_rule("carrier", 20.0, clauses=[CPA_CLAUSE]),
+                _gap_rule("gap", 10.0),
+            ],
+            carrier="ICICI",
+        )
+        materialize_cpa_split(doc)
+        gap = [r for r in _rules(doc) if r["rule_id"] == "gap"]
+        self.assertEqual(len(gap), 1, "gap-fill escaped its carrier gate")
+
+    def test_other_subproduct_is_untouched(self):
+        doc = _gap_doc(
+            [
+                _gap_rule("carrier", 20.0, clauses=[CPA_CLAUSE]),
+                _gap_rule("gap", 10.0),
+            ],
+            subproduct="commercial-pcv",
+        )
+        materialize_cpa_split(doc)
+        gap = [r for r in _rules(doc) if r["rule_id"] == "gap"]
+        self.assertEqual(len(gap), 1, "gap-fill escaped its sub-product gate")
+
+    def test_missing_provider_is_a_no_op(self):
+        doc = _gap_doc(
+            [
+                _gap_rule("carrier", 20.0, clauses=[CPA_CLAUSE]),
+                _gap_rule("gap", 10.0),
+            ],
+            carrier=None,
+        )
+        materialize_cpa_split(doc)
+        self.assertEqual(len([r for r in _rules(doc) if r["rule_id"] == "gap"]), 1)
+
+    def test_product_with_no_clause_at_all_fills_nothing(self):
+        doc = _gap_doc([_gap_rule("a", 20.0), _gap_rule("b", 10.0)])
+        materialize_cpa_split(doc)
+        self.assertEqual(len(_rules(doc)), 2)
+        self.assertTrue(all(r["conditions"]["cpa"] is None for r in _rules(doc)))
+
+    def test_conflicting_deduction_values_disable_the_fill(self):
+        other = copy.deepcopy(CPA_CLAUSE)
+        other["effect"]["deduction"]["value"] = 2.5
+        doc = _gap_doc(
+            [
+                _gap_rule("c1", 20.0, clauses=[CPA_CLAUSE]),
+                _gap_rule("c2", 30.0, clauses=[other]),
+                _gap_rule("gap", 10.0),
+            ]
+        )
+        with self.assertLogs("cins.cpa_split", level="WARNING") as logs:
+            materialize_cpa_split(doc)
+        self.assertTrue(
+            any("different CPA deduction values" in m for m in logs.output),
+            logs.output,
+        )
+        gap = [r for r in _rules(doc) if r["rule_id"] == "gap"]
+        self.assertEqual(len(gap), 1, "filled despite conflicting deduction values")
+        # The clause-carrying rules still split on their own.
+        self.assertEqual(len([r for r in _rules(doc) if r["rule_id"] == "c1"]), 2)
+
+    def test_explicit_cpa_condition_is_untouched(self):
+        doc = _gap_doc(
+            [
+                _gap_rule("carrier", 20.0, clauses=[CPA_CLAUSE]),
+                _gap_rule("pinned", 10.0, cpa="with-cpa"),
+            ]
+        )
+        materialize_cpa_split(doc)
+        pinned = [r for r in _rules(doc) if r["rule_id"] == "pinned"]
+        self.assertEqual(len(pinned), 1)
+        self.assertEqual(pinned[0]["outcome"]["percentage_value"], 10.0)
+
+    def test_is_idempotent(self):
+        doc = _gap_doc(
+            [
+                _gap_rule("carrier", 20.0, clauses=[CPA_CLAUSE]),
+                _gap_rule("gap", 10.0),
+            ]
+        )
+        once = copy.deepcopy(materialize_cpa_split(doc))
+        twice = materialize_cpa_split(doc)
+        self.assertEqual(once, twice)
+
+    def test_dedup_runs_before_the_gap_fill(self):
+        # A fabricated third-party mirror must be DELETED, not gap-filled and
+        # then split into two exported rows. Guards the documented ordering.
+        doc = _gap_doc(
+            [
+                _gap_rule(
+                    "c1", 42.5, clauses=[CPA_CLAUSE], policy_type=["comprehensive"]
+                ),
+                _gap_rule("t1", 42.5, policy_type=["third-party"]),
+            ]
+        )
+        materialize_cpa_split(doc)
+        self.assertEqual(
+            [
+                r
+                for r in _rules(doc)
+                if r["conditions"]["policy_type"] == ["third-party"]
+            ],
+            [],
+            "fabricated third-party mirror survived the dedup",
+        )

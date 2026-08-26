@@ -14,7 +14,7 @@ with ``product_name="Private Car"`` / ``sub_category="Taxi"`` holding deep copie
 of those rules. The commercial rows are left untouched — this is a duplication,
 not a re-classification.
 
-Three deliberate boundaries:
+Four deliberate boundaries:
 
 * **Only the exact ``taxi`` slug qualifies.** ``big-taxi``,
   ``greater-than-six-seater``, ``maxi-cab``, ``kaali-peeli-taxi``,
@@ -30,6 +30,19 @@ Three deliberate boundaries:
   is numerically identical to its commercial twin. Cloning first would let
   ``_split_rule`` resolve ``applied_on`` differently for a Private Car product
   (OD vs Net basis) and silently produce a divergent deduction on one side.
+* **The clone carries NO seating band.** The client does not bifurcate Taxi by
+  seating capacity on the Private Car side — there is exactly one Private Car /
+  Taxi deal and it exists only for the up-to-5-seat taxi, so a populated
+  ``SeatingCapacityStartRange`` / ``EndRange`` cell asserts a scoping they never
+  book. The COMMERCIAL twin keeps its band untouched: there the band is the sole
+  discriminator between Normal Taxi (0-5), Maxi Cab (6-12) and Big Taxi (13-16),
+  and it has already shipped inverted once (see ``_apply_chola_pcv_subclass``).
+  Nulling a dimension is not free, which is why ``_seating_collision`` gates it:
+  ``rule_overlap_checker._constraint_state`` returns ``_NEITHER`` for a dimension
+  null on BOTH sides, so two rules separated only by seat band would become
+  ``_conditions_identical`` — a CRITICAL ``complete_overlap``, and a CRITICAL
+  makes ``cics_cache.should_cache`` refuse to pin the whole document. When such a
+  pair exists the product's clones keep their seating and a warning names them.
 
 Bucket consequence, and it is intended: the export derives the RTO column from
 ``master_data.services.resolver.product_bucket(product_name)``, so the mirrored
@@ -46,6 +59,7 @@ exists is skipped.
 """
 
 import copy
+import json
 import logging
 import os
 
@@ -71,6 +85,14 @@ _MIRROR_PRODUCT_NAME = "Private Car"
 _MIRROR_SUB_CATEGORY = "Taxi"
 _MIRROR_SUBPRODUCT = "car"
 _MIRROR_VEHICLE_TYPE = "car-taxi"
+
+# Cleared on every clone: Private Car / Taxi is one deal, not a seat ladder.
+# See the fourth boundary in the module docstring — the commercial source rule
+# keeps these, only the copy loses them.
+_MIRROR_SEATING_KEYS = (
+    "seating_capacity_start_range",
+    "seating_capacity_end_range",
+)
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -104,7 +126,45 @@ def _is_source_product(product) -> bool:
     return bool(product.get("product_code"))
 
 
-def _mirror_product(product, rules):
+def _seating_band(rule):
+    conditions = rule.get("conditions") or {}
+    return tuple(conditions.get(key) for key in _MIRROR_SEATING_KEYS)
+
+
+def _seating_free_signature(rule):
+    """The rule's grid slot with the seat band removed.
+
+    Two rules sharing this signature are, once the band is nulled, identical to
+    ``rule_overlap_checker._conditions_identical``. Deliberately CONDITIONS
+    ONLY: the checker compares conditions and ignores the payout, so folding the
+    outcome in here would make the guard blind to the very case it exists for —
+    two bands at DIFFERENT rates, which is the expensive collision, not the
+    harmless one.
+    """
+    conditions = {
+        key: value
+        for key, value in (rule.get("conditions") or {}).items()
+        if key not in _MIRROR_SEATING_KEYS
+    }
+    return json.dumps(conditions, sort_keys=True, default=str)
+
+
+def _seating_collision(rules):
+    """Rule-id pairs that only the seat band tells apart, or ``None``.
+
+    A collision means blanking would manufacture a CRITICAL ``complete_overlap``
+    and wall the document out of the cache, so the caller keeps the band instead.
+    """
+    by_signature = {}
+    for rule in rules:
+        by_signature.setdefault(_seating_free_signature(rule), []).append(rule)
+    for group in by_signature.values():
+        if len({_seating_band(rule) for rule in group}) > 1:
+            return [rule.get("rule_id") for rule in group]
+    return None
+
+
+def _mirror_product(product, rules, clear_seating=True):
     """Build the Private Car / Taxi twin of ``product`` for ``rules``."""
     clone = {
         "product_code": f"{product['product_code']}{MIRROR_SUFFIX}",
@@ -137,6 +197,9 @@ def _mirror_product(product, rules):
         rule_id = cloned_rule.get("rule_id")
         if rule_id:
             cloned_rule["rule_id"] = f"{rule_id}{MIRROR_SUFFIX}"
+        if clear_seating and isinstance(cloned_rule.get("conditions"), dict):
+            for key in _MIRROR_SEATING_KEYS:
+                cloned_rule["conditions"][key] = None
         clone["commission_rules"].append(cloned_rule)
     return clone
 
@@ -204,7 +267,21 @@ def materialize_pcv_taxi_mirror(cics_doc):
         ]
         if not taxi_rules:
             continue
-        mirrors.append((product, _mirror_product(product, taxi_rules)))
+        collision = _seating_collision(taxi_rules)
+        if collision:
+            logger.warning(
+                "pcv_taxi_mirror: %s has taxi rules separated only by seating "
+                "capacity (%s) — keeping the seat band on the mirrored rules "
+                "rather than manufacturing a complete_overlap",
+                product["product_code"],
+                ", ".join(str(rule_id) for rule_id in collision),
+            )
+        mirrors.append(
+            (
+                product,
+                _mirror_product(product, taxi_rules, clear_seating=not collision),
+            )
+        )
         existing_codes.add(mirror_code)
 
     for source, mirror in mirrors:

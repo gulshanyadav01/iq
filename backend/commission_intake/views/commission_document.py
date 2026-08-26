@@ -126,6 +126,32 @@ def _write_text_cell(ws, row, column, value):
     return cell
 
 
+def used_for_label(name, info, routed_set, hidden_set):
+    """The "UsedFor" cell for one sheet in the Sheet Coverage worksheet.
+
+    Pure and module-level so the rollout net can assert that every
+    ``SheetType`` yields a real label rather than the ``unclassified``
+    fallback — a new classification silently reported as "unclassified" would
+    read to a reviewer as a pipeline failure rather than a deliberate skip.
+
+    The indicative arm sits before the master arm: both are "not extracted",
+    but they mean opposite things. A master sheet IS consumed (it builds
+    `master_context`); an indicative sheet is consumed by nothing.
+    """
+    sheet_type = (info or {}).get("sheet_type")
+    if name in hidden_set:
+        return "Skipped — hidden sheet"
+    if name in routed_set:
+        return "Extracted"
+    if sheet_type == "indicative_data":
+        return (
+            "Not extracted — indicative grid (sheet states it is not the payout grid)"
+        )
+    if sheet_type == "master_data":
+        return "Reference only (master data)"
+    return "Not extracted (unclassified)"
+
+
 def _write_coverage_sheet(wb, document, header_font, header_fill):
     """Append a "Sheet Coverage" worksheet describing which source sheets fed
     the export.
@@ -180,14 +206,7 @@ def _write_coverage_sheet(wb, document, header_font, header_fill):
     row = 2
     for name in sheet_names:
         info = classifications.get(name) or {}
-        if name in hidden_set:
-            used_for = "Skipped — hidden sheet"
-        elif name in routed_set:
-            used_for = "Extracted"
-        elif (info.get("sheet_type")) == "master_data":
-            used_for = "Reference only (master data)"
-        else:
-            used_for = "Not extracted (unclassified)"
+        used_for = used_for_label(name, info, routed_set, hidden_set)
         _write_text_cell(cws, row, 1, name)
         _write_text_cell(cws, row, 2, info.get("sheet_type") or "unknown")
         _write_text_cell(cws, row, 3, sheet_state(info))
@@ -547,6 +566,17 @@ class CommissionDocumentViewSet(viewsets.GenericViewSet):
                 # there.
                 if sheet_name in set(hidden_sheet_names(classifications)):
                     reason = "its Excel tab is hidden"
+                elif (classifications.get(sheet_name) or {}).get(
+                    "sheet_type"
+                ) == "indicative_data":
+                    # Same reasoning one level deeper: "the pipeline only
+                    # extracts commission sheets" is true here but unhelpful,
+                    # because this sheet DOES carry rates. The useful fact is
+                    # that the sheet itself disclaims them.
+                    reason = (
+                        "the sheet states it is not the authoritative payout "
+                        "grid, so the pipeline does not extract it"
+                    )
                 else:
                     reason = (
                         f"it is classified "

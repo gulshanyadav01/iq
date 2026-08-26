@@ -163,7 +163,15 @@ def sanitize_sheet_key(name: str) -> str:
 # make grid and the sheet shipped 272 make-less `fuel_type=electric` rules
 # against ~1400 on the same workbook's unbannered sheets. The banner text is
 # preserved in the caption; only the per-column labels change.
-INDEXER_VERSION = "1.10"
+# 1.11 adds the third sheet classification, `indicative_data`: a sheet that
+# carries real rates and still is not the payout grid, because its own text says
+# so. Chola's `Hero Cells -June 26` one-pager ("this sheet is just to identify
+# the potential products") shipped 96 phantom `commercial-gcv` rules on
+# `June PO Grid - Chola MS.eml` — 68 exact duplicates of the real CV June 26
+# grid and 28 with no counterpart at all. The classification is written at index
+# time, so stored documents only pick up the new label by re-indexing, which is
+# what this bump forces.
+INDEXER_VERSION = "1.11"
 
 
 def _retag_single_commission_table(content_str: str, sheet_name: str) -> str:
@@ -425,6 +433,14 @@ class IndexedDocument:
     def get_hidden_sheets(self) -> List[str]:
         """Get list of sheet names excluded from extraction (hidden tabs)."""
         return derive_sheet_sets(self.get_sheet_classifications()).hidden
+
+    def get_indicative_sheets(self) -> List[str]:
+        """Get list of *visible* sheet names classified as indicative_data.
+
+        These carry rates but state in their own text that they are not the
+        payout grid, so they feed neither extraction nor `master_context`.
+        """
+        return derive_sheet_sets(self.get_sheet_classifications()).indicative
 
 
 def _convert_excel_to_csv(
@@ -1262,6 +1278,7 @@ class ContentIndexer:
                     sheet_type = sheet_classifications[prefixed_name].get("sheet_type")
                 is_master_data_sheet = sheet_type == "master_data"
                 is_commission_data_sheet = sheet_type == "commission_data"
+                is_indicative_data_sheet = sheet_type == "indicative_data"
 
                 # A hidden sheet is still indexed (the UI shows what was skipped,
                 # and "hidden + commission_data" is the signal that the wrong tab
@@ -1515,6 +1532,12 @@ class ContentIndexer:
                     elif is_commission_data_sheet:
                         logger.info(
                             f"  Sheet '{sheet_name}' is commission data but cleaning is disabled, skipping Pass 0C"
+                        )
+                    elif is_indicative_data_sheet:
+                        logger.info(
+                            f"  Sheet '{sheet_name}' self-declares it is not the "
+                            f"authoritative payout grid; indexed for reference "
+                            f"only, skipping Pass 0B/0C"
                         )
                     else:
                         logger.info(

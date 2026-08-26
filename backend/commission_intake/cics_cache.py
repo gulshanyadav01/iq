@@ -394,7 +394,77 @@ def _env_int(name: str, default: int) -> int:
 #         always wins. Cached documents must re-extract or they keep serving
 #         the untagged rows. Pairs with INDEXER_VERSION 1.10, which is what
 #         made the electric block extract at all.
-CICS_PIPELINE_VERSION = "1.17.0"
+# 1.18.0 — a mirrored Private Car / Taxi rule carries NO seating band. The
+#         client does not bifurcate Taxi by seating capacity on the Private Car
+#         side: there is one Private Car / Taxi deal and it exists only for the
+#         up-to-5-seat taxi (which is already all pcv_taxi_mirror clones, since
+#         it keys on the exact {"taxi"} slug). The mirror was a verbatim
+#         deepcopy, so every _PCTAXI row exported
+#         SeatingCapacityStartRange/EndRange = 0/5 — asserting a seat-based
+#         scoping the client never books. The COMMERCIAL twin is untouched;
+#         there the band is the only thing separating Normal Taxi (0-5) from
+#         Maxi Cab (6-12) and Big Taxi (13-16), and it shipped inverted once
+#         already (1.14.0). Guarded: nulling a dimension makes two rules
+#         separated only by that dimension _conditions_identical, i.e. a
+#         CRITICAL complete_overlap that would stop should_cache pinning the
+#         document, so a product whose taxi rules collide that way keeps its
+#         seat band and logs a warning. No rule is added or dropped and no
+#         product or segment disappears, so CINS_REGRESSION_GUARD should not
+#         fire. Cached documents must re-extract or they keep serving the
+#         populated seating cells.
+# 1.19.0 - The Chola CPA-deduction footnote is now gap-filled onto GCV rules it
+#         never reached. A rule only splits if the clause reaches IT, and two
+#         shapes never carry it in their own other_conditions: synthesized
+#         0%-backstop rules (declined segments, no notes at all) and rules
+#         extracted from a SEPARATE SHEET of the workbook — Chola's "Act Only
+#         Policy-Changes" publishes a heavy-GVW ACT ladder while the footnote
+#         sits on the main CV sheet. Both stayed cpa-unconstrained and exported
+#         ONE row labelled the merged "With CPA,Without CPA" at the undeducted
+#         rate. cpa_split._propagate_cpa_clause_within_product now copies a
+#         product's own detected clause onto its unconstrained, NOTE-LESS rules
+#         before the split. Scoped to Chola / commercial-gcv, unlike the split
+#         itself which is deliberately carrier-agnostic: that path only splits
+#         rules whose own text states the deduction, this one INFERS it, which
+#         is a stronger claim and is evidenced only here. Measured on the stored
+#         corpus: 265 rules filled (+265 exported rows), 21 of them at real
+#         rates; the other 244 are 0% rows whose deduction floors back to 0, so
+#         they change label only. Rules whose notes are NON-empty are left
+#         alone — 96 such rules in "June PO Grid - Chola MS.eml" are duplicates
+#         of the real grid extracted from a self-declared non-payout sheet, a
+#         separate defect this must not paper over (fixed in 1.20.0). Rule
+#         counts RISE on Chola GCV, so the first re-extraction is a count
+#         increase, not the drop CINS_REGRESSION_GUARD watches for. Cached
+#         documents must re-extract or they keep serving the merged-label row.
+# 1.20.0 — a sheet can carry real rates and still not be the payout grid,
+#         because its own text says so. Chola's "Hero Cells -June 26"
+#         attachment ends "Please check the payout Grid for actual payout,this
+#         sheet is just to identify the potential products" and shipped 96
+#         phantom commercial-gcv rules on "June PO Grid - Chola MS.eml" — 68
+#         exact duplicates of the real CV June 26 grid and 28 with no
+#         counterpart at all, 22 of those on a degenerate 0-0 GVW band. The
+#         classifier was not wrong; the taxonomy was. SheetType had two members
+#         and the prompt says any sheet with rates is COMMISSION_DATA, so the
+#         LLM returned commission_data at confidence 1.0 and complied exactly.
+#         SheetType gains INDICATIVE_DATA, routed NOWHERE — not to extraction,
+#         and deliberately not to master_data either, since master sheets are
+#         concatenated into master_context and injected into every other
+#         sheet's Pass 1 and Pass 2 prompt. The label is set by a deterministic
+#         disclaimer scan over the FULL sheet CSV
+#         (extractors/indicative_markers.py) that overrides the LLM verdict,
+#         because a prose instruction in a prompt is not a contract — the same
+#         lesson as the TW electric make bucket and the 4_OTHERS declined row.
+#         Measured on doc 180edf61: commercial-gcv 916 -> 820, whole document
+#         5560 -> 5464. That ratio is 0.983, far above the 0.75
+#         CINS_REGRESSION_GUARD_RATIO floor, and no product goes to zero, so
+#         detect_regression (which compares WHOLE-DOCUMENT totals plus a
+#         per-product-to-zero check) does not fire and needs no relaxation. The
+#         sweep behind the phrase list hit exactly 1 of 75 stored sheets and 1
+#         of the 17 sheets in the live workbook; re-run it before adding a
+#         phrase. Rollback is CINS_INDICATIVE_SHEETS=false. NOTE the prompt file
+#         also changed, which rotates prompt_version_hash and therefore
+#         invalidates the CICS cache for EVERY carrier and document
+#         independently of this constant.
+CICS_PIPELINE_VERSION = "1.20.0"
 
 # Directory whose contents define the prompt corpus (base prompts + overlays).
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "cins" / "prompts"
