@@ -631,8 +631,16 @@ class MineruGeminiParser:
                 "no_of_seats": {"description": "Number of seats (numeric only)"},
                 "no_of_wheels": {"description": "Number of wheels (numeric only)"},
                 "vechicle_carrier_id": {
-                    "description": "Vehicle carrier type",
-                    "enum": ["PUBLIC", "PRIVATE", "COMMERCIAL"],
+                    "description": (
+                        "Vehicle carrier / permit type. Map from the document's "
+                        "'Policy Type' / 'Permit Type' (surfaced as vehicles[].permit_type "
+                        "in the raw data): 'Public Carrier' -> PUBLIC, 'Private Carrier' -> "
+                        "PRIVATE, 'Private and Public Carrier' (either order) -> "
+                        "PUBLIC_PRIVATE. Only when the document states no permit type, fall "
+                        "back to COMMERCIAL for a goods commercial vehicle, or PRIVATE for a "
+                        "private car / two-wheeler (privately owned, no goods permit)."
+                    ),
+                    "enum": ["PUBLIC", "PRIVATE", "COMMERCIAL", "PUBLIC_PRIVATE"],
                 },
                 "rto_num": {"description": "RTO code (MH12)"},
                 "rto_city": {"description": "RTO city"},
@@ -1706,6 +1714,61 @@ class MineruGeminiParser:
                 structured_data["ncb_percent"]["is_extracted"] = "TRUE"
                 return
 
+    # Carrier-type normalisation and grounding. The goods/passenger permit is printed on
+    # the policy as "Policy Type" / "Permit Type" (Public Carrier / Private Carrier /
+    # Private and Public Carrier). Stage-1 captures it as vehicles[].permit_type; when it
+    # lands elsewhere we scan only raw items whose OWN text names a carrier/permit, so an
+    # unrelated broker entity ("... PRIVATE LIMITED") can never be read as a Private carrier.
+    _CARRIER_TEXT_BUCKETS = ("entities", "coverages", "references", "participants")
+
+    def _normalize_carrier(self, value: str) -> str:
+        """Collapse any carrier/permit spelling to one enum token, or '' if none."""
+        upper = (value or "").upper()
+        if not upper:
+            return ""
+        has_public = "PUBLIC" in upper
+        has_private = "PRIVATE" in upper
+        if has_public and has_private:
+            return "PUBLIC_PRIVATE"
+        if has_public:
+            return "PUBLIC"
+        if has_private:
+            return "PRIVATE"
+        if "COMMERCIAL" in upper:
+            return "COMMERCIAL"
+        return ""
+
+    def _carrier_from_raw(self, raw_data: Dict[str, Any]) -> str:
+        """Read the permit/carrier type straight from the Stage-1 raw data."""
+        if not raw_data:
+            return ""
+        # 1. Explicit permit_type on any raw vehicle (the labelled, grounded source).
+        for veh in raw_data.get("vehicles", []) or []:
+            if isinstance(veh, dict):
+                got = self._normalize_carrier(
+                    str(veh.get("permit_type") or veh.get("policy_type") or "")
+                )
+                if got:
+                    return got
+        # 2. Any raw item whose OWN text names a carrier/permit — gated on those words so
+        #    an unrelated "... PRIVATE LIMITED" entity can't be read as a Private carrier.
+        for bucket in self._CARRIER_TEXT_BUCKETS:
+            for item in raw_data.get(bucket, []) or []:
+                if not isinstance(item, dict):
+                    continue
+                text = " ".join(
+                    str(item.get(k, ""))
+                    for k in ("context", "value", "source_text", "label")
+                )
+                low = text.lower()
+                if ("carrier" in low or "permit" in low) and (
+                    "public" in low or "private" in low
+                ):
+                    got = self._normalize_carrier(text)
+                    if got:
+                        return got
+        return ""
+
     def _post_process(
         self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
     ) -> Dict[str, Any]:
@@ -1981,27 +2044,36 @@ class MineruGeminiParser:
                         structured_data["no_of_wheels"]["value"] = "4"
                         structured_data["no_of_wheels"]["is_extracted"] = "TRUE"
 
-        # Derive vechicle_carrier_id
+        # Derive vechicle_carrier_id. Priority: (1) the permit type actually printed on the
+        # document (grounded, via the Stage-1 raw data), then (2) a Stage-2 value that
+        # normalises to a known carrier, then (3) a class/product guess when the document is
+        # silent. Grounding wins over the LLM enum because Stage-2 used to emit an ungrounded
+        # COMMERCIAL for every CV, masking a "Public Carrier"/"Private Carrier" permit the
+        # document states plainly under "Policy Type" / "Permit Type".
         if "vechicle_carrier_id" in structured_data and isinstance(
             structured_data["vechicle_carrier_id"], dict
         ):
-            carrier_value = (
-                structured_data["vechicle_carrier_id"].get("value", "").upper()
-            )
             vehicle_class = (
                 structured_data.get("VehicleClass", {}).get("value", "").upper()
             )
             product_id = structured_data.get("product_id", {}).get("value", "").upper()
 
-            derived_carrier = None
-            if carrier_value in ["PUBLIC", "PRIVATE", "COMMERCIAL"]:
-                derived_carrier = carrier_value
-            elif not derived_carrier:
-                if vehicle_class in ["GCV"]:
+            derived_carrier = self._carrier_from_raw(raw_data)
+            if not derived_carrier:
+                derived_carrier = self._normalize_carrier(
+                    structured_data["vechicle_carrier_id"].get("value", "")
+                )
+            if not derived_carrier:
+                if vehicle_class == "GCV":
                     derived_carrier = "COMMERCIAL"
-                elif vehicle_class in ["PCV", "BUS"]:
+                elif vehicle_class in ("PCV", "BUS"):
                     derived_carrier = "PUBLIC"
-                elif product_id == "CAR":
+                elif product_id in ("CAR", "TWO WHEELER") or vehicle_class in (
+                    "PRIVATE CAR",
+                    "TWO WHEELER",
+                ):
+                    # Privately-owned vehicles carry no goods/passenger permit; the
+                    # reference (Permute) records them as Private, not blank.
                     derived_carrier = "PRIVATE"
                 elif product_id == "CV":
                     derived_carrier = "COMMERCIAL"

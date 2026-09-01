@@ -112,6 +112,12 @@ vehicles:
   vehicle's seat count, NOT a "PA for N passengers" line and NOT the number of wheels.
 - RTO LOCATION (for new/unregistered vehicles):
   • If vehicle is new (no reg number yet), extract "rto_location" in format "STATE - City"
+- PERMIT / CARRIER TYPE (permit_type): the goods/passenger carrier permit printed on
+  commercial, goods, or passenger vehicles. Capture the EXACT text next to a label such as
+  "Policy Type", "Permit Type", "Type of Permit", "Carrier Type", or "Permit" — e.g.
+  "Public Carrier", "Private Carrier", "Private and Public Carrier". Do NOT infer it from
+  the vehicle class; only capture it when the document states it. Two-wheelers and private
+  cars usually have none — omit "permit_type" then.
 
 coverages:
 
