@@ -16,7 +16,11 @@ from django.test import SimpleTestCase
 
 from policy_extract.models import PolicyExtractionRequest
 from policy_extract.serializers import PolicyExtractionRequestSerializer
-from policy_extract.services.content_type import _sniff, resolve_content_type
+from policy_extract.services.content_type import (
+    _sniff,
+    is_extractable,
+    resolve_content_type,
+)
 
 
 def _req(original_filename="doc", metadata=None):
@@ -48,6 +52,44 @@ class SniffTests(SimpleTestCase):
 
     def test_empty_head_returns_none(self):
         self.assertIsNone(_sniff(b""))
+
+
+class IsExtractableTests(SimpleTestCase):
+    """The PDF-only gate shared by the upload serializer and the parse task."""
+
+    def test_pdf_name_and_pdf_bytes_ok(self):
+        self.assertTrue(is_extractable("policy.pdf", b"%PDF-1.7 ..."))
+
+    def test_pdf_name_but_non_pdf_bytes_rejected(self):
+        # Magic bytes are authoritative — a file renamed to .pdf is caught.
+        self.assertFalse(is_extractable("policy.pdf", b"not a pdf at all"))
+
+    def test_disallowed_extension_rejected(self):
+        self.assertFalse(is_extractable("data.jsonl", b'{"a": 1}\n'))
+
+    def test_disallowed_extension_rejected_even_with_pdf_bytes(self):
+        # A present, non-allowed extension is disqualifying regardless of content.
+        self.assertFalse(is_extractable("data.jsonl", b"%PDF-1.7"))
+
+    def test_extensionless_file_link_pdf_ok(self):
+        # The file_link route stores the bare policy id (no extension); a valid
+        # PDF fetched by link must still pass on its content.
+        self.assertTrue(is_extractable("PBP10356218", b"%PDF-1.4"))
+
+    def test_extensionless_non_pdf_rejected(self):
+        # e.g. an HTML error page returned by a bad file_link.
+        self.assertFalse(is_extractable("PBP10356218", b"<!DOCTYPE html>"))
+
+    def test_empty_file_rejected(self):
+        self.assertFalse(is_extractable("policy.pdf", b""))
+
+    def test_name_only_pdf_extension_ok(self):
+        # No bytes to sniff: a declared .pdf extension is accepted.
+        self.assertTrue(is_extractable("policy.pdf"))
+
+    def test_name_only_extensionless_rejected(self):
+        # No bytes and no supported extension → cannot confirm → reject.
+        self.assertFalse(is_extractable("PBP10356218"))
 
 
 class ResolveContentTypeTests(SimpleTestCase):

@@ -13,6 +13,13 @@ logger = logging.getLogger(__name__)
 
 POLICY_EXTRACT_QUEUE = "policy_extract"
 
+# Time limits for the heavy parse task only (not global Celery config — a
+# `CELERY_TASK_*` Django setting would apply the limit to every task, including
+# commission_intake). Soft limit raises inside the task for a clean FAILED;
+# the hard limit kills a child hung past its own MinerU/Gemini HTTP timeout.
+_PARSER_SOFT_TIME_LIMIT = int(os.getenv("POLICY_EXTRACT_SOFT_TIME_LIMIT", "900"))
+_PARSER_TIME_LIMIT = int(os.getenv("POLICY_EXTRACT_TIME_LIMIT", "1080"))
+
 # Cap the callback body we persist. The callback receiver is a trust boundary, so
 # an oversized (or hostile/MITM'd) response must not bloat the row or freeze the
 # operator's browser when the body is rendered in the UI.
@@ -90,17 +97,31 @@ def _set_processing_status(self, extraction_request_id: str):
         raise self.retry(exc=exc, countdown=10)
 
 
-@shared_task(queue=POLICY_EXTRACT_QUEUE)
+@shared_task(
+    queue=POLICY_EXTRACT_QUEUE,
+    # A child killed mid-extraction (OOM / --max-memory-per-child recycle) requeues
+    # the task instead of silently dropping it; _run_parser is idempotent
+    # (re-downloads, overwrites result), so re-execution is safe.
+    acks_late=True,
+    reject_on_worker_lost=True,
+    soft_time_limit=_PARSER_SOFT_TIME_LIMIT,
+    time_limit=_PARSER_TIME_LIMIT,
+)
 def _run_parser(extraction_request_id: str):
     """Download the uploaded file from storage and run MinervaGeminiParser."""
     from django.core.files.storage import default_storage
     from policy_extract.models import PolicyExtractionRequest
+    from policy_extract.services.content_type import is_extractable
     from policy_extract.services.mineru_gemini_parser import MineruGeminiParser
 
     try:
         req = PolicyExtractionRequest.objects.get(id=extraction_request_id)
 
-        # Download file: from MinIO (source_url) or from external URL (file_link in metadata)
+        # Read the file from MinIO. Both ingestion paths now store the document at
+        # submission time (uploads directly; file_link fetched-and-stored while its
+        # presigned URL is still valid), so source_url is the normal path. The
+        # file_link branch below is a legacy/backfill fallback for any row created
+        # before that change — it re-fetches the link, which may already be expired.
         if req.source_url:
             suffix = os.path.splitext(req.original_filename)[-1] or ".pdf"
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
@@ -131,6 +152,19 @@ def _run_parser(extraction_request_id: str):
         intermediate_dir = tempfile.mkdtemp()
 
         try:
+            # Guard the parse path for both ingestion routes — the API upload is
+            # already validated, but file_link downloads bypass that serializer,
+            # so confirm the fetched bytes are actually a PDF before handing them
+            # to the PDF-only MinerU endpoint. A clear failure beats an opaque
+            # 400, and the finally below still cleans up the temp files.
+            with open(tmp_path, "rb") as check:
+                head = check.read(16)
+            if not is_extractable(req.original_filename, head):
+                raise ValueError(
+                    f"Unsupported file type for '{req.original_filename}'. "
+                    "Only PDF files can be extracted."
+                )
+
             # Run parser — saves .md and _raw.json into intermediate_dir
             parser = MineruGeminiParser(
                 api_key=os.getenv("GOOGLE_API_KEY"), intermediate_dir=intermediate_dir
