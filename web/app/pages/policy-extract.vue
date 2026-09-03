@@ -21,6 +21,55 @@
             @update:model-value="onSearchInput"
             @keydown.enter="runSearch"
           />
+          <UPopover v-model:open="dateOpen">
+            <button
+              type="button"
+              :class="['flex items-center gap-2 border px-4 py-2 rounded-lg text-sm font-medium transition duration-200', hasDateFilter ? 'border-primary-500 text-primary-600 dark:text-primary-400 bg-primary-500/10' : 'border-gray-300 dark:border-gray-700 bg-white/70 dark:bg-gray-900/70 hover:bg-white dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200']"
+              title="Filter by submitted date/time"
+            >
+              <UIcon name="i-lucide-calendar" class="w-4 h-4" />
+              <span>{{ hasDateFilter ? 'Date: on' : 'Date' }}</span>
+            </button>
+            <template #content>
+              <div class="p-4 w-72 space-y-3">
+                <div class="flex flex-wrap gap-2">
+                  <button
+                    v-for="p in datePresets"
+                    :key="p.days"
+                    type="button"
+                    class="px-2.5 py-1 rounded-md text-xs font-medium border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-300 transition"
+                    @click="setDatePreset(p.days)"
+                  >
+                    {{ p.label }}
+                  </button>
+                </div>
+                <div class="space-y-1">
+                  <label class="block text-[10px] uppercase tracking-widest text-gray-400">From</label>
+                  <input v-model="dateFrom" type="datetime-local" class="w-full">
+                </div>
+                <div class="space-y-1">
+                  <label class="block text-[10px] uppercase tracking-widest text-gray-400">To</label>
+                  <input v-model="dateTo" type="datetime-local" class="w-full">
+                </div>
+                <div class="flex justify-between pt-1">
+                  <button
+                    type="button"
+                    class="text-xs font-medium text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
+                    @click="clearDateRange"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    type="button"
+                    class="px-3 py-1.5 rounded-lg text-xs font-medium bg-primary-600 hover:bg-primary-700 text-white transition"
+                    @click="applyDateRange"
+                  >
+                    Apply
+                  </button>
+                </div>
+              </div>
+            </template>
+          </UPopover>
           <button
             class="flex items-center gap-2 border border-gray-300 dark:border-gray-700 bg-white/70 dark:bg-gray-900/70 hover:bg-white dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 px-4 py-2 rounded-lg text-sm font-medium transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
             :disabled="loading"
@@ -39,28 +88,48 @@
         </div>
       </div>
 
-      <!-- Metric Cards -->
+      <!-- Metric Cards (double as status filters) -->
       <div v-if="!loading" class="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        <div class="glass rounded-2xl p-5 space-y-1">
+        <button
+          type="button"
+          :class="['glass rounded-2xl p-5 space-y-1 text-left transition duration-200 hover:ring-1 hover:ring-primary-300', statusFilter === 'all' && 'ring-2 ring-primary-500']"
+          :aria-pressed="statusFilter === 'all'"
+          @click="setStatus('all')"
+        >
           <p class="text-[10px] uppercase tracking-widest text-gray-400 dark:text-gray-500">Total</p>
           <p class="text-2xl font-semibold text-gray-900 dark:text-white">{{ metrics.total }}</p>
-          <p class="text-xs text-gray-400">all time</p>
-        </div>
-        <div class="glass rounded-2xl p-5 space-y-1">
+          <p class="text-xs text-gray-400">{{ countsScopeLabel }}</p>
+        </button>
+        <button
+          type="button"
+          :class="['glass rounded-2xl p-5 space-y-1 text-left transition duration-200 hover:ring-1 hover:ring-primary-300', statusFilter === 'completed' && 'ring-2 ring-primary-500']"
+          :aria-pressed="statusFilter === 'completed'"
+          @click="setStatus('completed')"
+        >
           <p class="text-[10px] uppercase tracking-widest text-green-500">Completed</p>
           <p class="text-2xl font-semibold text-green-600 dark:text-green-400">{{ metrics.completed }}</p>
           <p class="text-xs text-gray-400">successfully extracted</p>
-        </div>
-        <div class="glass rounded-2xl p-5 space-y-1">
+        </button>
+        <button
+          type="button"
+          :class="['glass rounded-2xl p-5 space-y-1 text-left transition duration-200 hover:ring-1 hover:ring-primary-300', statusFilter === 'failed' && 'ring-2 ring-primary-500']"
+          :aria-pressed="statusFilter === 'failed'"
+          @click="setStatus('failed')"
+        >
           <p class="text-[10px] uppercase tracking-widest text-red-500">Failed</p>
           <p class="text-2xl font-semibold text-red-600 dark:text-red-400">{{ metrics.failed }}</p>
           <p class="text-xs text-gray-400">need attention</p>
-        </div>
-        <div class="glass rounded-2xl p-5 space-y-1">
+        </button>
+        <button
+          type="button"
+          :class="['glass rounded-2xl p-5 space-y-1 text-left transition duration-200 hover:ring-1 hover:ring-primary-300', statusFilter === 'in_progress' && 'ring-2 ring-primary-500']"
+          :aria-pressed="statusFilter === 'in_progress'"
+          @click="setStatus('in_progress')"
+        >
           <p class="text-[10px] uppercase tracking-widest text-blue-500">In Progress</p>
           <p class="text-2xl font-semibold text-blue-600 dark:text-blue-400">{{ metrics.inProgress }}</p>
           <p class="text-xs text-gray-400">processing now</p>
-        </div>
+        </button>
       </div>
       <div v-else class="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <div v-for="i in 4" :key="i" class="glass rounded-2xl p-5 space-y-2 animate-pulse">
@@ -87,15 +156,15 @@
 
       <!-- Empty State -->
       <div v-else-if="requests.length === 0" class="glass rounded-2xl p-12">
-        <div v-if="searchQuery.trim()" class="text-center space-y-3">
+        <div v-if="searchQuery.trim() || statusFilter !== 'all' || hasDateFilter" class="text-center space-y-3">
           <p class="text-sm text-gray-600 dark:text-gray-400">
-            No requests match “{{ searchQuery.trim() }}”.
+            No requests match the current filters.
           </p>
           <button
             class="text-xs font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300 transition"
-            @click="clearSearch"
+            @click="clearFilters"
           >
-            Clear search
+            Clear filters
           </button>
         </div>
         <div v-else class="text-center space-y-3">
@@ -121,19 +190,31 @@
                   Request ID
                 </th>
                 <th class="text-left px-4 py-3 text-xs font-semibold uppercase tracking-widest text-gray-600 dark:text-gray-400">
-                  Filename
+                  <button type="button" class="flex items-center gap-1 uppercase tracking-widest hover:text-gray-900 dark:hover:text-gray-200 transition" @click="toggleSort('original_filename')">
+                    Filename
+                    <UIcon :name="sortIcon('original_filename')" :class="['w-3.5 h-3.5', sortField === 'original_filename' ? 'text-primary-500' : 'text-gray-400']" />
+                  </button>
                 </th>
                 <th class="text-left px-4 py-3 text-xs font-semibold uppercase tracking-widest text-gray-600 dark:text-gray-400">
                   Form No.
                 </th>
                 <th class="text-left px-4 py-3 text-xs font-semibold uppercase tracking-widest text-gray-600 dark:text-gray-400">
-                  Status
+                  <button type="button" class="flex items-center gap-1 uppercase tracking-widest hover:text-gray-900 dark:hover:text-gray-200 transition" @click="toggleSort('status')">
+                    Status
+                    <UIcon :name="sortIcon('status')" :class="['w-3.5 h-3.5', sortField === 'status' ? 'text-primary-500' : 'text-gray-400']" />
+                  </button>
                 </th>
                 <th class="text-left px-4 py-3 text-xs font-semibold uppercase tracking-widest text-gray-600 dark:text-gray-400">
-                  Submitted
+                  <button type="button" class="flex items-center gap-1 uppercase tracking-widest hover:text-gray-900 dark:hover:text-gray-200 transition" @click="toggleSort('created_at')">
+                    Submitted
+                    <UIcon :name="sortIcon('created_at')" :class="['w-3.5 h-3.5', sortField === 'created_at' ? 'text-primary-500' : 'text-gray-400']" />
+                  </button>
                 </th>
                 <th class="text-left px-4 py-3 text-xs font-semibold uppercase tracking-widest text-gray-600 dark:text-gray-400">
-                  Updated
+                  <button type="button" class="flex items-center gap-1 uppercase tracking-widest hover:text-gray-900 dark:hover:text-gray-200 transition" @click="toggleSort('updated_at')">
+                    Updated
+                    <UIcon :name="sortIcon('updated_at')" :class="['w-3.5 h-3.5', sortField === 'updated_at' ? 'text-primary-500' : 'text-gray-400']" />
+                  </button>
                 </th>
                 <th class="px-4 py-3 w-10" />
               </tr>
@@ -425,20 +506,38 @@ let searchDebounce: ReturnType<typeof setTimeout> | undefined
 // (rapid typing fires overlapping requests; only the latest may apply).
 let loadSeq = 0
 
-function formNum(req: ExtractionRequest): string {
-  const value = req.metadata?.form_num
-  return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
-}
+// Filter + sort state. Status filter is grouped to match the metric cards
+// (in_progress = initiated + processing). Sort fields map to sortable columns.
+type StatusFilter = 'all' | 'completed' | 'failed' | 'in_progress'
+type SortField = 'created_at' | 'updated_at' | 'original_filename' | 'status'
+const statusFilter = ref<StatusFilter>('all')
+const sortField = ref<SortField>('created_at')
+const sortDir = ref<'asc' | 'desc'>('desc')
 
-function runSearch() {
-  // Cancel any pending debounced run so an Enter press doesn't also fire the
-  // timer (which would issue a second redundant request).
+// Submitted date/time range (bound to <input type="datetime-local">, i.e. local
+// wall-clock strings like "2026-09-03T14:30"). Sent to the API as UTC ISO.
+const dateFrom = ref('')
+const dateTo = ref('')
+const dateOpen = ref(false)
+const hasDateFilter = computed(() => !!dateFrom.value || !!dateTo.value)
+const datePresets: { label: string; days: number }[] = [
+  { label: 'Last 24h', days: 1 },
+  { label: '7 days', days: 7 },
+  { label: '30 days', days: 30 },
+]
+// Counts move with search + date range (not the status selection), so the Total
+// card's sublabel reflects whether those narrowing filters are active.
+const countsScopeLabel = computed(() =>
+  searchQuery.value.trim() || hasDateFilter.value ? 'matching filters' : 'all time',
+)
+
+// Any filter/sort change returns to page 1. Setting page to 1 triggers the
+// page watcher's reload; if already on page 1, reload directly.
+function applyAndReload() {
   if (searchDebounce) {
     clearTimeout(searchDebounce)
     searchDebounce = undefined
   }
-  // Reset to first page for a new search; the page watcher reloads when the
-  // value actually changes, so trigger the reload manually if already on page 1.
   if (page.value !== 1) {
     page.value = 1
   } else {
@@ -446,14 +545,86 @@ function runSearch() {
   }
 }
 
+function setStatus(s: StatusFilter) {
+  // Clicking the active status card again toggles the filter off (Total = all).
+  statusFilter.value = statusFilter.value === s ? 'all' : s
+  applyAndReload()
+}
+
+function toggleSort(field: SortField) {
+  if (sortField.value === field) {
+    sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
+  } else {
+    sortField.value = field
+    // Dates read newest-first by default; text sorts A→Z.
+    sortDir.value = field === 'original_filename' || field === 'status' ? 'asc' : 'desc'
+  }
+  applyAndReload()
+}
+
+function sortIcon(field: SortField): string {
+  if (sortField.value !== field) return 'i-lucide-chevrons-up-down'
+  return sortDir.value === 'asc' ? 'i-lucide-arrow-up' : 'i-lucide-arrow-down'
+}
+
+// datetime-local (local wall-clock) → UTC ISO for the API. Returns null for an
+// empty or unparsable value so a malformed input can't throw a RangeError from
+// toISOString() and wedge the list into its error state.
+function toApiIso(local: string): string | null {
+  if (!local) return null
+  const d = new Date(local)
+  return Number.isNaN(d.getTime()) ? null : d.toISOString()
+}
+
+// Format a Date to the local "YYYY-MM-DDTHH:mm" value a datetime-local input wants.
+function toLocalInput(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+const MS_PER_DAY = 86_400_000
+
+function setDatePreset(days: number) {
+  const from = new Date(Date.now() - days * MS_PER_DAY)
+  dateFrom.value = toLocalInput(from)
+  dateTo.value = ''
+  applyAndReload()
+}
+
+function applyDateRange() {
+  dateOpen.value = false
+  applyAndReload()
+}
+
+function clearDateRange() {
+  dateFrom.value = ''
+  dateTo.value = ''
+  dateOpen.value = false
+  applyAndReload()
+}
+
+function formNum(req: ExtractionRequest): string {
+  const value = req.metadata?.form_num
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
+}
+
+function runSearch() {
+  // Reset to first page for a new search (applyAndReload also cancels any
+  // pending debounce so an Enter press doesn't also fire the timer).
+  applyAndReload()
+}
+
 function onSearchInput() {
   if (searchDebounce) clearTimeout(searchDebounce)
   searchDebounce = setTimeout(runSearch, 300)
 }
 
-function clearSearch() {
+function clearFilters() {
   searchQuery.value = ''
-  runSearch()
+  statusFilter.value = 'all'
+  dateFrom.value = ''
+  dateTo.value = ''
+  applyAndReload()
 }
 
 const metrics = computed(() => ({
@@ -546,6 +717,13 @@ async function loadRequests() {
     const query: Record<string, string | number> = { page: page.value }
     const search = searchQuery.value.trim()
     if (search) query.search = search
+    if (statusFilter.value !== 'all') query.status = statusFilter.value
+    // datetime-local values are local wall-clock; convert to UTC ISO for the API.
+    const createdAfter = toApiIso(dateFrom.value)
+    if (createdAfter) query.created_after = createdAfter
+    const createdBefore = toApiIso(dateTo.value)
+    if (createdBefore) query.created_before = createdBefore
+    query.ordering = (sortDir.value === 'desc' ? '-' : '') + sortField.value
     const data = await $fetch<PaginatedRequests>(`${getBaseUrl()}/api/policy-extract/requests/`, {
       headers,
       query

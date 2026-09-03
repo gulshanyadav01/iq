@@ -37,6 +37,20 @@ class PolicyExtractionRequest(TimeStampedUUIDModel):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            # Back the columns the list endpoint's (unauthenticated) `ordering`
+            # param can sort by, so a filename/updated sort can't force a
+            # full-table filesort. created_at and status are already indexed;
+            # the trailing -created_at, id match the query's stable tiebreaker.
+            models.Index(
+                fields=["original_filename", "-created_at", "id"],
+                name="pext_filename_created_idx",
+            ),
+            models.Index(
+                fields=["updated_at", "-created_at", "id"],
+                name="pext_updated_created_idx",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.original_filename} ({self.status})"
