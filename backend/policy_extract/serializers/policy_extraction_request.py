@@ -11,6 +11,33 @@ class PolicyExtractionRequestCreateSerializer(serializers.ModelSerializer):
         model = PolicyExtractionRequest
         fields = ["file", "metadata"]
 
+    def validate_file(self, file_obj):
+        # Reject anything the extraction pipeline can't parse before it is stored
+        # or enqueued, so a non-PDF (e.g. a .jsonl) never reaches the PDF-only
+        # MinerU endpoint. Checks the extension and sniffs the leading bytes so a
+        # file merely renamed to .pdf is still caught.
+        import os
+
+        from policy_extract.services.content_type import (
+            EXTRACTABLE_EXTENSIONS,
+            is_extractable,
+        )
+
+        head = file_obj.read(16)
+        file_obj.seek(0)
+        if not is_extractable(file_obj.name, head):
+            ext = os.path.splitext(file_obj.name or "")[-1].lower()
+            allowed = ", ".join(sorted(EXTRACTABLE_EXTENSIONS))
+            detail = (
+                f"Unsupported file type '{ext}'."
+                if ext
+                else "The uploaded file is not a valid PDF."
+            )
+            raise serializers.ValidationError(
+                f"{detail} Only {allowed} files are supported."
+            )
+        return file_obj
+
     def create(self, validated_data):
         import uuid
 
@@ -41,11 +68,28 @@ class PolicyExtractionRequestLinkCreateSerializer(serializers.Serializer):
     ipAddress = serializers.CharField(required=False, allow_null=True)
 
     def create(self, validated_data):
+        import uuid
+
+        from policy_extract.services.remote_fetch import fetch_document_to_storage
+
+        policy_identifier = validated_data["policy_identifier"]
+        file_link = validated_data["file_link"]
         metadata = {
             k: v for k, v in validated_data.items() if k not in ("policy_identifier",)
         }
+
+        # Fetch the presigned document NOW, while its (typically ~5-minute) URL is
+        # still valid, and persist a durable copy under source_url. The task reads
+        # that stored copy, never the ephemeral link — so a queue backlog can't
+        # push the download past expiry. A failed/expired link raises straight to
+        # the client (502/400). See services/remote_fetch.py for the rationale.
+        request_id = uuid.uuid4()
+        storage_key = f"policy_extractions/originals/{request_id}/{policy_identifier}"
+        fetch_document_to_storage(file_link, storage_key, policy_identifier)
+
         return PolicyExtractionRequest.objects.create(
-            original_filename=validated_data["policy_identifier"],
+            original_filename=policy_identifier,
+            source_url=storage_key,
             status=PolicyExtractionRequest.Status.INITIATED,
             metadata=metadata,
         )

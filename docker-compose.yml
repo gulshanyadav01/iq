@@ -16,7 +16,7 @@ services:
     ports:
       - "${API_PORT:-8000}:8000"
     environment: &backend-env
-      DEBUG:  ${DEBUG:-true}
+      DEBUG: ${DEBUG:-true}
       APP_ENV: ${APP_ENV:-DEV}
       SECRET_KEY: ${SECRET_KEY:-mysecretkey}
       WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:-mywebhooksecretkey}
@@ -95,6 +95,11 @@ services:
     image: insur-iq-backend:latest
     volumes: *backend-volumes
     command: ["bash", "./entrypoint.sh", "celery-policy-extract"]
+    # Kill a runaway worker cleanly at the container boundary instead of letting
+    # it drive host-wide memory pressure that starves the Redis consumer (the
+    # suspected "Connection to broker lost" trigger). --max-memory-per-child
+    # recycles children below this; mem_limit is the hard backstop.
+    mem_limit: ${POLICY_EXTRACT_MEM_LIMIT:-1g}
     environment:
       <<: *backend-env
       CELERY_AUTORELOAD: "1"
@@ -156,7 +161,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    command: [ "start" ]
+    command: ["start"]
     ports:
       - "${AUTH_HOST_PORT:-10000}:10000"
     environment:
@@ -184,7 +189,7 @@ services:
       WEBHOOK_EP: ${WEBHOOK_EP:-http://backend:8000/api/auth/webhook/}
     restart: always
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:10000/api/auth/ok" ]
+      test: ["CMD", "curl", "-f", "http://localhost:10000/api/auth/ok"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -235,6 +240,17 @@ services:
   redis:
     image: redis:7
     restart: always
+    # Cap broker memory and REFUSE to evict on OOM — Redis is the Celery broker,
+    # so an eviction policy would silently drop queued tasks; noeviction makes it
+    # reject writes (a surfaced error) instead of losing messages.
+    command:
+      [
+        "redis-server",
+        "--maxmemory",
+        "${REDIS_MAXMEMORY:-512mb}",
+        "--maxmemory-policy",
+        "noeviction",
+      ]
     ports:
       - "${REDIS_HOST_PORT:-6379}:6379"
     healthcheck:

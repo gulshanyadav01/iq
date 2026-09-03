@@ -356,3 +356,16 @@ CELERY_RESULT_EXTENDED = True
 CELERY_BROKER_URL = env("CELERY_BROKER_URL")
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 CELERY_RESULT_EXPIRES = 2592000
+
+# --- Broker resilience (heavy, long-running policy_extract tasks) ---
+# Reconnect instead of crashing if Redis blips while a worker is starting up.
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+# Redis broker transport tuning: visibility_timeout must stay above the longest
+# task so a still-running task isn't redelivered to a second worker; periodic
+# health checks + TCP keepalive let a dropped socket be detected and
+# re-established promptly (the "Connection to broker lost" recovery path).
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    "visibility_timeout": env.int("CELERY_VISIBILITY_TIMEOUT", default=3600),
+    "health_check_interval": 30,
+    "socket_keepalive": True,
+}
