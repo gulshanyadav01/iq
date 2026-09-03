@@ -125,6 +125,11 @@ services:
     image: insur-iq-backend:latest
     volumes: *backend-volumes
     command: ["bash", "./entrypoint.sh", "celery-policy-extract"]
+    # Kill a runaway worker cleanly at the container boundary instead of letting
+    # it drive host-wide memory pressure that starves the Redis consumer (the
+    # suspected "Connection to broker lost" trigger). --max-memory-per-child
+    # recycles children below this; mem_limit is the hard backstop.
+    mem_limit: ${POLICY_EXTRACT_MEM_LIMIT:-1g}
     environment:
       <<: *backend-env
     extra_hosts:

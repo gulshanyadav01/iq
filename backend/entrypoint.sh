@@ -26,13 +26,19 @@ elif [ "$1" = "celery" ]; then
     exec celery -A config worker --loglevel=INFO
   fi
 elif [ "$1" = "celery-policy-extract" ]; then
-  echo "📄 Starting Celery policy-extract worker (concurrency=10)..."
+  # Recycle prefork children so long-running MinerU/Gemini tasks can't leak
+  # memory across runs (whole PDFs + LLM payloads sit in RAM); prefetch=1 stops a
+  # busy worker hoarding messages it can't start. Concurrency is the peak-memory
+  # driver, so keep it modest and env-overridable (raise on a box with headroom).
+  POLICY_EXTRACT_CONCURRENCY="${POLICY_EXTRACT_CONCURRENCY:-4}"
+  PE_FLAGS="--queues=policy_extract --concurrency=${POLICY_EXTRACT_CONCURRENCY} --prefetch-multiplier=1 --max-tasks-per-child=50 --max-memory-per-child=512000 --loglevel=INFO --hostname=policy-extract@%h"
+  echo "📄 Starting Celery policy-extract worker (concurrency=${POLICY_EXTRACT_CONCURRENCY})..."
   if [ "$CELERY_AUTORELOAD" = "1" ]; then
     echo "🔁 Auto-reload enabled (watchmedo)"
     exec watchmedo auto-restart --directory=/app --pattern='*.py' --recursive -- \
-      celery -A config worker --queues=policy_extract --concurrency=10 --loglevel=INFO --hostname=policy-extract@%h
+      celery -A config worker $PE_FLAGS
   else
-    exec celery -A config worker --queues=policy_extract --concurrency=10 --loglevel=INFO --hostname=policy-extract@%h
+    exec celery -A config worker $PE_FLAGS
   fi
 elif [ "$1" = "celery-commission-intake" ]; then
   echo "📄 Starting Celery commission-intake worker (concurrency=2)..."
