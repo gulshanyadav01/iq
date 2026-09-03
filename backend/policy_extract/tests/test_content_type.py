@@ -20,6 +20,7 @@ from policy_extract.services.content_type import (
     _sniff,
     is_extractable,
     resolve_content_type,
+    storage_error_message,
 )
 
 
@@ -90,6 +91,74 @@ class IsExtractableTests(SimpleTestCase):
     def test_name_only_extensionless_rejected(self):
         # No bytes and no supported extension → cannot confirm → reject.
         self.assertFalse(is_extractable("PBP10356218"))
+
+
+class StorageErrorMessageTests(SimpleTestCase):
+    """Detecting the storage service's error envelope (an expired presigned link)."""
+
+    _EXPIRED = (
+        b'{"statusCode":24,"statusMsg":"The validity of the URL you are '
+        b'requesting has expired."}'
+    )
+
+    def test_expired_envelope_returns_generic_message(self):
+        msg = storage_error_message(self._EXPIRED)
+        self.assertTrue(msg)
+        self.assertIn("expired", msg.lower())
+        # The untrusted remote statusMsg is NOT reflected into the message
+        # (it reaches the API client and the logs).
+        self.assertNotIn("The validity of the URL", msg)
+
+    def test_complete_envelope_under_cap_detected(self):
+        # A complete envelope whose full JSON fits within the 2048-byte cap is
+        # detected (real error envelopes are ~90 bytes, well under the cap).
+        body = b'{"statusMsg":"expired","pad":"' + b"y" * 1980 + b'"}'
+        self.assertLess(len(body), 2048)
+        self.assertTrue(storage_error_message(body))
+
+    def test_body_larger_than_cap_not_detected(self):
+        # Best-effort by design: a body whose JSON does not fully fit within the
+        # 2048-byte cap fails json.loads on the truncated slice and returns "".
+        body = b'{"statusMsg":"expired","pad":"' + b"x" * 4000 + b'"}'
+        self.assertEqual(storage_error_message(body), "")
+
+    def test_deeply_nested_body_does_not_raise(self):
+        # A hostile deeply nested body must never propagate (RecursionError etc.);
+        # the helper degrades to "" rather than raising.
+        body = b"[" * 4000 + b"]" * 4000
+        self.assertEqual(storage_error_message(body), "")
+
+    def test_status_code_only_envelope_still_detected(self):
+        # No statusMsg, but a statusCode present → still an error envelope.
+        self.assertTrue(storage_error_message(b'{"statusCode":403}'))
+
+    def test_message_key_envelope_detected(self):
+        self.assertTrue(storage_error_message(b'{"message":"access denied"}'))
+
+    def test_json_content_type_header_triggers_detection(self):
+        # Body doesn't start with '{' (leading whitespace) but header says JSON.
+        body = b'  {"statusMsg":"expired"}'
+        self.assertTrue(storage_error_message(body, "application/json"))
+
+    def test_pdf_bytes_are_never_an_envelope(self):
+        self.assertEqual(storage_error_message(b"%PDF-1.4 body"), "")
+
+    def test_plain_json_without_error_keys_is_not_an_envelope(self):
+        # A benign JSON body lacking statusMsg/statusCode/message is not an error.
+        self.assertEqual(storage_error_message(b'{"data": 1}'), "")
+
+    def test_non_json_bytes_ignored(self):
+        self.assertEqual(storage_error_message(b"<!DOCTYPE html>"), "")
+
+    def test_empty_bytes_ignored(self):
+        self.assertEqual(storage_error_message(b""), "")
+
+    def test_malformed_json_ignored(self):
+        self.assertEqual(storage_error_message(b'{"statusMsg": '), "")
+
+    def test_json_array_is_not_an_envelope(self):
+        # Looks like JSON, parses, but isn't an object carrying the error keys.
+        self.assertEqual(storage_error_message(b'["statusMsg"]'), "")
 
 
 class ResolveContentTypeTests(SimpleTestCase):
