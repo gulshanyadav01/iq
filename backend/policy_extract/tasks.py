@@ -111,7 +111,10 @@ def _run_parser(extraction_request_id: str):
     """Download the uploaded file from storage and run MinervaGeminiParser."""
     from django.core.files.storage import default_storage
     from policy_extract.models import PolicyExtractionRequest
-    from policy_extract.services.content_type import is_extractable
+    from policy_extract.services.content_type import (
+        is_extractable,
+        storage_error_message,
+    )
     from policy_extract.services.mineru_gemini_parser import MineruGeminiParser
 
     try:
@@ -137,6 +140,23 @@ def _run_parser(extraction_request_id: str):
                 tmp_path = tmp.name
                 resp = requests.get(file_link, timeout=60)
                 resp.raise_for_status()
+                # An expired link returns the storage service's JSON error
+                # envelope (often HTTP 200) instead of the PDF — fail with that
+                # message rather than writing the JSON bytes and later reporting
+                # the misleading "unsupported file type".
+                expired_msg = storage_error_message(
+                    resp.content, resp.headers.get("Content-Type", "")
+                )
+                if expired_msg:
+                    # %r keeps an untrusted body from injecting log lines; the
+                    # generic message is what lands in req.error for the client.
+                    logger.warning(
+                        "Linked document unavailable %s: %s | body=%.300r",
+                        file_link,
+                        expired_msg,
+                        resp.content,
+                    )
+                    raise ValueError(expired_msg)
                 tmp.write(resp.content)
 
             # Save downloaded file to MinIO and update source_url

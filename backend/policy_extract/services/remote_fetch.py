@@ -20,7 +20,10 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from rest_framework.exceptions import APIException
 
-from policy_extract.services.content_type import is_extractable
+from policy_extract.services.content_type import (
+    is_extractable,
+    storage_error_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +68,22 @@ def fetch_document_to_storage(file_link: str, storage_key: str, filename: str) -
         raise RemoteDocumentUnavailable() from exc
 
     content = resp.content
+    # An expired presigned link returns the storage service's JSON error envelope
+    # (often with HTTP 200, so raise_for_status above didn't catch it) instead of
+    # the PDF. Report that as an unavailable link rather than letting the JSON
+    # bytes fall through to the PDF gate below and read as "unsupported file type".
+    expired_msg = storage_error_message(content, resp.headers.get("Content-Type", ""))
+    if expired_msg:
+        # Log the raw body with %r (repr escapes control chars, so an untrusted
+        # body can't inject log lines); the client only sees the generic message.
+        logger.warning(
+            "Linked document unavailable %s: %s | body=%.300r",
+            file_link,
+            expired_msg,
+            content,
+        )
+        raise RemoteDocumentUnavailable(detail=expired_msg)
+
     # Validate before storing — same PDF-only gate the upload path enforces, run
     # here on the fetched bytes so the link path is guarded identically.
     if not is_extractable(filename, content[:16]):

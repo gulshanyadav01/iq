@@ -32,10 +32,13 @@ _URL = reverse("policy-extract-requests-list")
 _FETCH = "policy_extract.services.remote_fetch.fetch_document_to_storage"
 
 
-def _response(content):
+def _response(content, headers=None):
     resp = MagicMock()
     resp.raise_for_status.return_value = None
     resp.content = content
+    # Real dict so remote_fetch's `resp.headers.get("Content-Type", "")` returns a
+    # str, not a MagicMock (which storage_error_message can't scan for "json").
+    resp.headers = headers or {}
     return resp
 
 
@@ -79,6 +82,26 @@ class FetchDocumentToStorageTests(SimpleTestCase):
         ):
             with self.assertRaises(RemoteDocumentUnavailable):
                 fetch_document_to_storage("https://x/pdf", "key/PBP1", "PBP1")
+        save.assert_not_called()
+
+    def test_expired_envelope_raises_502_and_is_not_stored(self):
+        # An expired presigned link returns the storage service's JSON error body
+        # (with HTTP 200, so raise_for_status passes) in place of the PDF. It must
+        # surface as an unavailable link, not "unsupported file type".
+        resp = _response(
+            b'{"statusCode":24,"statusMsg":"The validity of the URL you are '
+            b'requesting has expired."}',
+            headers={"Content-Type": "application/json"},
+        )
+        with (
+            patch(
+                "policy_extract.services.remote_fetch.requests.get", return_value=resp
+            ),
+            patch("policy_extract.services.remote_fetch.default_storage.save") as save,
+        ):
+            with self.assertRaises(RemoteDocumentUnavailable) as ctx:
+                fetch_document_to_storage("https://x/expired", "key/PBP1", "PBP1")
+        self.assertIn("expired", str(ctx.exception.detail).lower())
         save.assert_not_called()
 
     def test_non_pdf_raises_400_and_is_not_stored(self):

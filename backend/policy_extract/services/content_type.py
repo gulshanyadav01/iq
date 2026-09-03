@@ -9,10 +9,16 @@ preview). This resolver layers two more signals on top of the filename guess: th
 last resort, a magic-byte sniff of the file's leading bytes.
 """
 
+import json
 import mimetypes
 import os
 
 _OCTET_STREAM = "application/octet-stream"
+
+# Only the first bytes of a link response are inspected for the storage error
+# envelope — bounds the JSON parse cost (and recursion depth) on an arbitrarily
+# large or hostile body fetched from a client-supplied link.
+_MAX_ENVELOPE_PARSE_BYTES = 2048
 
 # The file extensions the extraction pipeline can actually parse. MinerU (the
 # sole parse path in `_run_parser`) validates by filename extension and only
@@ -75,6 +81,55 @@ def resolve_content_type(instance, head: bytes | None = None) -> str:
     if (not ct or ct == _OCTET_STREAM) and head:
         ct = _sniff(head) or ct
     return ct or _OCTET_STREAM
+
+
+def storage_error_message(content: bytes, content_type: str = "") -> str:
+    """Message if ``content`` is the storage service's error envelope, else ``""``.
+
+    A short-lived presigned ``file_link`` that has expired doesn't return the PDF —
+    the storage gateway returns a small JSON error body in its place (e.g.
+    ``{"statusCode":24,"statusMsg":"...expired..."}``), sometimes with an HTTP 200
+    status so ``raise_for_status`` never trips. Detecting it here lets both fetch
+    sites report an *expired link* instead of mislabelling the JSON bytes as an
+    "unsupported file type".
+
+    Only non-PDF bodies are candidates, so a genuine PDF is never misread. The
+    match is intentionally broad — any JSON object carrying ``statusMsg`` /
+    ``statusCode`` / ``message`` in place of the file counts, covering expiry as
+    well as other presign errors (auth, missing object). A real non-PDF the user
+    actually uploaded (HTML, PNG, …) is not this envelope, so it still falls
+    through to the unsupported-file path.
+
+    The returned message is deliberately generic: it does not reflect the
+    untrusted remote ``statusMsg`` (which reaches the API client and the logs),
+    and it does not over-claim "expired" for a body that is really a 403 or a
+    missing object. Callers log the raw body separately for debugging.
+    """
+    if content[:5] == b"%PDF-":
+        return ""
+    looks_json = "json" in (content_type or "").lower() or content[:1] in (b"{", b"[")
+    if not looks_json:
+        return ""
+    try:
+        payload = json.loads(content[:_MAX_ENVELOPE_PARSE_BYTES])
+    except Exception:
+        # Any parse failure — malformed/truncated JSON, or a RecursionError from
+        # a deeply nested hostile body — means this isn't a usable envelope. The
+        # contract is to return a message or "", never to raise.
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    has_envelope = (
+        payload.get("statusMsg") is not None
+        or payload.get("message") is not None
+        or "statusCode" in payload
+    )
+    if not has_envelope:
+        return ""
+    return (
+        "The file link is no longer valid or has expired, so the document "
+        "could not be downloaded. Retry with a fresh link."
+    )
 
 
 def is_extractable(filename: str, head: bytes | None = None) -> bool:
