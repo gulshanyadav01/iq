@@ -3,8 +3,8 @@
 ``GET /api/policy-extract/requests/?search=<term>`` narrows the list with a
 case-insensitive substring match over the partner form number
 (``metadata.form_num``), the original filename and ``policy_extraction_id``,
-plus an exact match on the internal request id (UUID). The all-time ``counts``
-breakdown stays unaffected by the filter. These tests pin that contract.
+plus an exact match on the internal request id (UUID). The ``counts`` breakdown
+is scoped to the search filter. These tests pin that contract.
 
 Run from the backend container:
     python manage.py test policy_extract.tests.test_list_search -v 2
@@ -91,10 +91,10 @@ class ListSearchTests(APITestCase):
             {str(self.with_form.id), str(self.without_form.id)},
         )
 
-    def test_counts_are_all_time_not_scoped_to_search(self):
+    def test_counts_are_scoped_to_search(self):
         response = self.client.get(self.url, {"search": "PB123456"})
         self.assertEqual(response.status_code, 200)
-        # Only one row matches, but the all-time totals still count both.
+        # Counts move with the search filter: only the matching row is counted.
         self.assertEqual(len(response.data["results"]), 1)
-        self.assertEqual(response.data["counts"]["total"], 2)
-        self.assertEqual(response.data["counts"]["completed"], 2)
+        self.assertEqual(response.data["counts"]["total"], 1)
+        self.assertEqual(response.data["counts"]["completed"], 1)

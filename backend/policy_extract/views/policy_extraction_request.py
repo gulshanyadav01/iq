@@ -1,6 +1,8 @@
 import uuid
 
 from django.db.models import Count, Q
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from drf_spectacular.utils import extend_schema, OpenApiCallback, OpenApiParameter
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -15,6 +17,13 @@ from policy_extract.serializers import (
     PolicyExtractCallbackSerializer,
 )
 from policy_extract.tasks import enqueue_processing_chain
+
+# Non-terminal statuses grouped as "in_progress" in both the counts breakdown and
+# the status filter. Single source so the cards and the filter can never disagree.
+IN_PROGRESS_STATUSES = [
+    PolicyExtractionRequest.Status.INITIATED,
+    PolicyExtractionRequest.Status.PROCESSING,
+]
 
 
 class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
@@ -77,9 +86,11 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
     @extend_schema(
         summary="List extraction requests",
         description="Paginated list of extraction requests (newest first). Response includes "
-        "DRF pagination keys (count/next/previous/results) plus an all-time `counts` "
-        "breakdown by status. Intended for inspection/admin; clients should rely on the "
-        "configured callback for canonical results, not on polling this endpoint.",
+        "DRF pagination keys (count/next/previous/results) plus a `counts` breakdown "
+        "by status. The breakdown is scoped to the search and date-range filters but "
+        "NOT the status filter (so the status cards stay switchable). Intended for "
+        "inspection/admin; clients should rely on the configured callback for canonical "
+        "results, not on polling this endpoint.",
         tags=["Policy Extract"],
         parameters=[
             OpenApiParameter(
@@ -87,14 +98,59 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
                 type=str,
                 description="Case-insensitive substring match over the partner form number "
                 "(metadata.form_num), original filename and policy_extraction_id, "
-                "plus an exact match on the request id (UUID). The all-time `counts` "
-                "breakdown is not affected by this filter.",
+                "plus an exact match on the request id (UUID). The `counts` breakdown "
+                "is scoped to this filter.",
+            ),
+            OpenApiParameter(
+                name="status",
+                type=str,
+                enum=[
+                    "completed",
+                    "failed",
+                    "in_progress",
+                    "initiated",
+                    "processing",
+                ],
+                description="Filter the list by status. `in_progress` groups "
+                "`initiated` + `processing` (matching the UI cards). Unknown values "
+                "are ignored. The `counts` breakdown is NOT scoped by this filter, "
+                "so all four status cards stay populated and switchable.",
+            ),
+            OpenApiParameter(
+                name="ordering",
+                type=str,
+                description="Sort field: one of created_at, updated_at, "
+                "original_filename, status. Prefix with `-` for descending. "
+                "Defaults to `-created_at` (newest first). Unknown fields fall "
+                "back to the default.",
+            ),
+            OpenApiParameter(
+                name="created_after",
+                type=str,
+                description="Keep only requests submitted at or after this "
+                "ISO-8601 datetime (e.g. 2026-09-03T00:00:00Z). Unparsable "
+                "values are ignored. The `counts` breakdown is scoped to this "
+                "range.",
+            ),
+            OpenApiParameter(
+                name="created_before",
+                type=str,
+                description="Keep only requests submitted at or before this "
+                "ISO-8601 datetime. A date-only value is treated as that day's "
+                "midnight (00:00), so pass a full datetime to include the whole "
+                "day. Unparsable values are ignored. The `counts` breakdown is "
+                "scoped to this range.",
             ),
         ],
         responses={200: PolicyExtractionRequestSerializer(many=True)},
     )
     def list(self, request, *args, **kwargs):
-        queryset = self.get_queryset().order_by("-created_at")
+        # `base` carries the filters that also scope the `counts` breakdown:
+        # free-text search and the submitted-date range. The status selection is
+        # applied to the list only (below), NOT to `base` — the four status cards
+        # double as the status switcher, so each must keep showing its count
+        # within the current search/date window regardless of which one is active.
+        base = self.get_queryset()
         # Bound the term length so a pathologically long value can't blow up the
         # LIKE patterns run across the table on every (unauthenticated) call.
         search = request.query_params.get("search", "").strip()[:200]
@@ -110,13 +166,65 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
                 filters |= Q(id=uuid.UUID(search))
             except (ValueError, TypeError):
                 pass
-            queryset = queryset.filter(filters)
-        counts = self.get_queryset().aggregate(
+            base = base.filter(filters)
+
+        # Submitted (created_at) datetime range. Naive values are assumed to be
+        # in the server's current timezone; unparsable values are ignored.
+        def _parse_dt(raw):
+            # Bound the length before parsing, mirroring the `search` cap — this
+            # is an unauthenticated endpoint and a multi-MB value shouldn't reach
+            # the parser.
+            parsed = parse_datetime(raw.strip()[:64]) if raw else None
+            if parsed and timezone.is_naive(parsed):
+                parsed = timezone.make_aware(parsed)
+            return parsed
+
+        created_after = _parse_dt(request.query_params.get("created_after", ""))
+        if created_after:
+            base = base.filter(created_at__gte=created_after)
+        created_before = _parse_dt(request.query_params.get("created_before", ""))
+        if created_before:
+            base = base.filter(created_at__lte=created_before)
+        # Counts reflect search + date range (so the cards move with those
+        # filters) but not the status selection (so all four stay switchable).
+        counts = base.aggregate(
             total=Count("id"),
             completed=Count("id", filter=Q(status="completed")),
             failed=Count("id", filter=Q(status="failed")),
-            in_progress=Count("id", filter=Q(status__in=["initiated", "processing"])),
+            in_progress=Count("id", filter=Q(status__in=IN_PROGRESS_STATUSES)),
         )
+        # Status filter, grouped to match the UI metric cards (in_progress spans
+        # both non-terminal statuses). Unknown values are ignored so a bad param
+        # on this unauthenticated endpoint can't error.
+        status_filters = {
+            "completed": Q(status="completed"),
+            "failed": Q(status="failed"),
+            "in_progress": Q(status__in=IN_PROGRESS_STATUSES),
+            "initiated": Q(status="initiated"),
+            "processing": Q(status="processing"),
+        }
+        status_param = request.query_params.get("status", "").strip().lower()
+        queryset = base
+        if status_param in status_filters:
+            queryset = queryset.filter(status_filters[status_param])
+        # Whitelisted ordering; append -created_at, id as a stable tiebreaker so
+        # pagination is deterministic when sorting by a field with many ties
+        # (status/original_filename).
+        ordering_fields = {"created_at", "updated_at", "original_filename", "status"}
+        ordering = request.query_params.get("ordering", "").strip()
+        # Honor only a single optional leading "-"; strip more than one and the
+        # field would still pass a naive whitelist but blow up order_by() with a
+        # FieldError (HTTP 500) on this unauthenticated endpoint.
+        descending = ordering.startswith("-")
+        field = ordering[1:] if descending else ordering
+        if field in ordering_fields:
+            normalized = ("-" if descending else "") + field
+            # Stable tiebreaker: id alone when sorting by created_at (a dead
+            # "created_at, -created_at" otherwise), else -created_at, id.
+            tiebreak = ["id"] if field == "created_at" else ["-created_at", "id"]
+            queryset = queryset.order_by(normalized, *tiebreak)
+        else:
+            queryset = queryset.order_by("-created_at", "id")
         page = self.paginate_queryset(queryset)
         serializer = PolicyExtractionRequestSerializer(page, many=True)
         response = self.get_paginated_response(serializer.data)
