@@ -39,7 +39,7 @@
   },
   "release-it": {
     "git": {
-      "requireBranch": "master",
+      "requireBranch": "main",
       "commitMessage": "chore: release v${version}",
       "tagName": "v${version}",
       "commitArgs": [
