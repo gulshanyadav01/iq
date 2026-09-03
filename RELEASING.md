@@ -10,7 +10,7 @@ project-specific step (see "Deploy" at the bottom).
 | --------- | ---------------------------------------------------------------------------- |
 | `dev`     | Default / integration branch. Feature branches PR into `dev`.                |
 | `master`  | Stable production branch. Merge `dev` → `master` via PR when stable.         |
-| tags `v*` | Cut **only from `master`** by `pnpm release`. Tags drive the released image. |
+| tags `v*` | Cut **only from `main`** by `pnpm release`. Tags drive the released image. |
 
 ## CI (`.github/workflows/ci.yml`)
 
@@ -86,12 +86,12 @@ gh api -X PUT "repos/{owner}/{repo}/branches/master/protection" \
 
 ## Cutting a release
 
-Releases use [`release-it`](https://github.com/release-it/release-it). Run **from `master`**
-(`git.requireBranch: master` enforces this):
+Releases use [`release-it`](https://github.com/release-it/release-it). Run **from `main`**
+(`git.requireBranch: main` enforces this):
 
 ```bash
 export GITHUB_TOKEN=$(gh auth token)   # release-it needs this to create the GitHub release
-git checkout master && git pull
+git checkout main && git pull
 pnpm release            # interactive: choose patch/minor/major
 # or non-interactively:
 pnpm release minor --ci
