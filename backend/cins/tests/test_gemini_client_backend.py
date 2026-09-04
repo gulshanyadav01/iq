@@ -12,6 +12,11 @@ Guards two contracts:
    fails fast at client-init with ``GeminiServiceError`` rather than deferring an
    opaque auth failure into the generate_content retry loop.
 
+3. The same contract in ``pipelines.steps.llm_extract``, which builds its own
+   client. It used to pass ``vertexai=use_vertex`` and ``api_key=`` together,
+   which on the Vertex path is Vertex AI *Express* mode — region-locked, and it
+   404s on models not provisioned in the express region.
+
 These tests mock the SDK client — no network calls.
 """
 
@@ -40,10 +45,21 @@ class GeminiClientBackendTests(unittest.TestCase):
         # docker-compose default /secrets/gcp/sa-key.json) can't leak into the
         # preflight file check. Default GOOGLE_CLOUD_LOCATION to a valid value so
         # the Vertex region guard passes; tests override either explicitly.
-        env = {"GOOGLE_APPLICATION_CREDENTIALS": "", "GOOGLE_CLOUD_LOCATION": "global", **env}
+        env = {
+            "GOOGLE_APPLICATION_CREDENTIALS": "",
+            "GOOGLE_CLOUD_LOCATION": "global",
+            **env,
+        }
 
-        with mock.patch.dict("os.environ", env, clear=False), mock.patch.dict(
-            "sys.modules", {"google.genai": fake_genai, "google": mock.MagicMock(genai=fake_genai)}
+        with (
+            mock.patch.dict("os.environ", env, clear=False),
+            mock.patch.dict(
+                "sys.modules",
+                {
+                    "google.genai": fake_genai,
+                    "google": mock.MagicMock(genai=fake_genai),
+                },
+            ),
         ):
             service = GeminiService(api_key=api_key, model="gemini-2.5-flash-lite")
             service._get_client()
@@ -84,18 +100,24 @@ class GeminiClientBackendTests(unittest.TestCase):
         fake_genai = mock.MagicMock()
         fake_genai.Client = fake_client_cls
 
-        with mock.patch.dict(
-            "os.environ",
-            {
-                "GOOGLE_GENAI_USE_VERTEXAI": "true",
-                "GOOGLE_CLOUD_PROJECT": "proj",
-                "GOOGLE_CLOUD_LOCATION": "global",
-                "GOOGLE_APPLICATION_CREDENTIALS": "",
-            },
-            clear=False,
-        ), mock.patch.dict(
-            "sys.modules",
-            {"google.genai": fake_genai, "google": mock.MagicMock(genai=fake_genai)},
+        with (
+            mock.patch.dict(
+                "os.environ",
+                {
+                    "GOOGLE_GENAI_USE_VERTEXAI": "true",
+                    "GOOGLE_CLOUD_PROJECT": "proj",
+                    "GOOGLE_CLOUD_LOCATION": "global",
+                    "GOOGLE_APPLICATION_CREDENTIALS": "",
+                },
+                clear=False,
+            ),
+            mock.patch.dict(
+                "sys.modules",
+                {
+                    "google.genai": fake_genai,
+                    "google": mock.MagicMock(genai=fake_genai),
+                },
+            ),
         ):
             # Must NOT raise GeminiAPIKeyMissingError despite no key anywhere.
             service = GeminiService(model="gemini-2.5-flash-lite")
@@ -112,13 +134,19 @@ class GeminiClientBackendTests(unittest.TestCase):
         fake_genai = mock.MagicMock()
         fake_genai.Client = fake_client_cls
 
-        with mock.patch.dict(
-            "os.environ",
-            {"GOOGLE_GENAI_USE_VERTEXAI": "true", "GOOGLE_CLOUD_PROJECT": ""},
-            clear=False,
-        ), mock.patch.dict(
-            "sys.modules",
-            {"google.genai": fake_genai, "google": mock.MagicMock(genai=fake_genai)},
+        with (
+            mock.patch.dict(
+                "os.environ",
+                {"GOOGLE_GENAI_USE_VERTEXAI": "true", "GOOGLE_CLOUD_PROJECT": ""},
+                clear=False,
+            ),
+            mock.patch.dict(
+                "sys.modules",
+                {
+                    "google.genai": fake_genai,
+                    "google": mock.MagicMock(genai=fake_genai),
+                },
+            ),
         ):
             service = GeminiService(model="gemini-2.5-flash-lite")
             with self.assertRaisesRegex(GeminiServiceError, "GOOGLE_CLOUD_PROJECT"):
@@ -133,18 +161,24 @@ class GeminiClientBackendTests(unittest.TestCase):
         fake_genai = mock.MagicMock()
         fake_genai.Client = fake_client_cls
 
-        with mock.patch.dict(
-            "os.environ",
-            {
-                "GOOGLE_GENAI_USE_VERTEXAI": "true",
-                "GOOGLE_CLOUD_PROJECT": "proj",
-                "GOOGLE_CLOUD_LOCATION": "global",
-                "GOOGLE_APPLICATION_CREDENTIALS": "/nonexistent/sa-key.json",
-            },
-            clear=False,
-        ), mock.patch.dict(
-            "sys.modules",
-            {"google.genai": fake_genai, "google": mock.MagicMock(genai=fake_genai)},
+        with (
+            mock.patch.dict(
+                "os.environ",
+                {
+                    "GOOGLE_GENAI_USE_VERTEXAI": "true",
+                    "GOOGLE_CLOUD_PROJECT": "proj",
+                    "GOOGLE_CLOUD_LOCATION": "global",
+                    "GOOGLE_APPLICATION_CREDENTIALS": "/nonexistent/sa-key.json",
+                },
+                clear=False,
+            ),
+            mock.patch.dict(
+                "sys.modules",
+                {
+                    "google.genai": fake_genai,
+                    "google": mock.MagicMock(genai=fake_genai),
+                },
+            ),
         ):
             service = GeminiService(model="gemini-2.5-flash-lite")
             with self.assertRaisesRegex(GeminiServiceError, "missing file"):
@@ -160,18 +194,24 @@ class GeminiClientBackendTests(unittest.TestCase):
         fake_genai.Client = fake_client_cls
 
         with tempfile.NamedTemporaryFile(suffix=".json") as cred_file:
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "GOOGLE_GENAI_USE_VERTEXAI": "true",
-                    "GOOGLE_CLOUD_PROJECT": "proj",
-                    "GOOGLE_CLOUD_LOCATION": "global",
-                    "GOOGLE_APPLICATION_CREDENTIALS": cred_file.name,
-                },
-                clear=False,
-            ), mock.patch.dict(
-                "sys.modules",
-                {"google.genai": fake_genai, "google": mock.MagicMock(genai=fake_genai)},
+            with (
+                mock.patch.dict(
+                    "os.environ",
+                    {
+                        "GOOGLE_GENAI_USE_VERTEXAI": "true",
+                        "GOOGLE_CLOUD_PROJECT": "proj",
+                        "GOOGLE_CLOUD_LOCATION": "global",
+                        "GOOGLE_APPLICATION_CREDENTIALS": cred_file.name,
+                    },
+                    clear=False,
+                ),
+                mock.patch.dict(
+                    "sys.modules",
+                    {
+                        "google.genai": fake_genai,
+                        "google": mock.MagicMock(genai=fake_genai),
+                    },
+                ),
             ):
                 service = GeminiService(model="gemini-2.5-flash-lite")
                 service._get_client()
@@ -186,17 +226,23 @@ class GeminiClientBackendTests(unittest.TestCase):
         fake_genai = mock.MagicMock()
         fake_genai.Client = fake_client_cls
 
-        with mock.patch.dict(
-            "os.environ",
-            {
-                "GOOGLE_GENAI_USE_VERTEXAI": "true",
-                "GOOGLE_CLOUD_PROJECT": "proj",
-                "GOOGLE_CLOUD_LOCATION": "",
-            },
-            clear=False,
-        ), mock.patch.dict(
-            "sys.modules",
-            {"google.genai": fake_genai, "google": mock.MagicMock(genai=fake_genai)},
+        with (
+            mock.patch.dict(
+                "os.environ",
+                {
+                    "GOOGLE_GENAI_USE_VERTEXAI": "true",
+                    "GOOGLE_CLOUD_PROJECT": "proj",
+                    "GOOGLE_CLOUD_LOCATION": "",
+                },
+                clear=False,
+            ),
+            mock.patch.dict(
+                "sys.modules",
+                {
+                    "google.genai": fake_genai,
+                    "google": mock.MagicMock(genai=fake_genai),
+                },
+            ),
         ):
             service = GeminiService(model="gemini-2.5-flash-lite")
             with self.assertRaisesRegex(GeminiServiceError, "GOOGLE_CLOUD_LOCATION"):
@@ -212,23 +258,80 @@ class GeminiClientBackendTests(unittest.TestCase):
                 fake_genai = mock.MagicMock()
                 fake_genai.Client = fake_client_cls
 
-                with mock.patch.dict(
-                    "os.environ",
-                    {
-                        "GOOGLE_GENAI_USE_VERTEXAI": "true",
-                        "GOOGLE_CLOUD_PROJECT": "proj",
-                        "GOOGLE_CLOUD_LOCATION": loc,
-                    },
-                    clear=False,
-                ), mock.patch.dict(
-                    "sys.modules",
-                    {"google.genai": fake_genai, "google": mock.MagicMock(genai=fake_genai)},
+                with (
+                    mock.patch.dict(
+                        "os.environ",
+                        {
+                            "GOOGLE_GENAI_USE_VERTEXAI": "true",
+                            "GOOGLE_CLOUD_PROJECT": "proj",
+                            "GOOGLE_CLOUD_LOCATION": loc,
+                        },
+                        clear=False,
+                    ),
+                    mock.patch.dict(
+                        "sys.modules",
+                        {
+                            "google.genai": fake_genai,
+                            "google": mock.MagicMock(genai=fake_genai),
+                        },
+                    ),
                 ):
                     service = GeminiService(model="gemini-2.5-flash-lite")
                     with self.assertRaisesRegex(GeminiServiceError, "multi-region"):
                         service._get_client()
 
                 fake_client_cls.assert_not_called()
+
+
+class PipelineStepClientBackendTests(unittest.TestCase):
+    """``pipelines.steps.llm_extract`` builds its own client — same contract.
+
+    An API key must never be forwarded alongside ``vertexai=True``: that is
+    Vertex AI Express mode, not the ADC path this repo means by "Vertex".
+    """
+
+    def _build_client_with_env(self, env: dict):
+        from pipelines.steps.llm_extract import LlmExtractExecutor
+
+        fake_client_cls = mock.MagicMock()
+        fake_genai = mock.MagicMock()
+        fake_genai.Client = fake_client_cls
+        fake_genai.Client.return_value.models.generate_content.side_effect = (
+            RuntimeError("stop")
+        )
+
+        with (
+            mock.patch.dict("os.environ", env, clear=False),
+            mock.patch.dict(
+                "sys.modules",
+                {
+                    "google.genai": fake_genai,
+                    "google.genai.errors": mock.MagicMock(),
+                    "google.genai.types": mock.MagicMock(),
+                    "google": mock.MagicMock(genai=fake_genai),
+                },
+            ),
+        ):
+            step = LlmExtractExecutor.__new__(LlmExtractExecutor)
+            with self.assertRaises(Exception):
+                step._call_gemini("gemini-3.1-flash-lite", "hi")
+
+        self.assertGreaterEqual(fake_client_cls.call_count, 1)
+        return fake_client_cls.call_args.kwargs
+
+    def test_default_uses_public_developer_api(self):
+        kwargs = self._build_client_with_env(
+            {"GOOGLE_GENAI_USE_VERTEXAI": "", "GOOGLE_API_KEY": "test-key"}
+        )
+        self.assertEqual(kwargs.get("api_key"), "test-key")
+        self.assertNotIn("vertexai", kwargs)
+
+    def test_vertex_never_forwards_an_api_key(self):
+        kwargs = self._build_client_with_env(
+            {"GOOGLE_GENAI_USE_VERTEXAI": "true", "GOOGLE_API_KEY": "test-key"}
+        )
+        self.assertTrue(kwargs.get("vertexai"))
+        self.assertNotIn("api_key", kwargs)
 
 
 if __name__ == "__main__":

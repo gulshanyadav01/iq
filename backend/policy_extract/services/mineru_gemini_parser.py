@@ -121,12 +121,17 @@ class MineruGeminiParser:
         self.total_tokens = 0
         self.total_cost_usd = 0.0
 
-        # Gemini pricing (per 1M tokens)
+        # Gemini paid-tier pricing per 1M tokens, verified against
+        # ai.google.dev/gemini-api/docs/pricing. The 3.x entries were previously
+        # understated by 3-15x, which is why an OCR model swap looked free on the
+        # cost dashboard. Google has announced an increase for most 3.x models
+        # effective 2027-01-01 — re-check these then.
         self.pricing = {
             "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
-            "gemini-3.1-flash-lite": {"input": 0.075, "output": 0.30},
+            "gemini-3.1-flash-lite": {"input": 0.25, "output": 1.50},
+            "gemini-3.5-flash-lite": {"input": 0.30, "output": 2.50},
             "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
-            "gemini-3.5-flash": {"input": 0.15, "output": 0.60},
+            "gemini-3.5-flash": {"input": 1.50, "output": 9.00},
         }
 
         # Intermediate data directory

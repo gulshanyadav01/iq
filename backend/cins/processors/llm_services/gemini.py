@@ -159,26 +159,6 @@ class GeminiService(LLMServiceMixin):
             "yes",
         )
 
-    @staticmethod
-    def _use_vertex() -> bool:
-        """Whether to route through Vertex AI instead of the public Gemini API.
-
-        Off by default. Passing ``vertexai=True`` with an API key puts the SDK
-        in Vertex AI *Express* mode, which is region-locked and does not serve
-        every model in every location (e.g. ``gemini-2.5-flash-lite`` is absent
-        from ``asia-southeast1``), producing a 404 NOT_FOUND. The public Gemini
-        Developer API is the correct backend for a ``GEMINI_API_KEY`` from AI
-        Studio. Set ``GOOGLE_GENAI_USE_VERTEXAI=true`` to opt into Vertex; the
-        SDK then sources project/location from ``GOOGLE_CLOUD_PROJECT`` /
-        ``GOOGLE_CLOUD_LOCATION`` / ADC.
-        """
-        _load_env()
-        return os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-
     def _get_client(self):
         """Lazy initialization of Gemini client"""
         if self._client is None:
@@ -363,14 +343,21 @@ class GeminiService(LLMServiceMixin):
         model: Optional[str] = None,
     ) -> str:
         """Internal method with retry logic"""
-        from cins.processors.llm_services.langfuse_client import start_generation, get_trace_context
+        from cins.processors.llm_services.langfuse_client import (
+            start_generation,
+            get_trace_context,
+        )
 
         client = self._get_client()
         model = model or self._model
         gen_config = self._build_config(config)
 
         ctx = get_trace_context()
-        prompt_input = config.system_instruction if (config and config.system_instruction) else (contents if isinstance(contents, str) else None)
+        prompt_input = (
+            config.system_instruction
+            if (config and config.system_instruction)
+            else (contents if isinstance(contents, str) else None)
+        )
         generation, prop_ctx = start_generation(
             name=ctx["trace_name"] or "gemini-generate",
             model=model,
@@ -397,7 +384,9 @@ class GeminiService(LLMServiceMixin):
                         usage_details={
                             "input": getattr(usage, "prompt_token_count", None),
                             "output": getattr(usage, "candidates_token_count", None),
-                        } if usage else None,
+                        }
+                        if usage
+                        else None,
                     )
                     generation.end()
                     prop_ctx.__exit__(None, None, None)

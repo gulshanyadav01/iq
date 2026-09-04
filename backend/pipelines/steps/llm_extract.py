@@ -29,11 +29,16 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
 
-# Gemini pricing per 1M tokens (input, output). Mirrors policy_extract values
-# so the demo's cost dashboard matches the production extractor's accounting.
+# Gemini paid-tier pricing per 1M tokens (input, output). Mirrors policy_extract
+# values so the demo's cost dashboard matches the production extractor's
+# accounting. Verified against ai.google.dev/gemini-api/docs/pricing; the 3.x
+# entries were previously understated by 3-15x. Google has announced an increase
+# for most 3.x models effective 2027-01-01 — re-check these then.
 PRICING = {
-    "gemini-3.1-flash-lite": (0.075, 0.30),
-    "gemini-3.5-flash": (0.15, 0.60),
+    "gemini-2.5-flash-lite": (0.10, 0.40),
+    "gemini-3.1-flash-lite": (0.25, 1.50),
+    "gemini-3.5-flash-lite": (0.30, 2.50),
+    "gemini-3.5-flash": (1.50, 9.00),
     "gemini-1.5-pro": (1.25, 5.00),
 }
 
@@ -138,10 +143,9 @@ class LlmExtractExecutor(StepExecutor):
 
         # --- 8. Cost accounting -------------------------------------------
         in_price, out_price = PRICING.get(model_name, (0.0, 0.0))
-        cost_usd = (
-            (input_tokens / 1_000_000) * in_price
-            + (output_tokens / 1_000_000) * out_price
-        )
+        cost_usd = (input_tokens / 1_000_000) * in_price + (
+            output_tokens / 1_000_000
+        ) * out_price
 
         logger.info(
             "LLM_EXTRACT: done pipeline_run=%s fields=%d cited=%d dropped=%d "
@@ -192,9 +196,7 @@ class LlmExtractExecutor(StepExecutor):
             data = json.loads(fp.read().decode("utf-8"))
         return data if isinstance(data, list) else []
 
-    def _format_blocks_with_sentinels(
-        self, blocks: list[dict[str, Any]]
-    ) -> str:
+    def _format_blocks_with_sentinels(self, blocks: list[dict[str, Any]]) -> str:
         """Per F6: TABLE/IMAGE/EQUATION blocks get explicit type prefixes so the
         LLM understands the citation may resolve to a region, not just a string.
         """
@@ -220,9 +222,7 @@ class LlmExtractExecutor(StepExecutor):
                 lines.append(f"[[{bid}]] {text}\n")
         return "\n".join(lines)
 
-    def _call_gemini(
-        self, model_name: str, prompt: str
-    ) -> tuple[str, int, int]:
+    def _call_gemini(self, model_name: str, prompt: str) -> tuple[str, int, int]:
         from google import genai
         from google.genai import errors as genai_errors
         from google.genai import types as genai_types
@@ -230,15 +230,25 @@ class LlmExtractExecutor(StepExecutor):
         # Parse the flag to a bool: a raw env string like "false" is truthy in
         # Python, so passing os.getenv(...) directly would enable Vertex for any
         # non-empty value. Public Gemini Developer API is the default.
-        use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in ("1", "true", "yes")
-        client = genai.Client(vertexai=use_vertex, api_key=os.getenv("GOOGLE_API_KEY"))
+        use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if use_vertex:
+            # Vertex AI via ADC only — never with an API key. Passing both puts
+            # the SDK in Vertex AI *Express* mode, which is region-locked and
+            # 404s on models not provisioned in the express region. See the same
+            # warning on cins.processors.llm_services.gemini.GeminiService.
+            client = genai.Client(vertexai=True)
+        else:
+            client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
         # Retry transient Gemini 5xx (503 UNAVAILABLE, 504 DEADLINE) with
         # exponential backoff. SDK's internal retry has been observed to
         # surface 503 through to the caller during demand spikes.
         max_attempts = 4
         backoff_s = 1.5
-        last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
                 response = client.models.generate_content(
@@ -251,7 +261,6 @@ class LlmExtractExecutor(StepExecutor):
                 )
                 break
             except genai_errors.ServerError as exc:
-                last_exc = exc
                 if attempt == max_attempts:
                     raise LlmExtractError(
                         f"Gemini call failed after {max_attempts} attempts: {exc}"
@@ -259,7 +268,10 @@ class LlmExtractExecutor(StepExecutor):
                 sleep_s = backoff_s * (2 ** (attempt - 1))
                 logger.warning(
                     "LLM_EXTRACT: Gemini 5xx (attempt %d/%d), retrying in %.1fs: %s",
-                    attempt, max_attempts, sleep_s, exc,
+                    attempt,
+                    max_attempts,
+                    sleep_s,
+                    exc,
                 )
                 time.sleep(sleep_s)
             except Exception as exc:
@@ -282,7 +294,9 @@ class LlmExtractExecutor(StepExecutor):
             pass
 
         # Tier 2 — strip code fences
-        stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
+        stripped = re.sub(
+            r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE
+        )
         try:
             return json.loads(stripped), "recovered"
         except json.JSONDecodeError:
