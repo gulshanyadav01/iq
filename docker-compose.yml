@@ -41,6 +41,12 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       MINERVA_API_URL: ${MINERVA_API_URL:-https://rhobots.pbpartners.com/api/mineru/file_parse}
       POLICY_EXTRACT_CALLBACK_URL: ${POLICY_EXTRACT_CALLBACK_URL:-}
+      # Read by policy_extract/tasks.py, so every service that imports it must
+      # agree — the API's stale-retry check and the beat reconciler both compare
+      # against the same threshold the worker enforces.
+      POLICY_EXTRACT_SOFT_TIME_LIMIT: ${POLICY_EXTRACT_SOFT_TIME_LIMIT:-900}
+      POLICY_EXTRACT_TIME_LIMIT: ${POLICY_EXTRACT_TIME_LIMIT:-1080}
+      POLICY_EXTRACT_STALE_AFTER: ${POLICY_EXTRACT_STALE_AFTER:-1500}
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
@@ -95,14 +101,17 @@ services:
     image: insur-iq-backend:latest
     volumes: *backend-volumes
     command: ["bash", "./entrypoint.sh", "celery-policy-extract"]
-    # Kill a runaway worker cleanly at the container boundary instead of letting
-    # it drive host-wide memory pressure that starves the Redis consumer (the
-    # suspected "Connection to broker lost" trigger). --max-memory-per-child
-    # recycles children below this; mem_limit is the hard backstop.
-    mem_limit: ${POLICY_EXTRACT_MEM_LIMIT:-1g}
+    # No mem_limit: at POLICY_EXTRACT_CONCURRENCY children x the 512MB
+    # --max-memory-per-child recycle threshold, any container cap low enough to be
+    # meaningful is one the worker legitimately exceeds, and an OOM kill there
+    # destroys an in-flight parse. Per-child recycling is the memory control;
+    # size the host to the concurrency instead.
     environment:
       <<: *backend-env
       CELERY_AUTORELOAD: "1"
+      # Read by entrypoint.sh for --concurrency. Peak memory scales with it —
+      # budget ~512MB of host RAM per child. See .env.example.
+      POLICY_EXTRACT_CONCURRENCY: ${POLICY_EXTRACT_CONCURRENCY:-12}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

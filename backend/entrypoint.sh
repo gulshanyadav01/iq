@@ -30,7 +30,7 @@ elif [ "$1" = "celery-policy-extract" ]; then
   # memory across runs (whole PDFs + LLM payloads sit in RAM); prefetch=1 stops a
   # busy worker hoarding messages it can't start. Concurrency is the peak-memory
   # driver, so keep it modest and env-overridable (raise on a box with headroom).
-  POLICY_EXTRACT_CONCURRENCY="${POLICY_EXTRACT_CONCURRENCY:-4}"
+  POLICY_EXTRACT_CONCURRENCY="${POLICY_EXTRACT_CONCURRENCY:-12}"
   PE_FLAGS="--queues=policy_extract --concurrency=${POLICY_EXTRACT_CONCURRENCY} --prefetch-multiplier=1 --max-tasks-per-child=50 --max-memory-per-child=512000 --loglevel=INFO --hostname=policy-extract@%h"
   echo "📄 Starting Celery policy-extract worker (concurrency=${POLICY_EXTRACT_CONCURRENCY})..."
   if [ "$CELERY_AUTORELOAD" = "1" ]; then
