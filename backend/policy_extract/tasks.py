@@ -5,9 +5,10 @@ import tempfile
 from datetime import datetime, timezone
 
 import requests
-from celery import shared_task, chain
+from celery import shared_task
 from celery.exceptions import Ignore
 from django.conf import settings
+from django.utils.timezone import now
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,11 @@ POLICY_EXTRACT_QUEUE = "policy_extract"
 # the hard limit kills a child hung past its own MinerU/Gemini HTTP timeout.
 _PARSER_SOFT_TIME_LIMIT = int(os.getenv("POLICY_EXTRACT_SOFT_TIME_LIMIT", "900"))
 _PARSER_TIME_LIMIT = int(os.getenv("POLICY_EXTRACT_TIME_LIMIT", "1080"))
+
+# A row is only "stuck" once no running task could still be writing to it, so this
+# must stay above the hard time limit (a SIGKILL at _PARSER_TIME_LIMIT leaves no code
+# running to mark the row failed — the reconciler is the only thing that can).
+_STALE_AFTER_SECONDS = int(os.getenv("POLICY_EXTRACT_STALE_AFTER", "1500"))
 
 # Cap the callback body we persist. The callback receiver is a trust boundary, so
 # an oversized (or hostile/MITM'd) response must not bloat the row or freeze the
@@ -83,15 +89,42 @@ def _fire_callback(callback_url: str, req, event_type: str) -> None:
         logger.warning("Failed to persist callback response for %s: %s", req.pk, exc)
 
 
+def _fire_completed_callback(req) -> None:
+    """Fire the completion callback, if configured, without ever failing the caller.
+
+    The row is already `completed` by the time this runs; letting a callback error
+    escape would send the caller's except-branch straight to FAILED and undo a good
+    extraction. _fire_callback swallows request errors itself — this guards the rest
+    (serializer, DB write of callback_response).
+    """
+    callback_url = getattr(settings, "POLICY_EXTRACT_CALLBACK_URL", "")
+    if not callback_url:
+        return
+    try:
+        _fire_callback(callback_url, req, "policy_extract.completed")
+    except Exception as exc:
+        logger.warning("Completion callback for %s raised: %s", req.pk, exc)
+
+
+# DEPRECATED. _run_parser now owns every status transition (see enqueue_processing_chain).
+# These two survive only so chain messages already sitting in the broker at deploy time
+# still resolve to a registered task; both are no-ops once the row has moved on. Delete
+# them in a follow-up, once no pre-deploy chain can still be in flight.
 @shared_task(bind=True, max_retries=3, queue=POLICY_EXTRACT_QUEUE)
 def _set_processing_status(self, extraction_request_id: str):
-    """Set status to processing."""
+    """Deprecated: set status to processing, unless the parser already moved past it."""
     from policy_extract.models import PolicyExtractionRequest
 
     try:
-        req = PolicyExtractionRequest.objects.get(id=extraction_request_id)
-        req.status = PolicyExtractionRequest.Status.PROCESSING
-        req.save(update_fields=["status", "updated_at"])
+        updated = PolicyExtractionRequest.objects.filter(
+            id=extraction_request_id,
+            status=PolicyExtractionRequest.Status.INITIATED,
+        ).update(status=PolicyExtractionRequest.Status.PROCESSING, updated_at=now())
+        if not updated:
+            logger.info(
+                "_set_processing_status: %s already past initiated, skipping",
+                extraction_request_id,
+            )
         return extraction_request_id
     except Exception as exc:
         raise self.retry(exc=exc, countdown=10)
@@ -119,6 +152,21 @@ def _run_parser(extraction_request_id: str):
 
     try:
         req = PolicyExtractionRequest.objects.get(id=extraction_request_id)
+
+        # acks_late means a child lost after the completion write gets the same message
+        # redelivered. Re-running a 60s parse and re-firing the callback would be worse
+        # than useless, so an already-finished request is a no-op.
+        if req.status == PolicyExtractionRequest.Status.COMPLETED and req.result:
+            logger.info(
+                "_run_parser: %s already completed, skipping re-parse",
+                extraction_request_id,
+            )
+            return extraction_request_id
+
+        # Owned here rather than in a preceding chain task: the row reads `initiated`
+        # while it waits in the queue and `processing` only while actually being parsed.
+        req.status = PolicyExtractionRequest.Status.PROCESSING
+        req.save(update_fields=["status", "updated_at"])
 
         # Read the file from MinIO. Both ingestion paths now store the document at
         # submission time (uploads directly; file_link fetched-and-stored while its
@@ -213,6 +261,13 @@ def _run_parser(extraction_request_id: str):
                 os.unlink(tmp_path)
             shutil.rmtree(intermediate_dir, ignore_errors=True)
 
+        # Terminal status is written by the same task that produced the result, before
+        # the callback — mirroring the failure path below, so a slow or hostile callback
+        # receiver can never leave a finished extraction stuck in `processing`.
+        req.status = PolicyExtractionRequest.Status.COMPLETED
+        req.save(update_fields=["status", "updated_at"])
+        _fire_completed_callback(req)
+
         return extraction_request_id
 
     except Exception as exc:
@@ -233,28 +288,45 @@ def _run_parser(extraction_request_id: str):
 
 @shared_task(bind=True, max_retries=3, queue=POLICY_EXTRACT_QUEUE)
 def _set_completed_status(self, extraction_request_id: str):
-    """Set status to completed and fire callback if configured."""
+    """Deprecated: _run_parser already marked the row completed and fired the callback."""
     from policy_extract.models import PolicyExtractionRequest
 
     try:
         req = PolicyExtractionRequest.objects.get(id=extraction_request_id)
+        if req.status == PolicyExtractionRequest.Status.COMPLETED:
+            return extraction_request_id
+        # Only reachable for a pre-deploy chain whose _run_parser predates the inline
+        # completion write; finish the job rather than leaving the row processing.
         req.status = PolicyExtractionRequest.Status.COMPLETED
         req.save(update_fields=["status", "updated_at"])
-
-        callback_url = getattr(settings, "POLICY_EXTRACT_CALLBACK_URL", "")
-        if callback_url:
-            _fire_callback(callback_url, req, "policy_extract.completed")
-
+        _fire_completed_callback(req)
         return extraction_request_id
     except Exception as exc:
         raise self.retry(exc=exc, countdown=10)
 
 
+@shared_task(queue=POLICY_EXTRACT_QUEUE)
+def reconcile_stuck_policy_extractions():
+    """Periodic sweep: resolve requests left in `processing` by a lost worker.
+
+    _run_parser writes its own terminal status, so the only rows this finds are ones
+    where no code was left running to do it — a hard time-limit SIGKILL, an OOM kill,
+    or a container restart mid-parse.
+    """
+    from policy_extract.services.reconcile import reconcile_stuck_requests
+
+    counts = reconcile_stuck_requests(_STALE_AFTER_SECONDS)
+    if counts["completed"] or counts["failed"]:
+        logger.warning("Reconciled stuck policy extractions: %s", counts)
+    return counts
+
+
 def enqueue_processing_chain(extraction_request_id: str):
-    """Enqueue the processing chain for a policy extraction request."""
-    processing_chain = chain(
-        _set_processing_status.si(extraction_request_id),
-        _run_parser.si(extraction_request_id),
-        _set_completed_status.si(extraction_request_id),
-    )
-    processing_chain.apply_async(queue=POLICY_EXTRACT_QUEUE)
+    """Enqueue processing for a policy extraction request.
+
+    One self-contained task, deliberately not a chain. _run_parser writes `processing`
+    on entry and its own terminal status on exit, so a successful parse can never be
+    separated from its status write by a lost broker message — the failure mode that
+    used to strand rows in `processing` forever when the third chain link went missing.
+    """
+    _run_parser.apply_async(args=[extraction_request_id], queue=POLICY_EXTRACT_QUEUE)

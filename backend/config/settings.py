@@ -355,6 +355,18 @@ CELERY_CACHE_BACKEND = env("CELERY_CACHE_BACKEND")
 CELERY_RESULT_EXTENDED = True
 CELERY_BROKER_URL = env("CELERY_BROKER_URL")
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+
+# DatabaseScheduler syncs these entries into PeriodicTask rows on beat startup, so a
+# code-defined schedule still works (and stays overridable from the admin).
+CELERY_BEAT_SCHEDULE = {
+    # Safety net for policy extractions whose worker died before writing a terminal
+    # status — see policy_extract/services/reconcile.py.
+    "reconcile-stuck-policy-extractions": {
+        "task": "policy_extract.tasks.reconcile_stuck_policy_extractions",
+        "schedule": 300.0,
+        "options": {"queue": "policy_extract"},
+    },
+}
 CELERY_RESULT_EXPIRES = 2592000
 
 # --- Broker resilience (heavy, long-running policy_extract tasks) ---

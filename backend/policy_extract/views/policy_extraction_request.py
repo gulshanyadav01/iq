@@ -16,7 +16,16 @@ from policy_extract.serializers import (
     PolicyExtractionRequestSerializer,
     PolicyExtractCallbackSerializer,
 )
-from policy_extract.tasks import enqueue_processing_chain
+from policy_extract.tasks import _STALE_AFTER_SECONDS, enqueue_processing_chain
+
+
+def _is_stale_processing(instance) -> bool:
+    """True when a `processing` row has outlived any task that could still be writing it."""
+    if instance.status != PolicyExtractionRequest.Status.PROCESSING:
+        return False
+    age = (timezone.now() - instance.updated_at).total_seconds()
+    return age > _STALE_AFTER_SECONDS
+
 
 # Non-terminal statuses grouped as "in_progress" in both the counts breakdown and
 # the status filter. Single source so the cards and the filter can never disagree.
@@ -245,9 +254,10 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
 
     @extend_schema(
         summary="Retry an extraction request",
-        description="Re-enqueues a completed or failed request. Resets status to "
-        "initiated and clears the previous error/result before dispatching the "
-        "processing chain. Returns 409 if the request is still in flight.",
+        description="Re-enqueues a completed or failed request, or one stranded in "
+        "processing by a lost worker. Resets status to initiated and clears the "
+        "previous error/result before dispatching processing. Returns 409 if the "
+        "request is still genuinely in flight.",
         tags=["Policy Extract"],
         responses={200: PolicyExtractionRequestSerializer},
     )
@@ -255,12 +265,17 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
     def retry(self, request, *args, **kwargs):
         # Retry is allowed from a terminal status (completed/failed): reset the row
         # and re-enqueue. In-flight requests (initiated/processing) are rejected so
-        # a second chain can't race the running one and double-fire the callback.
+        # a second run can't race the running one and double-fire the callback.
+        #
+        # The exception is a `processing` row untouched for longer than any task could
+        # still run (POLICY_EXTRACT_STALE_AFTER): its worker died without writing a
+        # terminal status, so there is nothing to race, and blocking retry would leave
+        # the row permanently unrecoverable through the API.
         instance = self.get_object()
         if instance.status in (
             PolicyExtractionRequest.Status.INITIATED,
             PolicyExtractionRequest.Status.PROCESSING,
-        ):
+        ) and not _is_stale_processing(instance):
             return Response(
                 {
                     "detail": "Request is still processing; "
