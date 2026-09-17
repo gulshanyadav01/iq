@@ -263,6 +263,8 @@ FIELD MAPPING
 - policy_number: Look in "identifiers" for policy/certificate number
 - insurer_id: Look in "entities" for insurance company name
 - cust_name: Look in "participants" for insured/customer name
+- mobileNo: Look in "identifiers" or "participants" for a mobile/phone number (context "mobile")
+- email: Look in "identifiers" or "participants" for an email address (context "email")
 - reg_num: Look in "vehicles" or "identifiers" for registration number
 - engineNo, chassisNo: Look in "identifiers" or "vehicles"
 - sum_insured: Look in "limits" for IDV/sum insured
@@ -283,7 +285,11 @@ FIELD MAPPING
   Leave value="" if nothing is found or if uncertain.
 - fuel_type: Look in "vehicles" for fuel type (PETROL, DIESEL, CNG, ELECTRIC, HYBRID)
   • Also check make_model for "CNG" or "LPG" keywords → fuel_type = "CNG" or "LPG"
-- cubic_capacity_value, vehicle_weight_value, no_of_seats: Look in "vehicles"
+- cubic_capacity_value, vehicle_weight_value, no_of_seats, no_of_wheels: Look in "vehicles"
+- VehicleClass / product_id: a printed vehicle_body_type of PCV / GCV / BUS / MISC-D / "3W" /
+  "3 Wheeler" / goods- or passenger-carrying means a COMMERCIAL VEHICLE (product CV, class
+  PCV/GCV/BUS/MISC-D as applicable) — regardless of the make/model. A commercial 3-wheeler is
+  NOT a Two Wheeler even if the make also sells scooters.
 - isCNGFitted: Set "TRUE" ONLY when an EXTERNAL/AFTERMARKET CNG/LPG kit is fitted
   • The indicator is: CNG Unit IDV > 0 in "monetary_amounts" or "limits"
   • Factory CNG vehicles (CNG in model name like "ERTIGA VXI CNG") are NOT "CNG fitted"

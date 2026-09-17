@@ -1524,6 +1524,337 @@ class MineruGeminiParser:
                     fld["is_extracted"] = "TRUE"
                     return
 
+    def _apply_fuel_type_fallback(
+        self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
+    ) -> None:
+        """Backfill fuel_type from raw vehicles[] when Stage 2 left it blank.
+
+        gemini-2.5-flash-lite intermittently drops fuel_type even when Stage 1
+        captured it (reproduced: dropped ~2/5 runs on an EV commercial schedule).
+        Read it deterministically from any fuel-named vehicles key, or infer
+        CNG/LPG from the make/model text (mirrors the Stage-2 make_model rule).
+        Downstream master-data resolution canonicalises the recovered value.
+        """
+        fld = structured_data.get("fuel_type")
+        if not isinstance(fld, dict) or not raw_data:
+            return
+        if (fld.get("value") or "").strip():
+            return  # already populated
+        for veh in raw_data.get("vehicles", []):
+            if not isinstance(veh, dict):
+                continue
+            for key in veh:
+                if "fuel" in key.lower():
+                    val = str(veh.get(key) or "").strip()
+                    if val:
+                        fld["value"] = val.upper()
+                        fld["is_extracted"] = "TRUE"
+                        return
+        # Fallback: factory CNG/LPG named in the make/model text.
+        for veh in raw_data.get("vehicles", []):
+            if not isinstance(veh, dict):
+                continue
+            blob = " ".join(
+                str(veh.get(k) or "") for k in ("make_model", "model", "variant")
+            ).upper()
+            for kw in ("CNG", "LPG"):
+                if kw in blob:
+                    fld["value"] = kw
+                    fld["is_extracted"] = "TRUE"
+                    return
+
+    def _apply_vehicle_weight_fallback(
+        self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
+    ) -> None:
+        """Backfill vehicle_weight_value (GVW) from raw vehicles[] when missing/0.
+
+        The Stage-1 prompt long omitted gross vehicle weight, so the lite model
+        dropped it; even with the new rule it names the key inconsistently. Read
+        the first integer from any weight/GVW-named key. Gated on 'weight'/'gvw'
+        in the key name so CC/seats/wheels can never be mistaken for the weight.
+        """
+        fld = structured_data.get("vehicle_weight_value")
+        if not isinstance(fld, dict) or not raw_data:
+            return
+        cur = str(fld.get("value") or "").strip()
+        if cur and cur not in ("0", "0.0"):
+            return  # already populated
+        known_keys = (
+            "gross_vehicle_weight",
+            "gvw",
+            "gross_weight",
+            "laden_weight",
+            "vehicle_weight",
+            "vehicle_weight_value",
+            "weight",
+        )
+        for veh in raw_data.get("vehicles", []):
+            if not isinstance(veh, dict):
+                continue
+            candidate_keys = list(known_keys) + [
+                k
+                for k in veh
+                if k not in known_keys and ("weight" in k.lower() or "gvw" in k.lower())
+            ]
+            for key in candidate_keys:
+                m = re.search(r"\d+", str(veh.get(key) or ""))
+                if m and int(m.group()) > 0:
+                    fld["value"] = str(int(m.group()))
+                    fld["is_extracted"] = "TRUE"
+                    return
+
+    def _apply_wheels_fallback(
+        self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
+    ) -> None:
+        """Backfill no_of_wheels from raw vehicles[] BEFORE the product-based guess.
+
+        Must run before the product_id derivation (TW->2, Car/CV->4): a CV
+        3-wheeler prints 'Wheels 3', which the product guess would wrongly set to
+        4. The document's actual count wins. Gated on 'wheel' in the key name.
+        """
+        fld = structured_data.get("no_of_wheels")
+        if not isinstance(fld, dict) or not raw_data:
+            return
+        cur = str(fld.get("value") or "").strip()
+        if cur and cur not in ("0", "0.0"):
+            return  # already populated
+        known_keys = (
+            "no_of_wheels",
+            "wheels",
+            "number_of_wheels",
+            "noOfWheels",
+            "wheel_count",
+        )
+        for veh in raw_data.get("vehicles", []):
+            if not isinstance(veh, dict):
+                continue
+            candidate_keys = list(known_keys) + [
+                k for k in veh if k not in known_keys and "wheel" in k.lower()
+            ]
+            for key in candidate_keys:
+                m = re.search(r"\d+", str(veh.get(key) or ""))
+                if m and int(m.group()) > 0:
+                    fld["value"] = str(int(m.group()))
+                    fld["is_extracted"] = "TRUE"
+                    return
+
+    def _apply_identifier_fallback(
+        self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
+    ) -> None:
+        """Backfill engineNo / chassisNo when Stage 2 dropped them.
+
+        Stage 1 places these EITHER in identifiers[] (context-tagged) OR inside a
+        vehicles[] object (e.g. engine_number / chassis_number) — the lite model is
+        non-deterministic about which, and Stage 2 sometimes maps neither. Scan both
+        buckets, mirroring the Stage-2 'identifiers OR vehicles' rule. chassis also
+        matches its 'VIN' alias. Internal whitespace is removed to match the no-space
+        convention for these fields.
+        """
+        if not raw_data:
+            return
+        identifiers = raw_data.get("identifiers") or []
+        vehicles = raw_data.get("vehicles") or []
+
+        def _clean(value) -> str:
+            return "".join(str(value or "").split())
+
+        def _from_identifiers(*needles: str) -> str:
+            for item in identifiers:
+                if isinstance(item, dict) and any(
+                    n in (item.get("context") or "").lower() for n in needles
+                ):
+                    val = _clean(item.get("value"))
+                    if val:
+                        return val
+            return ""
+
+        def _from_vehicles(*needles: str) -> str:
+            # Match on the KEY name (e.g. 'engine_number', 'chassis_no', 'vin').
+            for veh in vehicles:
+                if not isinstance(veh, dict):
+                    continue
+                for key in veh:
+                    if any(n in key.lower() for n in needles):
+                        val = _clean(veh.get(key))
+                        if val:
+                            return val
+            return ""
+
+        for field_name, needles in (
+            ("engineNo", ("engine",)),
+            ("chassisNo", ("chassis", "vin")),
+        ):
+            fld = structured_data.get(field_name)
+            if not isinstance(fld, dict) or (fld.get("value") or "").strip():
+                continue
+            recovered = _from_identifiers(*needles) or _from_vehicles(*needles)
+            if recovered:
+                fld["value"] = recovered
+                fld["is_extracted"] = "TRUE"
+
+    def _apply_markdown_identifier_fallback(
+        self, structured_data: Dict[str, Any], markdown: str = ""
+    ) -> None:
+        """Last-resort recovery of engineNo / chassisNo straight from the markdown.
+
+        gemini-2.5-flash-lite occasionally omits engine/chassis from EVERY Stage-1
+        raw bucket (reproduced ~1/3 runs on PBP10707507), so the raw-based fallbacks
+        above have nothing to recover — yet MinerU's markdown reliably contains them.
+        Read them deterministically from the tag-stripped markdown near their label.
+        Conservative: the captured token must contain a digit (engine/chassis always
+        do), so a stray word can never be mistaken for an identifier.
+        """
+        engine_fld = structured_data.get("engineNo")
+        chassis_fld = structured_data.get("chassisNo")
+        need_engine = (
+            isinstance(engine_fld, dict) and not (engine_fld.get("value") or "").strip()
+        )
+        need_chassis = (
+            isinstance(chassis_fld, dict)
+            and not (chassis_fld.get("value") or "").strip()
+        )
+        if not markdown or not (need_engine or need_chassis):
+            return
+
+        # Strip HTML-ish table tags so "label</td><td>value" becomes "label value".
+        text = re.sub(r"<[^>]+>", " ", markdown)
+        text = re.sub(r"\s+", " ", text)
+
+        def _capture(pattern: str, lo: int, hi: int) -> str:
+            for m in re.finditer(pattern, text, re.IGNORECASE):
+                token = m.group(1)
+                if lo <= len(token) <= hi and any(c.isdigit() for c in token):
+                    return token.upper()
+            return ""
+
+        if need_engine:
+            val = _capture(r"engine\s*(?:no|number)\.?\s*:?\s*([A-Za-z0-9]+)", 5, 25)
+            if val:
+                engine_fld["value"] = val
+                engine_fld["is_extracted"] = "TRUE"
+        if need_chassis:
+            # Chassis / VIN is 11-20 alphanumeric (typically 17).
+            val = _capture(
+                r"(?:chassis\s*(?:no|number)\.?|\bvin\b)\s*:?\s*([A-Za-z0-9]+)", 11, 20
+            )
+            if val:
+                chassis_fld["value"] = val
+                chassis_fld["is_extracted"] = "TRUE"
+
+    def _apply_body_type_classification(
+        self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
+    ) -> None:
+        """Correct product_id / VehicleClass from the printed 'Vehicle Body Type'.
+
+        The Stage-2 lite model classifies a commercial passenger 3-wheeler (e.g. a
+        Bajaj e-rickshaw, body type 'PCV -3W') as Two Wheeler / Scooter off the
+        make/model. But 'Vehicle Body Type' is authoritative: PCV / GCV / BUS /
+        MISC-D / 3W are Commercial Vehicles. When it says CV but the LLM said
+        otherwise, override deterministically so the DB resolver reclassifies. Runs
+        BEFORE the master-data product resolution. Only ever promotes toward CV (the
+        observed failure) — never demotes a CV — to avoid regressing correct docs.
+        """
+        from master_data.services.resolver import product_bucket
+
+        if not raw_data:
+            return
+        body = ""
+        for veh in raw_data.get("vehicles", []):
+            if not isinstance(veh, dict):
+                continue
+            for key in veh:
+                if "body" in key.lower():  # vehicle_body_type / body_type / body
+                    body = str(veh.get(key) or "").strip()
+                    if body:
+                        break
+            if body:
+                break
+        if not body or product_bucket(body) != "CV":
+            return
+
+        low = body.lower()
+        if "gcv" in low or "goods" in low:
+            vclass = "GCV"
+        elif "bus" in low:
+            vclass = "BUS"
+        elif "misc" in low:
+            vclass = "MISC D"
+        else:
+            vclass = "PCV"  # passenger commercial / default
+
+        product_fld = structured_data.get("product_id")
+        if isinstance(product_fld, dict) and (
+            product_fld.get("value") or ""
+        ).strip().upper() not in ("CV", "COMMERCIAL VEHICLE"):
+            product_fld["value"] = "CV"
+            product_fld["is_extracted"] = "TRUE"
+            product_fld["do_verification"] = "TRUE"
+            class_fld = structured_data.get("VehicleClass")
+            if isinstance(class_fld, dict):
+                class_fld["value"] = vclass
+                class_fld["is_extracted"] = "TRUE"
+                class_fld["do_verification"] = "TRUE"
+            # Drop a TW/Car-only subclass the LLM guessed — it cannot belong to a CV.
+            sub_fld = structured_data.get("VehicleSubClass")
+            if isinstance(sub_fld, dict) and (
+                sub_fld.get("value") or ""
+            ).strip().casefold() in {
+                "scooter",
+                "bike",
+                "e-bike",
+                "e bike",
+                "private car",
+            }:
+                sub_fld["value"] = ""
+                sub_fld["id"] = ""
+                sub_fld["is_extracted"] = "FALSE"
+                sub_fld["do_verification"] = "TRUE"
+            print(f"   ⇄ Body type {body!r} → reclassified product=CV class={vclass}")
+
+    def _apply_markdown_contact_fallback(
+        self, structured_data: Dict[str, Any], markdown: str = ""
+    ) -> None:
+        """Recover the customer's mobile / email from the markdown.
+
+        On CV schedules the customer mobile/email are masked (e.g. 'xxxxxxxxx8575',
+        'bxxxx@axxxx.net') and Stage 1 often drops them; Stage 2 sometimes fills
+        email with the insurer/broker address instead. Both are safely identifiable
+        in the markdown: the masked mobile is the only 'xxxx…digits' token, and the
+        customer email is the one NOT on a broker/insurer domain.
+        """
+        if not markdown:
+            return
+        text = re.sub(r"<[^>]+>", " ", markdown)
+        text = re.sub(r"\s+", " ", text)
+
+        mob_fld = structured_data.get("mobileNo")
+        if isinstance(mob_fld, dict) and not (mob_fld.get("value") or "").strip():
+            # The masked customer mobile: a run of x's followed by the last digits.
+            m = re.search(r"\bx{4,}\d{2,4}\b", text, re.IGNORECASE)
+            if m:
+                mob_fld["value"] = m.group(0)
+                mob_fld["is_extracted"] = "TRUE"
+
+        NON_CUSTOMER = ("pbpartners.com", "godigit.com")
+        email_fld = structured_data.get("email")
+        if isinstance(email_fld, dict):
+            cur = (email_fld.get("value") or "").strip().lower()
+            cur_is_broker = any(d in cur for d in NON_CUSTOMER)
+            if not cur or cur_is_broker:
+                emails = re.findall(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+", text)
+                customer = [
+                    e for e in emails if not any(d in e.lower() for d in NON_CUSTOMER)
+                ]
+                # Prefer a masked customer email (contains an 'x' run), else first.
+                masked = [e for e in customer if re.search(r"x{2,}", e, re.IGNORECASE)]
+                pick = (masked or customer or [None])[0]
+                if pick:
+                    # Strip an adjacent 'Email'/'E-mail' label MinerU glued to the
+                    # end when there is no separator (e.g. '...IN' + 'Email').
+                    pick = re.sub(r"(?i)e-?mail$", "", pick)
+                    email_fld["value"] = pick.upper()
+                    email_fld["is_extracted"] = "TRUE"
+
     def _apply_total_idv(
         self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
     ) -> None:
@@ -1611,10 +1942,36 @@ class MineruGeminiParser:
         participant/entity whose context/label says financier or hypothecation.
         """
         fld = structured_data.get("financialInstitutionName")
-        if not isinstance(fld, dict) or not raw_data:
+        if not isinstance(fld, dict):
             return
-        if str(fld.get("value") or "").strip():
-            return  # already populated
+        cur = str(fld.get("value") or "").strip()
+        # Reject document/product boilerplate the LLM grabs from the header (e.g.
+        # "CAR POLICY" from "Digit Private Car Policy") — a financier is a bank/NBFC,
+        # never a policy/schedule/certificate label.
+        finance_hints = (
+            "bank",
+            "financ",
+            "nbfc",
+            "ltd",
+            "limited",
+            "credit",
+            "capital",
+            "finserv",
+            "baroda",
+            "chola",
+            "bajaj",
+        )
+        low = cur.lower()
+        if (
+            cur
+            and any(w in low for w in ("policy", "schedule", "certificate"))
+            and not any(h in low for h in finance_hints)
+        ):
+            fld["value"] = ""
+            fld["is_extracted"] = "FALSE"
+            cur = ""
+        if cur or not raw_data:
+            return  # already populated (legit) or nothing to backfill from
         for bucket in ("participants", "entities"):
             for ent in raw_data.get(bucket, []) or []:
                 if not isinstance(ent, dict):
@@ -1775,7 +2132,10 @@ class MineruGeminiParser:
         return ""
 
     def _post_process(
-        self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
+        self,
+        structured_data: Dict[str, Any],
+        raw_data: Dict[str, Any] = None,
+        markdown: str = "",
     ) -> Dict[str, Any]:
         """Post-process extracted data - round amounts, derive fields, clean whitespace"""
 
@@ -2034,12 +2394,32 @@ class MineruGeminiParser:
             except (ValueError, TypeError):
                 pass
 
+        # Deterministic vehicle/identifier backfills — recover fields the lite
+        # model captured at Stage 1 but dropped at Stage 2. Ordering matters:
+        # wheels runs BEFORE the product-based guess just below (a printed count
+        # like a 3-wheeler's "3" must win over the CV->4 default), and fuel_type
+        # runs before its master-data resolution further down.
+        self._apply_fuel_type_fallback(structured_data, raw_data)
+        self._apply_vehicle_weight_fallback(structured_data, raw_data)
+        self._apply_wheels_fallback(structured_data, raw_data)
+        self._apply_identifier_fallback(structured_data, raw_data)
+        # Last resort for engine/chassis: read them from the markdown itself when
+        # Stage 1 dropped them from every raw bucket (the value only survives there).
+        self._apply_markdown_identifier_fallback(structured_data, markdown)
+        self._apply_markdown_contact_fallback(structured_data, markdown)
+        # Reclassify TW/Car -> CV from the authoritative 'Vehicle Body Type'. MUST
+        # run before the master-data product resolution below reads these values.
+        self._apply_body_type_classification(structured_data, raw_data)
+
         # Derive no_of_wheels from product_id
         if "no_of_wheels" in structured_data and isinstance(
             structured_data["no_of_wheels"], dict
         ):
-            wheels_value = structured_data["no_of_wheels"].get("value", "")
-            if not wheels_value or wheels_value.strip() == "":
+            wheels_value = (structured_data["no_of_wheels"].get("value") or "").strip()
+            # Treat "0"/"0.0" as absent too: the lite model emits "0" (not "") when
+            # a private car/2-wheeler omits the wheel count, which used to block the
+            # product-based default and leave a wrong 0.
+            if wheels_value in ("", "0", "0.0"):
                 product_id = structured_data.get("product_id", {}).get("value", "")
                 if product_id:
                     if product_id.upper() == "TWO WHEELER":
@@ -2589,7 +2969,9 @@ class MineruGeminiParser:
         if raw_data:
             structured_data = self._map_to_schema(raw_data)
             # Post-process the structured data (pass raw_data for premium validation)
-            structured_data = self._post_process(structured_data, raw_data)
+            structured_data = self._post_process(
+                structured_data, raw_data, markdown_content
+            )
         else:
             print("   ⚠ No raw data to map - skipping Stage 3")
             structured_data = {}
