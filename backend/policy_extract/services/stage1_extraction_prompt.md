@@ -52,6 +52,15 @@ identifiers:
   - If you find partial values (less than 17 chars), look for the other part
   - COMBINE both parts to form complete 17-character chassis number
   - Example: VIN="MA1" + Chassis="ZC2DE1HD6P0123456" → Full Chassis = "MA1ZC2DE1HD6P0123456"
+- ENGINE NUMBER RULES:
+  • Labels: "Engine No.", "Engine Number", "Engine No", "Motor No.", "Eng No"
+  • Capture the EXACT alphanumeric value, even when it sits alone in a table cell
+  or shares a row with the Chassis No. — do NOT skip it and do NOT merge it into
+  the chassis number. Tag it with context "engine number".
+- CONTACT DETAILS — capture each with a clear "context" when present:
+  • Mobile / phone number (labels "Mobile", "Mobile No", "Phone", "Contact No",
+  even when partially masked like "xxxxxx9454") → context "mobile"
+  • Email address (labels "Email", "E-mail", "Email Id") → context "email"
 
 dates:
 
@@ -118,6 +127,22 @@ vehicles:
   "Public Carrier", "Private Carrier", "Private and Public Carrier". Do NOT infer it from
   the vehicle class; only capture it when the document states it. Two-wheelers and private
   cars usually have none — omit "permit_type" then.
+- FUEL TYPE (fuel_type): the vehicle's fuel/energy type — capture the EXACT text next to a
+  label such as "Fuel Type", "Fuel", "Type of Fuel", or when it sits alone in a table cell
+  (e.g. "PETROL", "DIESEL", "CNG", "LPG", "ELECTRIC", "PETROL+CNG", "HYBRID"). Electric, CNG,
+  and commercial vehicles print this too — do NOT skip it. Always include "fuel_type" whenever
+  any fuel value appears in the document.
+- GROSS VEHICLE WEIGHT (gross_vehicle_weight): the GVW / laden weight — capture the NUMBER even
+  when the label is "Gross Vehicle Weight", "GVW", "Gross Weight", "Laden Weight", or the value
+  sits alone in a cell (e.g. "702KG", "3500 KG", "16200"). Commercial vehicles always print this
+  — do NOT skip it. This is the vehicle's weight, NOT its cubic capacity or seating.
+- NUMBER OF WHEELS (no_of_wheels): the wheel count — capture the NUMBER next to a label such as
+  "Wheels", "No. of Wheels", "Number of Wheels" (e.g. "3", "4", "6", "10"). This is the vehicle's
+  wheel count, NOT the seating capacity.
+- VEHICLE BODY TYPE (vehicle_body_type): the body/class descriptor printed next to a label such as
+  "Vehicle Body Type", "Body Type", "Type of Body", "Body" (e.g. "PCV -3W", "GCV", "SEDAN",
+  "HATCHBACK", "3 Wheeler", "Goods Carrying"). This is authoritative for commercial vs private
+  classification (PCV/GCV/BUS/3W = commercial) — always capture it when present, verbatim.
 
 coverages:
 
@@ -270,6 +295,11 @@ coverages:
 limits:
 
 - Any liability limit, sum insured, CSI, deductible, or cap
+- IDV / SUM INSURED: capture the vehicle's Insured Declared Value (labels "IDV",
+  "Insured Declared Value", "Sum Insured", "Vehicle IDV", "Total IDV"). When the document
+  prints component IDVs (Vehicle, CNG/LPG Kit, Electrical / Non-Electrical Accessories,
+  Trailer, Body) AND a "Total IDV", capture the "Total IDV" grand total as well as each
+  component (each with its own context). Do NOT skip the IDV table.
 
 ncb_details:
 
@@ -408,12 +438,21 @@ participants:
   to" (e.g. "AXIS BANK LTD", "CHOLA. INV. AND FIN. COM. LTD.", "BAJAJ AUTO CREDIT LTD").
   Tag it with context "financier". If the cell is blank, do NOT emit a financier.
 - NOMINEE: capture ONLY a name printed in the "Nominee"/"Name of Nominee" field, tagged
-  with context "nominee". If the nominee cell is blank, do NOT emit a nominee — never
-  use the insured/policyholder/owner as the nominee.
+  with context "nominee". Also capture the nominee's RELATIONSHIP to the insured when the
+  document prints it (labels "Relationship", "Relationship with Insured/Proposer",
+  "Relationship with Nominee", e.g. "Father", "Spouse", "Son", "Wife") — emit it as a
+  SEPARATE item tagged with context "nominee_relation". If the nominee cell is blank, do
+  NOT emit a nominee — never use the insured/policyholder/owner as the nominee.
 
 locations:
 
 - Any address, RTO, office, place of issue, jurisdiction
+- CUSTOMER ADDRESS: capture the COMPLETE address exactly as printed — ALL lines/segments
+  (house/street/locality/area, city, district, state and PIN), not just the city or the trailing
+  city-PIN. Tag it with context "address". Do NOT truncate a multi-line address to its last line.
+- PIN CODE: capture the 6-digit PIN / postal code from the customer address when present
+  (labels "PIN", "Pincode", "PIN Code", "Postal Code", or the trailing 6 digits of an
+  address, e.g. "244901"), tagged with context "pincode".
 
 references:
 
