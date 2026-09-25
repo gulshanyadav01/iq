@@ -139,6 +139,25 @@
         </div>
       </div>
 
+      <!-- Failure reasons (buckets) — clickable, each filters the list below to
+           that error category. Shown only when there are failures to explain. -->
+      <div v-if="!loading && bucketList.length" class="glass rounded-2xl p-5 space-y-3">
+        <p class="text-[10px] uppercase tracking-widest text-gray-400 dark:text-gray-500">Failure reasons</p>
+        <div class="flex flex-wrap gap-2">
+          <button
+            v-for="b in bucketList"
+            :key="b.key"
+            type="button"
+            :class="['flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition duration-200', categoryFilter === b.key ? 'border-red-500 text-red-600 dark:text-red-400 bg-red-500/10' : 'border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:ring-1 hover:ring-primary-300']"
+            :aria-pressed="categoryFilter === b.key"
+            @click="setCategory(b.key)"
+          >
+            <span>{{ b.label }}</span>
+            <span class="inline-flex items-center justify-center min-w-5 px-1.5 rounded-full bg-gray-200/80 dark:bg-gray-700/80 text-gray-700 dark:text-gray-200 tabular-nums">{{ b.count }}</span>
+          </button>
+        </div>
+      </div>
+
       <!-- Loading State -->
       <div v-if="loading" class="glass rounded-2xl p-8">
         <div class="flex items-center justify-center gap-2 text-sm text-gray-600 dark:text-gray-400">
@@ -156,7 +175,7 @@
 
       <!-- Empty State -->
       <div v-else-if="requests.length === 0" class="glass rounded-2xl p-12">
-        <div v-if="searchQuery.trim() || statusFilter !== 'all' || hasDateFilter" class="text-center space-y-3">
+        <div v-if="searchQuery.trim() || statusFilter !== 'all' || hasDateFilter || categoryFilter" class="text-center space-y-3">
           <p class="text-sm text-gray-600 dark:text-gray-400">
             No requests match the current filters.
           </p>
@@ -314,6 +333,12 @@
 
         <!-- Failed -->
         <div v-else-if="selectedRequest?.status === 'failed'" class="p-6 space-y-4">
+          <span
+            v-if="selectedRequest.error_category"
+            class="inline-flex items-center rounded-full border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-900/20 px-2.5 py-0.5 text-xs font-medium text-red-600 dark:text-red-400"
+          >
+            {{ bucketLabel(selectedRequest.error_category) }}
+          </span>
           <div class="text-red-600 dark:text-red-400 p-4 bg-red-50 dark:bg-red-900/20 rounded text-sm">
             {{ selectedRequest.error || 'Unknown error' }}
           </div>
@@ -460,6 +485,7 @@ interface ExtractionRequest {
   metadata: Record<string, unknown> | null
   result: Record<string, unknown> | null
   error: string | null
+  error_category: string | null
   callback_response: Record<string, unknown> | null
   created_at: string
   updated_at: string
@@ -478,6 +504,24 @@ interface PaginatedRequests {
   previous: string | null
   results: ExtractionRequest[]
   counts: StatusCounts
+  // Failure counts keyed by error_category, e.g. { expired_link: 3, timeout: 1 }.
+  buckets: Record<string, number>
+}
+
+// Display labels for each failure bucket. Keys mirror the backend
+// PolicyExtractionRequest.ErrorCategory values.
+const BUCKET_LABELS: Record<string, string> = {
+  expired_link: 'Expired / invalid link',
+  unsupported_file: 'Unsupported file type',
+  missing_source: 'Missing source',
+  timeout: 'Timed out',
+  download_failed: 'Download failed',
+  parser_failed: 'Extraction failed',
+  other: 'Other',
+}
+
+function bucketLabel(key: string): string {
+  return BUCKET_LABELS[key] ?? key
 }
 
 definePageMeta({
@@ -498,6 +542,17 @@ const pageSize = 20
 const page = ref(1)
 const total = ref(0)
 const counts = ref<StatusCounts>({ total: 0, completed: 0, failed: 0, in_progress: 0 })
+// Failure buckets (from the list response) and the active drill-down category.
+const buckets = ref<Record<string, number>>({})
+const categoryFilter = ref<string | null>(null)
+// Buckets rendered as sorted (desc by count) chips with display labels; any
+// unmapped key falls back to itself so a new backend category still shows.
+const bucketList = computed(() =>
+  Object.entries(buckets.value)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([key, count]) => ({ key, count, label: bucketLabel(key) })),
+)
 
 // Search state
 const searchQuery = ref('')
@@ -548,6 +603,14 @@ function applyAndReload() {
 function setStatus(s: StatusFilter) {
   // Clicking the active status card again toggles the filter off (Total = all).
   statusFilter.value = statusFilter.value === s ? 'all' : s
+  applyAndReload()
+}
+
+function setCategory(key: string) {
+  // Clicking the active bucket again clears the drill-down. Only failed rows
+  // carry a category, so the filter already narrows to failures — no need to
+  // also touch the status cards.
+  categoryFilter.value = categoryFilter.value === key ? null : key
   applyAndReload()
 }
 
@@ -622,6 +685,7 @@ function onSearchInput() {
 function clearFilters() {
   searchQuery.value = ''
   statusFilter.value = 'all'
+  categoryFilter.value = null
   dateFrom.value = ''
   dateTo.value = ''
   applyAndReload()
@@ -718,6 +782,7 @@ async function loadRequests() {
     const search = searchQuery.value.trim()
     if (search) query.search = search
     if (statusFilter.value !== 'all') query.status = statusFilter.value
+    if (categoryFilter.value) query.error_category = categoryFilter.value
     // datetime-local values are local wall-clock; convert to UTC ISO for the API.
     const createdAfter = toApiIso(dateFrom.value)
     if (createdAfter) query.created_after = createdAfter
@@ -733,6 +798,7 @@ async function loadRequests() {
     requests.value = data.results
     total.value = data.count
     counts.value = data.counts
+    buckets.value = data.buckets ?? {}
   } catch (err) {
     if (seq !== loadSeq) return
     console.error('Failed to load requests:', err)

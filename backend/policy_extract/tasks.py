@@ -272,11 +272,14 @@ def _run_parser(extraction_request_id: str):
 
     except Exception as exc:
         # Mark as failed and stop the chain
+        from policy_extract.services.error_classification import classify_error
+
         try:
             req = PolicyExtractionRequest.objects.get(id=extraction_request_id)
             req.status = PolicyExtractionRequest.Status.FAILED
             req.error = str(exc)
-            req.save(update_fields=["status", "error", "updated_at"])
+            req.error_category = classify_error(str(exc))
+            req.save(update_fields=["status", "error", "error_category", "updated_at"])
 
             callback_url = getattr(settings, "POLICY_EXTRACT_CALLBACK_URL", "")
             if callback_url:

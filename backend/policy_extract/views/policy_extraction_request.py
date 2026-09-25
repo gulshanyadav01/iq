@@ -96,10 +96,11 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
         summary="List extraction requests",
         description="Paginated list of extraction requests (newest first). Response includes "
         "DRF pagination keys (count/next/previous/results) plus a `counts` breakdown "
-        "by status. The breakdown is scoped to the search and date-range filters but "
-        "NOT the status filter (so the status cards stay switchable). Intended for "
-        "inspection/admin; clients should rely on the configured callback for canonical "
-        "results, not on polling this endpoint.",
+        "by status and a `buckets` breakdown of failures by error_category. Both "
+        "breakdowns are scoped to the search and date-range filters but NOT the "
+        "status/error_category selection (so the cards and buckets stay switchable). "
+        "Intended for inspection/admin; clients should rely on the configured callback "
+        "for canonical results, not on polling this endpoint.",
         tags=["Policy Extract"],
         parameters=[
             OpenApiParameter(
@@ -124,6 +125,23 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
                 "`initiated` + `processing` (matching the UI cards). Unknown values "
                 "are ignored. The `counts` breakdown is NOT scoped by this filter, "
                 "so all four status cards stay populated and switchable.",
+            ),
+            OpenApiParameter(
+                name="error_category",
+                type=str,
+                enum=[
+                    "expired_link",
+                    "unsupported_file",
+                    "missing_source",
+                    "timeout",
+                    "download_failed",
+                    "parser_failed",
+                    "other",
+                ],
+                description="Drill-down filter by failure reason (only failed "
+                "requests carry a category, so this narrows to failures). Unknown "
+                "values are ignored. The `buckets` breakdown in the response is NOT "
+                "scoped by this filter, so every bucket stays switchable.",
             ),
             OpenApiParameter(
                 name="ordering",
@@ -202,6 +220,23 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
             failed=Count("id", filter=Q(status="failed")),
             in_progress=Count("id", filter=Q(status__in=IN_PROGRESS_STATUSES)),
         )
+        # Failure-reason breakdown for the "failure buckets" UI. Scoped like
+        # `counts` — search + date range but NOT the status/category selection —
+        # so the buckets stay stable while one is active for drill-down. Only
+        # failed rows carry an error_category, so this naturally excludes the
+        # rest. Returned as {category: count}; a null category (older rows before
+        # backfill) is bucketed under "other".
+        bucket_rows = (
+            base.filter(status="failed")
+            # Clear the model's default ordering; otherwise created_at leaks into
+            # the GROUP BY and splits each category into per-row groups.
+            .order_by()
+            .values("error_category")
+            .annotate(count=Count("id"))
+        )
+        buckets = {
+            (row["error_category"] or "other"): row["count"] for row in bucket_rows
+        }
         # Status filter, grouped to match the UI metric cards (in_progress spans
         # both non-terminal statuses). Unknown values are ignored so a bad param
         # on this unauthenticated endpoint can't error.
@@ -216,6 +251,13 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
         queryset = base
         if status_param in status_filters:
             queryset = queryset.filter(status_filters[status_param])
+        # Drill-down by failure bucket. Only failed rows carry an error_category,
+        # so this implicitly narrows to failures. Unknown values are ignored (like
+        # the status filter) so a bad param on this unauthenticated endpoint can't
+        # error. Not applied to `buckets`, so the breakdown stays switchable.
+        category_param = request.query_params.get("error_category", "").strip().lower()
+        if category_param in PolicyExtractionRequest.ErrorCategory.values:
+            queryset = queryset.filter(error_category=category_param)
         # Whitelisted ordering; append -created_at, id as a stable tiebreaker so
         # pagination is deterministic when sorting by a field with many ties
         # (status/original_filename).
@@ -238,6 +280,7 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
         serializer = PolicyExtractionRequestSerializer(page, many=True)
         response = self.get_paginated_response(serializer.data)
         response.data["counts"] = counts
+        response.data["buckets"] = buckets
         return response
 
     @extend_schema(
@@ -285,12 +328,14 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
             )
         instance.status = PolicyExtractionRequest.Status.INITIATED
         instance.error = None
+        instance.error_category = None
         instance.result = None
         instance.callback_response = None
         instance.save(
             update_fields=[
                 "status",
                 "error",
+                "error_category",
                 "result",
                 "callback_response",
                 "updated_at",
