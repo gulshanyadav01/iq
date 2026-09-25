@@ -23,6 +23,7 @@ from django.conf import settings
 try:
     from google import genai
     from google.genai import types
+    from google.genai import errors as genai_errors
 except ImportError:
     print("Error: google-genai not installed")
     print("Install with: pip install google-genai")
@@ -65,6 +66,23 @@ class MineruGeminiParser:
         self._gen_config = types.GenerateContentConfig(
             temperature=0.0,
             seed=settings.POLICY_EXTRACT_GEMINI_SEED,
+        )
+        # Stage-2 mapping call: prefer structured output so flash-lite must return
+        # EVERY schema field (response_json_schema forces required properties),
+        # instead of intermittently dropping fields (dates, etc.) that Stage 1
+        # captured. Kept on a SEPARATE config — Stage 1's free-form extraction reuses
+        # the plain _gen_config above and must not carry this schema. Mirrors the
+        # CINS structured-output setup (cins/processors/llm_services/gemini.py).
+        # POLICY_EXTRACT_STAGE2_RESPONSE_SCHEMA is the no-redeploy rollback switch;
+        # a ClientError (e.g. schema-size 400) also degrades to prompt-only per run.
+        self._stage2_use_response_schema = (
+            settings.POLICY_EXTRACT_STAGE2_RESPONSE_SCHEMA
+        )
+        self._stage2_gen_config = types.GenerateContentConfig(
+            temperature=0.0,
+            seed=settings.POLICY_EXTRACT_GEMINI_SEED,
+            response_mime_type="application/json",
+            response_json_schema=self._get_stage2_response_json_schema(),
         )
         # Public Gemini Developer API by default. Vertex AI Express mode
         # (vertexai=True + API key) is region-locked and 404s on models absent
@@ -700,7 +718,10 @@ class MineruGeminiParser:
                 "tpEndDate": {"description": "TP end (dd/mm/yyyy)"},
                 "od_startdate": {"description": "OD start (dd/mm/yyyy)"},
                 "od_enddate": {"description": "OD end (dd/mm/yyyy)"},
-                "pay_term": {"description": "Payment term (default: 1)"},
+                "pay_term": {
+                    "description": "Payment term (default: 1)",
+                    "default": "1",
+                },
                 "od_term": {"description": "OD term years (default: 1)"},
                 "tp_term": {"description": "TP term years (default: 1)"},
                 "previous_policy_number": {"description": "Previous policy no"},
@@ -949,7 +970,95 @@ class MineruGeminiParser:
             "{SCHEMA_JSON}", schema_json
         )
 
+    def _get_stage2_response_json_schema(self) -> dict:
+        """Structured-output schema for the Stage-2 mapping call.
+
+        Derived from _get_output_schema() (the single field source, so the two never
+        drift): every field becomes a required object matching the 5-key contract in
+        stage2_mapping_prompt.md. Gemini's response_json_schema forces the model to
+        emit ALL required properties, which is what stops flash-lite from silently
+        dropping fields between Stage 1 and Stage 2.
+        """
+        field_names = list(self._get_output_schema().get("properties", {}).keys())
+        field_props = {
+            "id": {"type": "string"},
+            "value": {"type": "string"},
+            "confidence_score": {"type": "number"},
+            "is_extracted": {"type": "string"},
+            "do_verification": {"type": "string"},
+        }
+        return {
+            "type": "object",
+            "properties": {
+                name: {
+                    "type": "object",
+                    "properties": dict(field_props),
+                    "required": list(field_props.keys()),
+                }
+                for name in field_names
+            },
+            "required": field_names,
+        }
+
+    def _stage2_generate(self, prompt: str):
+        """Run the Stage-2 model call, preferring structured output.
+
+        Uses the response_json_schema config so every field is returned. If the SDK
+        rejects the schema (ClientError, e.g. a size-limit 400), degrade to the
+        prompt-only config for the rest of this parser's life so extraction still
+        runs — the env flag is the durable rollback. Transient 5xx (ServerError)
+        propagate to the caller's retry loop untouched.
+        """
+        if self._stage2_use_response_schema:
+            try:
+                return self._client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=self._stage2_gen_config,
+                )
+            except genai_errors.ClientError as e:
+                print(
+                    f"   ⚠ Stage 2 structured output rejected ({e}); "
+                    "falling back to prompt-only config"
+                )
+                self._stage2_use_response_schema = False
+        return self._client.models.generate_content(
+            model=self.model_name,
+            contents=prompt,
+            config=self._gen_config,
+        )
+
+    def _ensure_schema_fields(self, structured_data: Dict[str, Any]) -> None:
+        """Guarantee every schema field is present on the mapped result.
+
+        Model-independent backfill: whatever Stage 2 dropped (or returned in the
+        wrong shape) is replaced with the schema default so downstream consumers
+        never see an absent key. Runs even when structured output is off or was
+        rolled back. Does NOT recover the real value — that is the model's job (now
+        enforced by response_json_schema) plus the deterministic _apply_* helpers.
+        """
+        if not isinstance(structured_data, dict):
+            return
+        for name, spec in self._get_output_schema().get("properties", {}).items():
+            existing = structured_data.get(name)
+            if isinstance(existing, dict):
+                continue
+            default = spec.get("default", "") if isinstance(spec, dict) else ""
+            structured_data[name] = {
+                "id": "",
+                "value": str(default),
+                "confidence_score": 0.0,
+                "is_extracted": "FALSE",
+                "do_verification": "FALSE",
+            }
+
     def _map_to_schema(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Stage 2: map extracted data to the target schema, then guarantee shape."""
+        structured_data = self._map_to_schema_raw(raw_data)
+        self._ensure_schema_fields(structured_data)
+        return structured_data
+
+    def _map_to_schema_raw(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """Stage 2: Map extracted data to target schema"""
         print("🔗 Stage 2: Mapping data to target schema...")
         start_time = time.time()
@@ -966,11 +1075,7 @@ class MineruGeminiParser:
                 )
 
             try:
-                response = self._client.models.generate_content(
-                    model=self.model_name,
-                    contents=prompt,
-                    config=self._gen_config,
-                )
+                response = self._stage2_generate(prompt)
 
                 # Track tokens
                 if hasattr(response, "usage_metadata") and response.usage_metadata:
@@ -1692,6 +1797,227 @@ class MineruGeminiParser:
                 fld["value"] = recovered
                 fld["is_extracted"] = "TRUE"
 
+    def _apply_intermediary_code_fallback(
+        self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
+    ) -> None:
+        """Backfill intermediary_code from the raw participants/identifiers/entities.
+
+        The broker/intermediary/agent CODE is printed under labels like 'Intermediary
+        Code', 'Broker Code', 'Agent Code', 'IMD Code/No'; Stage 1 now tags it context
+        'intermediary_code', but the lite model is inconsistent about emitting it and
+        Stage 2 sometimes drops it — a prose instruction in a prompt is not a contract.
+        Scan the three buckets it can land in for a code-context item and fill a BLANK
+        intermediary_code. Whitespace is stripped to match the no-space convention for
+        this field. Mirrors _apply_identifier_fallback.
+        """
+        fld = structured_data.get("intermediary_code")
+        if (
+            not isinstance(fld, dict)
+            or (fld.get("value") or "").strip()
+            or not raw_data
+        ):
+            return
+        needles = (
+            "intermediary code",
+            "intermediary_code",
+            "broker code",
+            "agent code",
+            "imd code",
+            "imd no",
+        )
+        buckets = (
+            (raw_data.get("participants") or [])
+            + (raw_data.get("identifiers") or [])
+            + (raw_data.get("entities") or [])
+        )
+        for item in buckets:
+            if not isinstance(item, dict):
+                continue
+            ctx = (item.get("context") or item.get("role") or "").lower()
+            if any(n in ctx for n in needles):
+                val = "".join(str(item.get("value") or "").split())
+                if val:
+                    fld["value"] = val
+                    fld["is_extracted"] = "TRUE"
+                    return
+
+    def _apply_previous_policy_number_fallback(
+        self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
+    ) -> None:
+        """Backfill previous_policy_number from raw identifiers when Stage 2 dropped it.
+
+        The prior policy's number is tagged context 'previous_policy_number' by Stage 1
+        (labels 'Previous/Expiring Policy No'); the lite model often drops it or conflates
+        it with the current policy_number. Scan identifiers for a 'previous ... policy'
+        context and fill a BLANK value — never the current policy_number, never a
+        non-blank existing value. Mirrors _apply_identifier_fallback.
+        """
+        fld = structured_data.get("previous_policy_number")
+        if (
+            not isinstance(fld, dict)
+            or (fld.get("value") or "").strip()
+            or not raw_data
+        ):
+            return
+        current = "".join(
+            str((structured_data.get("policy_number") or {}).get("value") or "").split()
+        ).upper()
+        for item in raw_data.get("identifiers") or []:
+            if not isinstance(item, dict):
+                continue
+            ctx = (item.get("context") or "").lower()
+            if "previous" in ctx and "polic" in ctx:
+                val = "".join(str(item.get("value") or "").split())
+                if val and val.upper() != current:
+                    fld["value"] = val
+                    fld["is_extracted"] = "TRUE"
+                    return
+
+    def _apply_branch_fallback(
+        self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
+    ) -> None:
+        """Backfill branch from raw entities/locations when Stage 2 dropped it.
+
+        The issuing/servicing branch is tagged context 'branch' by Stage 1; fill a BLANK
+        value from the first branch-context item across entities/locations. Never
+        overwrites. Mirrors _apply_identifier_fallback.
+        """
+        fld = structured_data.get("branch")
+        if (
+            not isinstance(fld, dict)
+            or (fld.get("value") or "").strip()
+            or not raw_data
+        ):
+            return
+        buckets = (raw_data.get("entities") or []) + (raw_data.get("locations") or [])
+        for item in buckets:
+            if not isinstance(item, dict):
+                continue
+            ctx = (item.get("context") or item.get("role") or "").lower()
+            if "branch" in ctx or "issuing office" in ctx or "servicing" in ctx:
+                val = str(item.get("value") or "").strip()
+                if val:
+                    fld["value"] = val
+                    fld["is_extracted"] = "TRUE"
+                    return
+
+    def _apply_business_type(self, structured_data: Dict[str, Any]) -> None:
+        """Normalize business_type, and infer it when the model left it blank.
+
+        business_type is NEW / RENEWAL / ROLLOVER but had no Stage-1 capture path and no
+        default, so it dropped to "". When present, fold common variants onto the enum.
+        When blank, infer from the presence of a previous policy: a prior policy number
+        or end date => RENEWAL (a rollover cannot be told from a renewal without the
+        printed label), else NEW. do_verification is set on an INFERRED value so a human
+        can confirm rollover-vs-renewal. Guarantees a non-blank, sensible value.
+        """
+        fld = structured_data.get("business_type")
+        if not isinstance(fld, dict):
+            return
+        cur = (fld.get("value") or "").strip().upper()
+        if cur:
+            if "ROLL" in cur:
+                fld["value"] = "ROLLOVER"
+            elif "RENEW" in cur:
+                fld["value"] = "RENEWAL"
+            elif "NEW" in cur:
+                fld["value"] = "NEW"
+            else:
+                fld["value"] = cur
+            return
+
+        def _has(field: str) -> bool:
+            d = structured_data.get(field)
+            return isinstance(d, dict) and bool((d.get("value") or "").strip())
+
+        has_prev = _has("previous_policy_number") or _has("previous_policy_end_date")
+        fld["value"] = "RENEWAL" if has_prev else "NEW"
+        fld["is_extracted"] = "TRUE"
+        fld["do_verification"] = "TRUE"
+
+    def _apply_raw_date_fallbacks(
+        self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
+    ) -> None:
+        """Backfill date fields Stage 2 dropped/blanked, from the Stage-1 'dates' bucket.
+
+        structured output forces PRESENCE, not correctness — flash-lite can still emit
+        an empty value for a date it failed to map, while the Stage-1 'dates' bucket
+        holds it (each item carries a 'context' string — see stage1_extraction_prompt.md).
+        Scan that bucket by context and fill a BLANK canonical key. Covers the OD/TP
+        cover periods AND previous_policy_end_date (whose absence blanks the derived
+        stp_nstp). Values are kept in the raw dd/mm/yyyy form Stage 1 emits — the
+        DATE_FIELDS block converts them next, TERM_PAIRS derives od_term/tp_term, and
+        stp_nstp is derived from previous_policy_end_date, so this MUST run before all
+        of them. Never overwrites a non-blank value. Mirrors _apply_identifier_fallback.
+        """
+        if not raw_data:
+            return
+        dates = raw_data.get("dates") or []
+
+        def _match(*needles: str) -> str:
+            for item in dates:
+                if not isinstance(item, dict):
+                    continue
+                ctx = (item.get("context") or "").lower()
+                if any(n in ctx for n in needles):
+                    val = str(item.get("value") or "").strip()
+                    if val:
+                        return val
+            return ""
+
+        # (canonical key, context needles). "own damage"/"third party"/"liability"
+        # are the spelled-out cover names; tp/od the abbreviations. Start vs end is
+        # disambiguated by the from/start/inception vs to/end/expiry sense.
+        recovery = {
+            "od_startdate": (
+                "od start",
+                "od from",
+                "od inception",
+                "own damage start",
+                "own damage from",
+            ),
+            "od_enddate": (
+                "od end",
+                "od to",
+                "od expiry",
+                "own damage end",
+                "own damage to",
+            ),
+            "tpStartDate": (
+                "tp start",
+                "tp from",
+                "tp inception",
+                "third party start",
+                "third party from",
+                "liability start",
+            ),
+            "tpEndDate": (
+                "tp end",
+                "tp to",
+                "tp expiry",
+                "third party end",
+                "third party to",
+                "liability end",
+            ),
+            # Stage 1 captures the previous policy's END/expiry under a "previous
+            # policy ..." context (see stage1 prompt); it never captures a previous
+            # START, so plain "previous policy"/"prev policy" is unambiguous here.
+            "previous_policy_end_date": (
+                "previous policy",
+                "prev policy",
+                "previous_policy",
+                "expiry of previous",
+            ),
+        }
+        for field_name, needles in recovery.items():
+            fld = structured_data.get(field_name)
+            if not isinstance(fld, dict) or (fld.get("value") or "").strip():
+                continue
+            recovered = _match(*needles)
+            if recovered:
+                fld["value"] = recovered
+                fld["is_extracted"] = "TRUE"
+
     def _apply_markdown_identifier_fallback(
         self, structured_data: Dict[str, Any], markdown: str = ""
     ) -> None:
@@ -1854,6 +2180,37 @@ class MineruGeminiParser:
                     pick = re.sub(r"(?i)e-?mail$", "", pick)
                     email_fld["value"] = pick.upper()
                     email_fld["is_extracted"] = "TRUE"
+
+    def _apply_pincode_from_address(self, structured_data: Dict[str, Any]) -> None:
+        """Set pinCode to the FIRST PIN that appears in cust_address.
+
+        A customer address can hold more than one 6-digit PIN (e.g. a locality PIN
+        early in the string plus a trailing city/branch PIN), and the model — steered
+        by the old 'trailing 6 digits' prompt hint — reliably grabbed the LAST one.
+        The customer's own PIN is the FIRST in the printed address, so take it
+        deterministically rather than trusting the model's pick. A prose instruction
+        in a prompt is not a contract; this is the host-side net.
+
+        Uses the Indian-PIN shape `[1-9]\\d{5}` on word boundaries: a leading-zero run
+        is not a PIN, and the boundary keeps it from matching 6 digits inside a longer
+        number (a 10-digit phone never yields a hit). Only overrides when the address
+        actually contains a PIN; otherwise a value the model mapped from a labelled
+        'Pincode:' field is left untouched.
+        """
+        pin_fld = structured_data.get("pinCode")
+        addr_fld = structured_data.get("cust_address")
+        if not isinstance(pin_fld, dict) or not isinstance(addr_fld, dict):
+            return
+        address = str(addr_fld.get("value") or "")
+        if not address:
+            return
+        m = re.search(r"(?<!\d)[1-9]\d{5}(?!\d)", address)
+        if not m:
+            return
+        first_pin = m.group(0)
+        if (pin_fld.get("value") or "").strip() != first_pin:
+            pin_fld["value"] = first_pin
+            pin_fld["is_extracted"] = "TRUE"
 
     def _apply_total_idv(
         self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
@@ -2407,6 +2764,14 @@ class MineruGeminiParser:
         # Stage 1 dropped them from every raw bucket (the value only survives there).
         self._apply_markdown_identifier_fallback(structured_data, markdown)
         self._apply_markdown_contact_fallback(structured_data, markdown)
+        # Recover the broker/intermediary/agent code from the raw buckets when dropped.
+        self._apply_intermediary_code_fallback(structured_data, raw_data)
+        # Recover previous_policy_number and branch from the raw buckets when dropped.
+        self._apply_previous_policy_number_fallback(structured_data, raw_data)
+        self._apply_branch_fallback(structured_data, raw_data)
+        # Prefer the FIRST PIN printed in the customer address over the model's pick
+        # (which trended to the trailing PIN). Runs after cust_address is populated.
+        self._apply_pincode_from_address(structured_data)
         # Reclassify TW/Car -> CV from the authoritative 'Vehicle Body Type'. MUST
         # run before the master-data product resolution below reads these values.
         self._apply_body_type_classification(structured_data, raw_data)
@@ -2779,6 +3144,17 @@ class MineruGeminiParser:
                         elif "LPG" in make_model:
                             structured_data["fuel_type"]["value"] = "LPG"
                             structured_data["fuel_type"]["is_extracted"] = "TRUE"
+
+        # Recover date fields the model dropped/blanked (OD/TP cover periods and
+        # previous_policy_end_date), from the raw 'dates' bucket — MUST run before the
+        # date conversion and the term/stp_nstp derivations below so recovered dates
+        # are normalized and od_term/tp_term/stp_nstp derive from them.
+        self._apply_raw_date_fallbacks(structured_data, raw_data)
+
+        # Normalize/infer business_type — runs AFTER previous_policy_number and
+        # previous_policy_end_date are finalized (their fallbacks above) so the
+        # RENEWAL-vs-NEW inference sees the recovered previous-policy signals.
+        self._apply_business_type(structured_data)
 
         # Convert date fields from dd/mm/yyyy to mm/dd/yyyy
         DATE_FIELDS = [

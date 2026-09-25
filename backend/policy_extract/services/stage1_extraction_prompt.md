@@ -41,10 +41,23 @@ FIELD DEFINITIONS
 entities:
 
 - Named real-world things (people, insurers, companies, offices)
+- BRANCH / ISSUING OFFICE: capture the insurer's issuing/servicing branch or office when
+  printed (labels "Branch", "Issuing Office", "Servicing Branch", "Branch Name",
+  "Dealing Office", e.g. "Andheri Branch", "Mumbai DO"); tag it with context "branch".
 
 identifiers:
 
 - Any policy number, proposal number, UIN, engine no, chassis no, receipt no
+- PREVIOUS / EXPIRING POLICY NUMBER: when the document prints the PRIOR policy's number
+  (labels "Previous Policy No", "Previous Policy Number", "Expiring Policy No",
+  "Preceding Policy No", "Last Year Policy No"), capture it SEPARATELY from the current
+  policy number and tag it with context "previous_policy_number". Do NOT confuse it with
+  the current policy_number.
+- BUSINESS TYPE: capture the policy's business type when the document states it (labels
+  "Business Type", "Nature of Business", "Type of Business", "New/Renewal", "Renewal Type",
+  or a standalone value reading "New", "Renewal", or "Rollover"). The VALUE is one of
+  NEW / RENEWAL / ROLLOVER; tag it with context "business_type". Do NOT use the permit
+  "Policy Type" (Public/Private Carrier) for this.
 - CHASSIS NUMBER RULES:
   • May be labeled as "VIN" (Vehicle Identification Number)
   • Complete chassis number is ALWAYS 17 characters alphanumeric
@@ -433,6 +446,13 @@ endorsements:
 participants:
 
 - Roles such as insured, owner, driver, nominee, intermediary
+- INTERMEDIARY / BROKER / AGENT: capture BOTH the intermediary's name and their CODE
+  when the document prints them. The CODE sits next to labels like "Intermediary Code",
+  "Broker Code", "Agent Code", "IMD Code", "IMD No", "Intermediary/Agent Code" (an
+  alphanumeric such as "IMD0001234", "70003456", "AG-1122"); tag it with context
+  "intermediary_code". The NAME sits next to "Intermediary Name", "Broker Name",
+  "Agent Name", "Sourced By", "Serviced By"; tag it with context "intermediary_name".
+  If a cell is blank, do NOT emit that item.
 - FINANCIER / HYPOTHECATION: the bank/NBFC the vehicle is financed with — capture the
   value printed next to "Financier Details", "Hypothecation", "Financier", or "Hypothecated
   to" (e.g. "AXIS BANK LTD", "CHOLA. INV. AND FIN. COM. LTD.", "BAJAJ AUTO CREDIT LTD").
@@ -451,8 +471,9 @@ locations:
   (house/street/locality/area, city, district, state and PIN), not just the city or the trailing
   city-PIN. Tag it with context "address". Do NOT truncate a multi-line address to its last line.
 - PIN CODE: capture the 6-digit PIN / postal code from the customer address when present
-  (labels "PIN", "Pincode", "PIN Code", "Postal Code", or the trailing 6 digits of an
-  address, e.g. "244901"), tagged with context "pincode".
+  (labels "PIN", "Pincode", "PIN Code", "Postal Code"). When the address itself contains
+  more than one 6-digit PIN, capture the FIRST one that appears in the customer address —
+  it is the customer's own PIN — NOT the trailing city/branch PIN. Tag with context "pincode".
 
 references:
 

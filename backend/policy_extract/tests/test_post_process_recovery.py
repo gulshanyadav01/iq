@@ -352,5 +352,351 @@ class FinancierBoilerplateTests(unittest.TestCase):
         self.assertEqual(self._run("CAR POLICY", raw), "HDFC BANK LTD")
 
 
+class OdTpDatesFallbackTests(unittest.TestCase):
+    """_apply_raw_date_fallbacks recovers OD/TP cover dates from the raw 'dates'
+    bucket when Stage 2 dropped or blanked them — the reported "TP/OD dates always
+    empty" failure. Values stay dd/mm/yyyy (the DATE_FIELDS block converts later)."""
+
+    def setUp(self):
+        self.parser = MineruGeminiParser.__new__(MineruGeminiParser)
+
+    @staticmethod
+    def _mk(value):
+        # A genuinely-unextracted field is is_extracted=FALSE; a populated one TRUE.
+        return {
+            "id": "",
+            "value": value,
+            "confidence_score": 1.0 if value else 0.0,
+            "is_extracted": "TRUE" if value else "FALSE",
+            "do_verification": "FALSE",
+        }
+
+    def _run(self, dates, current=None):
+        current = current or {}
+        sd = {
+            k: self._mk(current.get(k, ""))
+            for k in ("od_startdate", "od_enddate", "tpStartDate", "tpEndDate")
+        }
+        self.parser._apply_raw_date_fallbacks(sd, {"dates": dates})
+        return {k: (sd[k]["value"], sd[k]["is_extracted"]) for k in sd}
+
+    def test_recovers_all_four_from_context(self):
+        dates = [
+            {"value": "01/04/2024", "context": "OD Start Date"},
+            {"value": "31/03/2025", "context": "OD End Date"},
+            {"value": "01/04/2024", "context": "TP Start Date"},
+            {"value": "31/03/2027", "context": "TP End Date"},
+        ]
+        out = self._run(dates)
+        self.assertEqual(out["od_startdate"], ("01/04/2024", "TRUE"))
+        self.assertEqual(out["od_enddate"], ("31/03/2025", "TRUE"))
+        self.assertEqual(out["tpStartDate"], ("01/04/2024", "TRUE"))
+        self.assertEqual(out["tpEndDate"], ("31/03/2027", "TRUE"))
+
+    def test_matches_spelled_out_cover_names(self):
+        dates = [
+            {"value": "10/05/2024", "context": "Own Damage From"},
+            {"value": "09/05/2025", "context": "Own Damage To"},
+            {"value": "10/05/2024", "context": "Third Party From"},
+            {"value": "09/05/2027", "context": "Third Party To"},
+        ]
+        out = self._run(dates)
+        self.assertEqual(out["od_startdate"][0], "10/05/2024")
+        self.assertEqual(out["od_enddate"][0], "09/05/2025")
+        self.assertEqual(out["tpStartDate"][0], "10/05/2024")
+        self.assertEqual(out["tpEndDate"][0], "09/05/2027")
+
+    def test_does_not_overwrite_existing(self):
+        dates = [{"value": "01/01/2024", "context": "OD Start"}]
+        out = self._run(dates, current={"od_startdate": "15/06/2024"})
+        self.assertEqual(out["od_startdate"], ("15/06/2024", "TRUE"))
+
+    def test_absent_stays_blank(self):
+        out = self._run([{"value": "01/04/2024", "context": "Policy Start Date"}])
+        self.assertEqual(out["od_startdate"], ("", "FALSE"))
+        self.assertEqual(out["tpEndDate"], ("", "FALSE"))
+
+    def test_no_dates_bucket_is_safe(self):
+        sd = {"od_startdate": _field("")}
+        self.parser._apply_raw_date_fallbacks(sd, {})
+        self.assertEqual(sd["od_startdate"]["value"], "")
+
+    def test_recovers_previous_policy_end_date(self):
+        # Its absence is what blanks the derived stp_nstp — recover it from context.
+        sd = {"previous_policy_end_date": self._mk("")}
+        dates = [
+            {"value": "31/03/2024", "context": "Previous Policy Expiry"},
+            {"value": "01/04/2024", "context": "Policy Start Date"},
+        ]
+        self.parser._apply_raw_date_fallbacks(sd, {"dates": dates})
+        self.assertEqual(
+            (
+                sd["previous_policy_end_date"]["value"],
+                sd["previous_policy_end_date"]["is_extracted"],
+            ),
+            ("31/03/2024", "TRUE"),
+        )
+
+    def test_prev_policy_end_not_confused_with_current_start(self):
+        # Only a "previous policy" context feeds it; a plain policy start must not.
+        sd = {"previous_policy_end_date": self._mk("")}
+        dates = [{"value": "01/04/2024", "context": "Policy Start Date"}]
+        self.parser._apply_raw_date_fallbacks(sd, {"dates": dates})
+        self.assertEqual(sd["previous_policy_end_date"]["value"], "")
+
+
+class EnsureSchemaFieldsTests(unittest.TestCase):
+    """_ensure_schema_fields guarantees every schema key is present after mapping,
+    so a Stage-2 drop never surfaces as an absent field downstream."""
+
+    def setUp(self):
+        self.parser = MineruGeminiParser.__new__(MineruGeminiParser)
+
+    def test_backfills_missing_key_with_false_default(self):
+        sd = {}
+        self.parser._ensure_schema_fields(sd)
+        schema_keys = self.parser._get_output_schema()["properties"].keys()
+        # every schema field now present
+        self.assertEqual(set(schema_keys) - set(sd), set())
+        od = sd["od_startdate"]
+        self.assertEqual(od["is_extracted"], "FALSE")
+        self.assertEqual(od["value"], "")
+        # a field with a schema default gets that default
+        self.assertEqual(sd["cgst"]["value"], "0")
+        # pay_term now carries an explicit default of "1" (was blank before)
+        self.assertEqual(sd["pay_term"]["value"], "1")
+
+    def test_does_not_overwrite_present_field(self):
+        sd = {"od_startdate": _field("15/06/2024")}
+        self.parser._ensure_schema_fields(sd)
+        self.assertEqual(sd["od_startdate"]["value"], "15/06/2024")
+        self.assertEqual(sd["od_startdate"]["is_extracted"], "TRUE")
+
+    def test_replaces_non_dict_value(self):
+        sd = {"policy_number": "POL123"}  # bare string, wrong shape
+        self.parser._ensure_schema_fields(sd)
+        self.assertIsInstance(sd["policy_number"], dict)
+        self.assertEqual(sd["policy_number"]["is_extracted"], "FALSE")
+
+
+class Stage2ResponseSchemaTests(unittest.TestCase):
+    """_get_stage2_response_json_schema forces every field present, derived from the
+    single field source (_get_output_schema)."""
+
+    def setUp(self):
+        self.parser = MineruGeminiParser.__new__(MineruGeminiParser)
+
+    def test_all_fields_required_and_object_shaped(self):
+        schema = self.parser._get_stage2_response_json_schema()
+        field_names = list(self.parser._get_output_schema()["properties"].keys())
+        self.assertEqual(schema["type"], "object")
+        self.assertEqual(set(schema["required"]), set(field_names))
+        self.assertEqual(set(schema["properties"]), set(field_names))
+        one = schema["properties"]["od_startdate"]
+        self.assertEqual(one["type"], "object")
+        self.assertEqual(
+            set(one["required"]),
+            {"id", "value", "confidence_score", "is_extracted", "do_verification"},
+        )
+
+
+class PincodeFromAddressTests(unittest.TestCase):
+    """_apply_pincode_from_address takes the FIRST PIN in cust_address, fixing the
+    model's habit of grabbing the trailing city/branch PIN."""
+
+    def setUp(self):
+        self.parser = MineruGeminiParser.__new__(MineruGeminiParser)
+
+    def _run(self, address, current_pin=""):
+        sd = {
+            "cust_address": _field(address),
+            "pinCode": _field(current_pin),
+        }
+        self.parser._apply_pincode_from_address(sd)
+        return sd["pinCode"]["value"], sd["pinCode"]["is_extracted"]
+
+    def test_first_pin_wins_over_trailing(self):
+        # Model grabbed the trailing PIN 110001; the customer's is the first, 244901.
+        addr = "H.No 12, Civil Lines, Moradabad 244901, c/o Delhi Office 110001"
+        self.assertEqual(self._run(addr, current_pin="110001"), ("244901", "TRUE"))
+
+    def test_sets_when_model_blank(self):
+        self.assertEqual(
+            self._run("Sector 5, Noida 201301", current_pin=""), ("201301", "TRUE")
+        )
+
+    def test_already_first_is_noop(self):
+        addr = "Moradabad 244901, Delhi 110001"
+        # Already correct — value unchanged (no spurious rewrite).
+        self.assertEqual(self._run(addr, current_pin="244901")[0], "244901")
+
+    def test_no_pin_in_address_keeps_existing(self):
+        # PIN came from a labelled field, not the address text — leave it.
+        self.assertEqual(
+            self._run("Civil Lines, Moradabad", current_pin="244901"),
+            ("244901", "TRUE"),
+        )
+
+    def test_ignores_phone_and_leading_zero(self):
+        # 10-digit phone yields no 6-digit hit; a leading-zero run is not a PIN.
+        addr = "Contact 9876543210, Zone 012345, Gate No 4"
+        # No PIN found in the address → pinCode value left blank (unchanged).
+        self.assertEqual(self._run(addr, current_pin="")[0], "")
+
+    def test_empty_address_is_safe(self):
+        self.assertEqual(self._run("", current_pin="500001"), ("500001", "TRUE"))
+
+
+class IntermediaryCodeFallbackTests(unittest.TestCase):
+    """_apply_intermediary_code_fallback recovers the broker/agent/IMD code from the
+    raw participants/identifiers/entities buckets when Stage 2 dropped it."""
+
+    def setUp(self):
+        self.parser = MineruGeminiParser.__new__(MineruGeminiParser)
+
+    def _run(self, raw, current=""):
+        sd = {"intermediary_code": _field(current)}
+        self.parser._apply_intermediary_code_fallback(sd, raw)
+        return sd["intermediary_code"]["value"], sd["intermediary_code"]["is_extracted"]
+
+    def test_recovers_from_participants_by_context(self):
+        raw = {
+            "participants": [{"value": "IMD0001234", "context": "Intermediary Code"}]
+        }
+        self.assertEqual(self._run(raw), ("IMD0001234", "TRUE"))
+
+    def test_recovers_from_identifiers_broker_code(self):
+        raw = {"identifiers": [{"value": "AG-1122", "context": "Broker Code"}]}
+        self.assertEqual(self._run(raw), ("AG-1122", "TRUE"))
+
+    def test_recovers_agent_code_from_entities(self):
+        raw = {"entities": [{"value": "70003456", "context": "Agent Code"}]}
+        self.assertEqual(self._run(raw), ("70003456", "TRUE"))
+
+    def test_strips_internal_whitespace(self):
+        raw = {"identifiers": [{"value": "IMD 000 1234", "context": "IMD No"}]}
+        self.assertEqual(self._run(raw)[0], "IMD0001234")
+
+    def test_does_not_overwrite_existing(self):
+        raw = {"participants": [{"value": "NEWCODE", "context": "intermediary code"}]}
+        self.assertEqual(self._run(raw, current="KEPT123"), ("KEPT123", "TRUE"))
+
+    def test_ignores_unrelated_context(self):
+        # A broker NAME context must not populate the CODE field → left blank.
+        raw = {
+            "participants": [
+                {"value": "STAR INSURANCE BROKERS", "context": "intermediary name"}
+            ]
+        }
+        self.assertEqual(self._run(raw)[0], "")
+
+    def test_no_raw_data_is_safe(self):
+        self.assertEqual(self._run({})[0], "")
+
+
+class PreviousPolicyNumberFallbackTests(unittest.TestCase):
+    """_apply_previous_policy_number_fallback recovers the prior policy number from raw
+    identifiers, without copying the current policy_number."""
+
+    def setUp(self):
+        self.parser = MineruGeminiParser.__new__(MineruGeminiParser)
+
+    def _run(self, identifiers, current_prev="", policy_number=""):
+        sd = {
+            "previous_policy_number": _field(current_prev),
+            "policy_number": _field(policy_number),
+        }
+        self.parser._apply_previous_policy_number_fallback(
+            sd, {"identifiers": identifiers}
+        )
+        return sd["previous_policy_number"]["value"]
+
+    def test_recovers_by_context(self):
+        ids = [{"value": "OG-23-1102-9999", "context": "previous_policy_number"}]
+        self.assertEqual(self._run(ids), "OG-23-1102-9999")
+
+    def test_recovers_expiring_policy_label(self):
+        ids = [{"value": "PREV12345", "context": "Previous Policy No"}]
+        self.assertEqual(self._run(ids), "PREV12345")
+
+    def test_does_not_copy_current_policy_number(self):
+        ids = [{"value": "CUR-100", "context": "previous policy"}]
+        # Same value as the current policy number → must not be used.
+        self.assertEqual(self._run(ids, policy_number="CUR-100"), "")
+
+    def test_does_not_overwrite_existing(self):
+        ids = [{"value": "NEWPREV", "context": "previous_policy_number"}]
+        self.assertEqual(self._run(ids, current_prev="KEPTPREV"), "KEPTPREV")
+
+    def test_absent_stays_blank(self):
+        ids = [{"value": "POL999", "context": "policy number"}]
+        self.assertEqual(self._run(ids), "")
+
+
+class BranchFallbackTests(unittest.TestCase):
+    """_apply_branch_fallback recovers the issuing/servicing branch from entities/locations."""
+
+    def setUp(self):
+        self.parser = MineruGeminiParser.__new__(MineruGeminiParser)
+
+    def _run(self, raw, current=""):
+        sd = {"branch": _field(current)}
+        self.parser._apply_branch_fallback(sd, raw)
+        return sd["branch"]["value"]
+
+    def test_recovers_from_entities(self):
+        raw = {"entities": [{"value": "Andheri Branch", "context": "branch"}]}
+        self.assertEqual(self._run(raw), "Andheri Branch")
+
+    def test_recovers_from_locations_issuing_office(self):
+        raw = {"locations": [{"value": "Mumbai DO", "context": "Issuing Office"}]}
+        self.assertEqual(self._run(raw), "Mumbai DO")
+
+    def test_does_not_overwrite_existing(self):
+        raw = {"entities": [{"value": "NewBranch", "context": "branch"}]}
+        self.assertEqual(self._run(raw, current="KeptBranch"), "KeptBranch")
+
+    def test_absent_stays_blank(self):
+        raw = {"entities": [{"value": "ACME INSURANCE", "context": "insurer"}]}
+        self.assertEqual(self._run(raw), "")
+
+
+class BusinessTypeTests(unittest.TestCase):
+    """_apply_business_type normalizes to the NEW/RENEWAL/ROLLOVER enum and infers the
+    value from previous-policy signals when the model left it blank."""
+
+    def setUp(self):
+        self.parser = MineruGeminiParser.__new__(MineruGeminiParser)
+
+    def _run(self, current="", prev_num="", prev_end=""):
+        sd = {
+            "business_type": _field(current),
+            "previous_policy_number": _field(prev_num),
+            "previous_policy_end_date": _field(prev_end),
+        }
+        self.parser._apply_business_type(sd)
+        b = sd["business_type"]
+        return b["value"], b["is_extracted"], b["do_verification"]
+
+    def test_normalizes_renewal(self):
+        self.assertEqual(self._run(current="Renewal")[0], "RENEWAL")
+
+    def test_normalizes_rollover_variant(self):
+        self.assertEqual(self._run(current="Roll Over")[0], "ROLLOVER")
+
+    def test_normalizes_new_business(self):
+        self.assertEqual(self._run(current="New Business")[0], "NEW")
+
+    def test_infers_renewal_from_prev_number(self):
+        # Blank → inferred RENEWAL, flagged for verification.
+        self.assertEqual(self._run(prev_num="PREV123"), ("RENEWAL", "TRUE", "TRUE"))
+
+    def test_infers_renewal_from_prev_end_date(self):
+        self.assertEqual(self._run(prev_end="31/03/2024")[0], "RENEWAL")
+
+    def test_infers_new_when_no_previous(self):
+        self.assertEqual(self._run(), ("NEW", "TRUE", "TRUE"))
+
+
 if __name__ == "__main__":
     unittest.main()

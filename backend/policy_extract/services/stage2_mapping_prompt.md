@@ -261,6 +261,15 @@ FIELD MAPPING
 ────────────────────────────────────────
 
 - policy_number: Look in "identifiers" for policy/certificate number
+- previous_policy_number: Look in "identifiers" for context "previous_policy_number"
+  (labels "Previous/Expiring Policy No"). This is the PRIOR policy's number — never copy
+  the current policy_number here. Leave value="" and is_extracted="FALSE" when not printed.
+- business_type: Look in "identifiers" for context "business_type". The value MUST be
+  exactly NEW, RENEWAL, or ROLLOVER (uppercase). Do NOT use the permit "Policy Type"
+  (Public/Private Carrier). Leave value="" if the document does not state it — it is
+  filled in post-processing.
+- branch: Look in "entities" for context "branch" (the insurer's issuing/servicing
+  branch or office). Leave value="" and is_extracted="FALSE" when not printed.
 - insurer_id: Look in "entities" for insurance company name
 - cust_name: Look in "participants" for insured/customer name
 - mobileNo: Look in "identifiers" or "participants" for a mobile/phone number (context "mobile")
@@ -271,6 +280,13 @@ FIELD MAPPING
 - cgst, sgst, igst: Look in "taxes" array for individual tax components
 - serviceTax: Calculate as cgst + sgst + igst (sum of all tax components)
 - policy_start_date, policy_end_date: Look in "dates"
+- od_startdate, od_enddate: Look in "dates" for the OWN DAMAGE (OD) cover period —
+  context like "od start/end", "own damage from/to". Output as dd/mm/yyyy.
+  Leave value="" and is_extracted="FALSE" for a liability-only / Third-Party policy.
+- tpStartDate, tpEndDate: Look in "dates" for the THIRD PARTY (TP) / liability cover
+  period — context like "tp start/end", "third party from/to", "liability from/to".
+  Output as dd/mm/yyyy. Leave value="" and is_extracted="FALSE" for a standalone-OD
+  (SAOD) policy with no separate TP period.
 - previous_policy_end_date: Look in "dates" for context like "previous policy expiry",
   "previous policy to", "expiry of previous policy". Output as dd/mm/yyyy.
   Leave value="" and is_extracted="FALSE" when not found (new business).
@@ -328,7 +344,11 @@ FIELD MAPPING
 - financialInstitutionName: Look in "participants" or "entities" for an entry whose
   context is "financier" / "hypothecation" (the "Financier Details" value, e.g.
   "AXIS BANK LTD", "BAJAJ AUTO CREDIT LTD"). Leave empty if none.
-- intermediary_name, intermediary_code: Look in "participants" or "entities"
+- intermediary_name, intermediary_code: Look in "participants", "identifiers" or
+  "entities". intermediary_code is the broker/agent/IMD CODE (context "intermediary_code",
+  labels "Intermediary Code", "Broker Code", "Agent Code", "IMD Code/No"); intermediary_name
+  is the broker/agent NAME (context "intermediary_name"). Keep the code's exact
+  alphanumeric value; leave value="" and is_extracted="FALSE" when not printed.
 
 OUTPUT:
 {
