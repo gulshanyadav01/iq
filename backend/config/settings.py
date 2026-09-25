@@ -46,6 +46,7 @@ env = environ.Env(
     POLICY_EXTRACT_CALLBACK_URL=(str, ""),
     POLICY_EXTRACT_GEMINI_MODEL=(str, "gemini-2.5-flash-lite"),
     POLICY_EXTRACT_GEMINI_SEED=(int, 42),
+    POLICY_EXTRACT_STAGE2_RESPONSE_SCHEMA=(bool, True),
     CINS_SKIP_HIDDEN_SHEETS=(bool, True),
     CINS_INDICATIVE_SHEETS=(bool, True),
 )
@@ -77,6 +78,11 @@ POLICY_EXTRACT_CALLBACK_URL = env("POLICY_EXTRACT_CALLBACK_URL")
 
 POLICY_EXTRACT_GEMINI_MODEL = env("POLICY_EXTRACT_GEMINI_MODEL")
 POLICY_EXTRACT_GEMINI_SEED = env("POLICY_EXTRACT_GEMINI_SEED")
+
+# Force Gemini structured output (response_json_schema) on the Stage-2 mapping call
+# so flash-lite must return every schema field, instead of intermittently dropping
+# some. No-redeploy rollback switch: flip off to fall back to the prompt-only config.
+POLICY_EXTRACT_STAGE2_RESPONSE_SCHEMA = env("POLICY_EXTRACT_STAGE2_RESPONSE_SCHEMA")
 
 # Exclude worksheets whose Excel tab is hidden/veryHidden from commission
 # extraction. Rollout switch — set to False to restore the previous behaviour
