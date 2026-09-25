@@ -18,6 +18,17 @@ class PolicyExtractionRequest(TimeStampedUUIDModel):
         COMPLETED = "completed", "Completed"
         FAILED = "failed", "Failed"
 
+    class ErrorCategory(models.TextChoices):
+        # Bucket a failure is classified into (see services/error_classification.py).
+        # Null for every non-failed row; set at failure time and on backfill.
+        EXPIRED_LINK = "expired_link", "Expired / invalid link"
+        UNSUPPORTED_FILE = "unsupported_file", "Unsupported file type"
+        MISSING_SOURCE = "missing_source", "Missing source"
+        TIMEOUT = "timeout", "Timed out"
+        DOWNLOAD_FAILED = "download_failed", "Download failed"
+        PARSER_FAILED = "parser_failed", "Extraction failed"
+        OTHER = "other", "Other"
+
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.INITIATED, db_index=True
     )
@@ -33,6 +44,13 @@ class PolicyExtractionRequest(TimeStampedUUIDModel):
     metadata = models.JSONField(null=True, blank=True)
     result = models.JSONField(null=True, blank=True)
     error = models.TextField(null=True, blank=True)
+    error_category = models.CharField(
+        max_length=32,
+        choices=ErrorCategory.choices,
+        null=True,
+        blank=True,
+        db_index=True,
+    )
     callback_response = models.JSONField(null=True, blank=True)
 
     class Meta:

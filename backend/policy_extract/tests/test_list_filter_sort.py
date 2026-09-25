@@ -108,6 +108,77 @@ class ListStatusFilterTests(APITestCase):
         self.assertEqual(self._ids(response), {str(self.completed.id)})
 
 
+class ListErrorBucketTests(APITestCase):
+    """The `buckets` failure breakdown and the `error_category` drill-down filter."""
+
+    def setUp(self):
+        self.url = reverse("policy-extract-requests-list")
+        Cat = PolicyExtractionRequest.ErrorCategory
+        self.expired1 = self._failed("e1.pdf", Cat.EXPIRED_LINK)
+        self.expired2 = self._failed("e2.pdf", Cat.EXPIRED_LINK)
+        self.timeout = self._failed("t.pdf", Cat.TIMEOUT)
+        # A completed row must never appear in the buckets or the drill-down.
+        self.completed = PolicyExtractionRequest.objects.create(
+            original_filename="c.pdf",
+            status=PolicyExtractionRequest.Status.COMPLETED,
+        )
+
+    def _failed(self, name, category):
+        return PolicyExtractionRequest.objects.create(
+            original_filename=name,
+            status=PolicyExtractionRequest.Status.FAILED,
+            error_category=category,
+        )
+
+    def _ids(self, response):
+        return {row["id"] for row in response.data["results"]}
+
+    def test_buckets_count_failures_by_category(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.data["buckets"],
+            {"expired_link": 2, "timeout": 1},
+        )
+
+    def test_null_category_failure_buckets_as_other(self):
+        # A failed row whose category was never set (pre-backfill) is counted
+        # under "other" rather than dropped.
+        PolicyExtractionRequest.objects.create(
+            original_filename="legacy.pdf",
+            status=PolicyExtractionRequest.Status.FAILED,
+        )
+        response = self.client.get(self.url)
+        self.assertEqual(response.data["buckets"].get("other"), 1)
+
+    def test_error_category_filter_narrows_to_that_bucket(self):
+        response = self.client.get(self.url, {"error_category": "expired_link"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self._ids(response),
+            {str(self.expired1.id), str(self.expired2.id)},
+        )
+
+    def test_error_category_filter_is_case_insensitive(self):
+        response = self.client.get(self.url, {"error_category": "Timeout"})
+        self.assertEqual(self._ids(response), {str(self.timeout.id)})
+
+    def test_unknown_category_is_ignored_and_returns_all(self):
+        response = self.client.get(self.url, {"error_category": "bogus"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["results"]), 4)
+
+    def test_buckets_not_scoped_to_category_selection(self):
+        # Selecting a bucket narrows the list but leaves every bucket's count
+        # intact, so the chips stay switchable.
+        response = self.client.get(self.url, {"error_category": "expired_link"})
+        self.assertEqual(len(response.data["results"]), 2)
+        self.assertEqual(
+            response.data["buckets"],
+            {"expired_link": 2, "timeout": 1},
+        )
+
+
 class ListOrderingTests(APITestCase):
     def setUp(self):
         self.url = reverse("policy-extract-requests-list")
