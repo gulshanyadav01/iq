@@ -2251,14 +2251,14 @@ class MineruGeminiParser:
                     email_fld["is_extracted"] = "TRUE"
 
     def _apply_pincode_from_address(self, structured_data: Dict[str, Any]) -> None:
-        """Set pinCode to the FIRST PIN that appears in cust_address.
+        """Set pinCode to the LAST PIN that appears in cust_address.
 
         A customer address can hold more than one 6-digit PIN (e.g. a locality PIN
-        early in the string plus a trailing city/branch PIN), and the model — steered
-        by the old 'trailing 6 digits' prompt hint — reliably grabbed the LAST one.
-        The customer's own PIN is the FIRST in the printed address, so take it
-        deterministically rather than trusting the model's pick. A prose instruction
-        in a prompt is not a contract; this is the host-side net.
+        early in the string plus a trailing city/branch PIN). The PIN we want is the
+        LAST one printed in the address, so take it deterministically rather than
+        trusting the model's pick. When the address holds only one PIN, that single
+        PIN is the last and is used as-is. A prose instruction in a prompt is not a
+        contract; this is the host-side net.
 
         Uses the Indian-PIN shape `[1-9]\\d{5}` on word boundaries: a leading-zero run
         is not a PIN, and the boundary keeps it from matching 6 digits inside a longer
@@ -2273,12 +2273,12 @@ class MineruGeminiParser:
         address = str(addr_fld.get("value") or "")
         if not address:
             return
-        m = re.search(r"(?<!\d)[1-9]\d{5}(?!\d)", address)
-        if not m:
+        pins = re.findall(r"(?<!\d)[1-9]\d{5}(?!\d)", address)
+        if not pins:
             return
-        first_pin = m.group(0)
-        if (pin_fld.get("value") or "").strip() != first_pin:
-            pin_fld["value"] = first_pin
+        last_pin = pins[-1]
+        if (pin_fld.get("value") or "").strip() != last_pin:
+            pin_fld["value"] = last_pin
             pin_fld["is_extracted"] = "TRUE"
 
     def _apply_total_idv(
@@ -2872,8 +2872,8 @@ class MineruGeminiParser:
         # Recover previous_policy_number and branch from the raw buckets when dropped.
         self._apply_previous_policy_number_fallback(structured_data, raw_data)
         self._apply_branch_fallback(structured_data, raw_data)
-        # Prefer the FIRST PIN printed in the customer address over the model's pick
-        # (which trended to the trailing PIN). Runs after cust_address is populated.
+        # Prefer the LAST PIN printed in the customer address over the model's pick.
+        # Runs after cust_address is populated.
         self._apply_pincode_from_address(structured_data)
         # Reclassify TW/Car -> CV from the authoritative 'Vehicle Body Type'. MUST
         # run before the master-data product resolution below reads these values.

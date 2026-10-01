@@ -696,8 +696,8 @@ class Stage2ResponseSchemaTests(unittest.TestCase):
 
 
 class PincodeFromAddressTests(unittest.TestCase):
-    """_apply_pincode_from_address takes the FIRST PIN in cust_address, fixing the
-    model's habit of grabbing the trailing city/branch PIN."""
+    """_apply_pincode_from_address takes the LAST PIN in cust_address (the
+    trailing city/branch PIN), falling back to the only PIN when just one is present."""
 
     def setUp(self):
         self.parser = MineruGeminiParser.__new__(MineruGeminiParser)
@@ -710,20 +710,20 @@ class PincodeFromAddressTests(unittest.TestCase):
         self.parser._apply_pincode_from_address(sd)
         return sd["pinCode"]["value"], sd["pinCode"]["is_extracted"]
 
-    def test_first_pin_wins_over_trailing(self):
-        # Model grabbed the trailing PIN 110001; the customer's is the first, 244901.
+    def test_last_pin_wins_over_leading(self):
+        # Two PINs: leading 244901, trailing 110001 — take the last one.
         addr = "H.No 12, Civil Lines, Moradabad 244901, c/o Delhi Office 110001"
-        self.assertEqual(self._run(addr, current_pin="110001"), ("244901", "TRUE"))
+        self.assertEqual(self._run(addr, current_pin="244901"), ("110001", "TRUE"))
 
     def test_sets_when_model_blank(self):
         self.assertEqual(
             self._run("Sector 5, Noida 201301", current_pin=""), ("201301", "TRUE")
         )
 
-    def test_already_first_is_noop(self):
+    def test_already_last_is_noop(self):
         addr = "Moradabad 244901, Delhi 110001"
         # Already correct — value unchanged (no spurious rewrite).
-        self.assertEqual(self._run(addr, current_pin="244901")[0], "244901")
+        self.assertEqual(self._run(addr, current_pin="110001")[0], "110001")
 
     def test_no_pin_in_address_keeps_existing(self):
         # PIN came from a labelled field, not the address text — leave it.
