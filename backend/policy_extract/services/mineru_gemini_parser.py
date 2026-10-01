@@ -1946,8 +1946,9 @@ class MineruGeminiParser:
         Scan that bucket by context and fill a BLANK canonical key. Covers the OD/TP
         cover periods AND previous_policy_end_date (whose absence blanks the derived
         stp_nstp). Values are kept in the raw dd/mm/yyyy form Stage 1 emits — the
-        DATE_FIELDS block converts them next, TERM_PAIRS derives od_term/tp_term, and
-        stp_nstp is derived from previous_policy_end_date, so this MUST run before all
+        DATE_FIELDS block normalizes them next, _derive_terms_from_dates derives
+        od_term/tp_term, and stp_nstp derives from previous_policy_end_date — so
+        this MUST run before all
         of them. Never overwrites a non-blank value. Mirrors _apply_identifier_fallback.
         """
         if not raw_data:
@@ -2017,6 +2018,74 @@ class MineruGeminiParser:
             if recovered:
                 fld["value"] = recovered
                 fld["is_extracted"] = "TRUE"
+
+    def _apply_package_cover_date_fallback(
+        self, structured_data: Dict[str, Any]
+    ) -> None:
+        """Fill blank OD cover dates from the overall policy period.
+
+        Most motor policies print a single combined "Period of Policy" range and
+        no separate OD cover-period label — so Stage 2 and _apply_raw_date_fallbacks
+        (which key off explicit "own damage from/to" context) leave od_startdate/
+        od_enddate blank even though the own-damage cover runs for the policy
+        period. On every motor policy the OD/own-damage cover IS the annual policy
+        period, so copying policy_start_date/policy_end_date into blank OD dates is
+        always sound.
+
+        TP is deliberately NOT backfilled. A long-term bundle (e.g. 1yr-OD +
+        3/5yr-TP, the common new-vehicle case) prints only the 1-year leg as the
+        policy period, so stamping it onto a blank TP cover would write a wrong end
+        date and let term derivation overwrite a correct multi-year tp_term with 1.
+        There is no reliable in-record signal here that distinguishes a comprehensive
+        annual TP (== policy period) from a long-term TP (> policy period), so TP
+        dates are left to Stage 1/2, which extracts the explicit TP period reliably;
+        a genuinely blank TP flags "not extracted" rather than guessing wrong.
+
+        Only fills a PRICED OD cover (od_premium/basic_od_premium > 0), and only
+        when BOTH policy endpoints are present (atomic — never a start with no end).
+        Never overwrites a value an explicit OD label already produced. Runs AFTER
+        _apply_raw_date_fallbacks (so explicit labels win) and BEFORE the
+        DATE_FIELDS conversion and term derivation (so copied dates are normalized
+        and od_term derives from them).
+        """
+
+        def _pnum(field: str) -> float:
+            d = structured_data.get(field)
+            if not isinstance(d, dict):
+                return 0.0
+            digits = "".join(
+                c for c in str(d.get("value") or "") if c.isdigit() or c == "."
+            )
+            try:
+                return float(digits) if digits else 0.0
+            except ValueError:
+                return 0.0
+
+        # Atomic: need BOTH policy endpoints to borrow the OD period.
+        start_val = (
+            str((structured_data.get("policy_start_date") or {}).get("value") or "")
+            if isinstance(structured_data.get("policy_start_date"), dict)
+            else ""
+        ).strip()
+        end_val = (
+            str((structured_data.get("policy_end_date") or {}).get("value") or "")
+            if isinstance(structured_data.get("policy_end_date"), dict)
+            else ""
+        ).strip()
+        if not (start_val and end_val):
+            return
+
+        def _fill(date_field: str, src_val: str) -> None:
+            fld = structured_data.get(date_field)
+            if not isinstance(fld, dict) or (fld.get("value") or "").strip():
+                return
+            fld["value"] = src_val
+            fld["is_extracted"] = "TRUE"
+
+        od_priced = _pnum("basic_od_premium") > 0 or _pnum("od_premium") > 0
+        if od_priced:
+            _fill("od_startdate", start_val)
+            _fill("od_enddate", end_val)
 
     def _apply_markdown_identifier_fallback(
         self, structured_data: Dict[str, Any], markdown: str = ""
@@ -2369,6 +2438,40 @@ class MineruGeminiParser:
             if isinstance(rel, dict):
                 rel["value"] = ""
                 rel["is_extracted"] = "TRUE"
+
+    def _derive_terms_from_dates(self, structured_data: Dict[str, Any]) -> None:
+        """Derive policy_term/od_term/tp_term (in whole years) from the cover dates.
+
+        Dates arrive as dd/mm/yyyy (the DATE_FIELDS block normalizes to that, and
+        the stp_nstp derivation parses it the same way) — parsing them as
+        %m/%d/%Y silently raised ValueError whenever a day > 12, leaving the term
+        at its default. term_years = round((end - start) / 365); a non-positive
+        span (or an unparsable/blank date) leaves the existing value untouched.
+        """
+        TERM_PAIRS = {
+            "policy_term": ("policy_start_date", "policy_end_date"),
+            "od_term": ("od_startdate", "od_enddate"),
+            "tp_term": ("tpStartDate", "tpEndDate"),
+        }
+        for term_field, (start_field, end_field) in TERM_PAIRS.items():
+            if (
+                term_field in structured_data
+                and start_field in structured_data
+                and end_field in structured_data
+            ):
+                start_val = str(structured_data[start_field].get("value", "")).strip()
+                end_val = str(structured_data[end_field].get("value", "")).strip()
+                if start_val and end_val and "/" in start_val and "/" in end_val:
+                    try:
+                        start_date = datetime.strptime(start_val, "%d/%m/%Y")
+                        end_date = datetime.strptime(end_val, "%d/%m/%Y")
+                        diff_days = (end_date - start_date).days
+                        term_years = round(diff_days / 365)
+                        if term_years > 0:
+                            structured_data[term_field]["value"] = str(term_years)
+                            structured_data[term_field]["is_extracted"] = "TRUE"
+                    except (ValueError, KeyError):
+                        pass
 
     def _apply_cover_terms(self, structured_data: Dict[str, Any]) -> None:
         """Zero the OD/TP term when that cover is not on THIS policy.
@@ -3151,12 +3254,20 @@ class MineruGeminiParser:
         # are normalized and od_term/tp_term/stp_nstp derive from them.
         self._apply_raw_date_fallbacks(structured_data, raw_data)
 
+        # Fill blank OD cover dates from the policy period when OD is priced (the
+        # OD cover is always the annual policy period). TP is deliberately NOT
+        # backfilled — a long-term bundle's TP period differs from the policy
+        # period. Runs AFTER the raw-date recovery (explicit OD labels win) and
+        # BEFORE the date conversion + term derivation below.
+        self._apply_package_cover_date_fallback(structured_data)
+
         # Normalize/infer business_type — runs AFTER previous_policy_number and
         # previous_policy_end_date are finalized (their fallbacks above) so the
         # RENEWAL-vs-NEW inference sees the recovered previous-policy signals.
         self._apply_business_type(structured_data)
 
-        # Convert date fields from dd/mm/yyyy to mm/dd/yyyy
+        # Normalize date fields to zero-padded dd/mm/yyyy (kept dd/mm/yyyy —
+        # TERM_PAIRS and the stp_nstp derivation below both parse %d/%m/%Y).
         DATE_FIELDS = [
             "manufacturing_date",
             "registration_date",
@@ -3176,42 +3287,17 @@ class MineruGeminiParser:
                     parts = date_val.split("/")
                     if len(parts) == 3:
                         try:
-                            # dd/mm/yyyy → mm/dd/yyyy (strip leading zeros)
+                            # dd/mm/yyyy in → zero-padded dd/mm/yyyy out
                             day, month, year = int(parts[0]), int(parts[1]), parts[2]
                             if day <= 31 and month <= 12:
-                                # structured_data[field]['value'] = f"{month}/{day}/{year}"
                                 structured_data[field]["value"] = (
                                     f"{day:02d}/{month:02d}/{year}"
                                 )
                         except (ValueError, IndexError):
                             pass
 
-        # Derive term fields from date differences
-        TERM_PAIRS = {
-            "policy_term": ("policy_start_date", "policy_end_date"),
-            "od_term": ("od_startdate", "od_enddate"),
-            "tp_term": ("tpStartDate", "tpEndDate"),
-        }
-        for term_field, (start_field, end_field) in TERM_PAIRS.items():
-            if (
-                term_field in structured_data
-                and start_field in structured_data
-                and end_field in structured_data
-            ):
-                start_val = str(structured_data[start_field].get("value", "")).strip()
-                end_val = str(structured_data[end_field].get("value", "")).strip()
-                if start_val and end_val and "/" in start_val and "/" in end_val:
-                    try:
-                        # Dates are already in mm/dd/yyyy after conversion above
-                        start_date = datetime.strptime(start_val, "%m/%d/%Y")
-                        end_date = datetime.strptime(end_val, "%m/%d/%Y")
-                        diff_days = (end_date - start_date).days
-                        term_years = round(diff_days / 365)
-                        if term_years > 0:
-                            structured_data[term_field]["value"] = str(term_years)
-                            structured_data[term_field]["is_extracted"] = "TRUE"
-                    except (ValueError, KeyError):
-                        pass
+        # Derive term fields from the (now dd/mm/yyyy) cover-date differences.
+        self._derive_terms_from_dates(structured_data)
 
         # After date-derivation: a cover not priced on this policy has a 0-year term
         # (liability-only => od_term 0; SAOD => tp_term 0).

@@ -445,6 +445,201 @@ class OdTpDatesFallbackTests(unittest.TestCase):
         self.assertEqual(sd["previous_policy_end_date"]["value"], "")
 
 
+class PackageCoverDateFallbackTests(unittest.TestCase):
+    """_apply_package_cover_date_fallback fills blank OD cover dates from the
+    policy period when OD is priced — the reported "comprehensive Go Digit CV
+    leaves OD dates blank" failure (PBP10799078), where the document prints one
+    combined "Period of Policy" and no separate OD label, so the context-keyed
+    _apply_raw_date_fallbacks finds nothing. The OD cover is always the annual
+    policy period, so this is sound. TP is deliberately NOT backfilled: a
+    long-term bundle (1yr OD + 3/5yr TP) prints only the 1-year leg as the policy
+    period, so TP dates are left to Stage 1/2 rather than guessed wrong."""
+
+    def setUp(self):
+        self.parser = MineruGeminiParser.__new__(MineruGeminiParser)
+
+    @staticmethod
+    def _mk(value):
+        return {
+            "id": "",
+            "value": value,
+            "confidence_score": 1.0 if value else 0.0,
+            "is_extracted": "TRUE" if value else "FALSE",
+            "do_verification": "FALSE",
+        }
+
+    def _run(
+        self,
+        *,
+        od_premium="0",
+        tp_premium="0",
+        dates=None,
+        policy=True,
+        policy_end=None,
+    ):
+        current = dates or {}
+        sd = {
+            k: self._mk(current.get(k, ""))
+            for k in ("od_startdate", "od_enddate", "tpStartDate", "tpEndDate")
+        }
+        sd["policy_start_date"] = self._mk("01/10/2026" if policy else "")
+        if policy_end is not None:
+            sd["policy_end_date"] = self._mk(policy_end)
+        else:
+            sd["policy_end_date"] = self._mk("30/09/2027" if policy else "")
+        sd["od_premium"] = self._mk(od_premium)
+        sd["tp_premium"] = self._mk(tp_premium)
+        self.parser._apply_package_cover_date_fallback(sd)
+        return {
+            k: (sd[k]["value"], sd[k]["is_extracted"])
+            for k in ("od_startdate", "od_enddate", "tpStartDate", "tpEndDate")
+        }
+
+    def test_comprehensive_fills_od_leaves_tp_to_llm(self):
+        # PBP10799078: OD 4134.37 and TP 7267 both priced, blank OD/TP dates.
+        # OD is backfilled from the policy period; TP is left blank for Stage 1/2.
+        out = self._run(od_premium="4134.37", tp_premium="7267")
+        self.assertEqual(out["od_startdate"], ("01/10/2026", "TRUE"))
+        self.assertEqual(out["od_enddate"], ("30/09/2027", "TRUE"))
+        self.assertEqual(out["tpStartDate"], ("", "FALSE"))
+        self.assertEqual(out["tpEndDate"], ("", "FALSE"))
+
+    def test_liability_only_fills_nothing(self):
+        # No OD cover (od_premium 0) -> OD stays blank; TP is never backfilled.
+        out = self._run(od_premium="0", tp_premium="7267")
+        self.assertEqual(out["od_startdate"], ("", "FALSE"))
+        self.assertEqual(out["od_enddate"], ("", "FALSE"))
+        self.assertEqual(out["tpStartDate"], ("", "FALSE"))
+        self.assertEqual(out["tpEndDate"], ("", "FALSE"))
+
+    def test_saod_fills_od(self):
+        out = self._run(od_premium="4134.37", tp_premium="0")
+        self.assertEqual(out["od_startdate"], ("01/10/2026", "TRUE"))
+        self.assertEqual(out["od_enddate"], ("30/09/2027", "TRUE"))
+        self.assertEqual(out["tpStartDate"], ("", "FALSE"))
+        self.assertEqual(out["tpEndDate"], ("", "FALSE"))
+
+    def test_basic_od_premium_counts_as_priced(self):
+        sd = {
+            k: self._mk("")
+            for k in ("od_startdate", "od_enddate", "tpStartDate", "tpEndDate")
+        }
+        sd["policy_start_date"] = self._mk("01/10/2026")
+        sd["policy_end_date"] = self._mk("30/09/2027")
+        sd["basic_od_premium"] = self._mk("4134.37")
+        self.parser._apply_package_cover_date_fallback(sd)
+        self.assertEqual(sd["od_startdate"]["value"], "01/10/2026")
+        self.assertEqual(sd["od_enddate"]["value"], "30/09/2027")
+
+    def test_never_backfills_tp(self):
+        # Even with TP priced, TP dates are never stamped with the policy period:
+        # on a long-term bundle that would write a wrong end date and corrupt a
+        # correct multi-year tp_term. TP is left to Stage 1/2.
+        out = self._run(od_premium="806", tp_premium="4351")
+        self.assertEqual(out["od_startdate"], ("01/10/2026", "TRUE"))
+        self.assertEqual(out["od_enddate"], ("30/09/2027", "TRUE"))
+        self.assertEqual(out["tpStartDate"], ("", "FALSE"))
+        self.assertEqual(out["tpEndDate"], ("", "FALSE"))
+
+    def test_does_not_overwrite_existing_od_start(self):
+        # An OD start already extracted (explicit label) is kept; only the blank
+        # OD end is backfilled. TP is never touched.
+        out = self._run(
+            od_premium="4134.37",
+            tp_premium="7267",
+            dates={"od_startdate": "15/06/2026", "tpEndDate": "14/06/2029"},
+        )
+        self.assertEqual(out["od_startdate"], ("15/06/2026", "TRUE"))
+        self.assertEqual(out["od_enddate"], ("30/09/2027", "TRUE"))
+        self.assertEqual(out["tpEndDate"], ("14/06/2029", "TRUE"))
+        self.assertEqual(out["tpStartDate"], ("", "FALSE"))
+
+    def test_blank_policy_period_fills_nothing(self):
+        out = self._run(od_premium="4134.37", tp_premium="7267", policy=False)
+        self.assertEqual(out["od_startdate"], ("", "FALSE"))
+        self.assertEqual(out["od_enddate"], ("", "FALSE"))
+
+    def test_atomic_requires_both_policy_dates(self):
+        # Atomic: a lone policy_start with no policy_end fills nothing, so OD never
+        # ends up with a start but no end.
+        out = self._run(od_premium="4134.37", tp_premium="7267", policy_end="")
+        self.assertEqual(out["od_startdate"], ("", "FALSE"))
+        self.assertEqual(out["od_enddate"], ("", "FALSE"))
+
+
+class TermDerivationDateFormatTests(unittest.TestCase):
+    """_derive_terms_from_dates must parse the dd/mm/yyyy the DATE_FIELDS block
+    emits — regression for the %m/%d/%Y bug that silently failed (ValueError)
+    whenever a day > 12, leaving terms at their default."""
+
+    def setUp(self):
+        self.parser = MineruGeminiParser.__new__(MineruGeminiParser)
+
+    @staticmethod
+    def _mk(value):
+        return {
+            "id": "",
+            "value": value,
+            "confidence_score": 1.0 if value else 0.0,
+            "is_extracted": "TRUE" if value else "FALSE",
+            "do_verification": "FALSE",
+        }
+
+    def _terms(self, start, end):
+        # Seed the term fields to a sentinel ("9") that differs from any derived
+        # value, so the assertions below only hold once the dd/mm/yyyy parse
+        # succeeds. Under the old %m/%d/%Y code an end day > 12 raises ValueError
+        # and the term is left at "9" — making these genuine red-at-HEAD tests.
+        sd = {
+            "policy_start_date": self._mk(start),
+            "policy_end_date": self._mk(end),
+            "od_startdate": self._mk(start),
+            "od_enddate": self._mk(end),
+            "tpStartDate": self._mk(start),
+            "tpEndDate": self._mk(end),
+            "policy_term": self._mk("9"),
+            "od_term": self._mk("9"),
+            "tp_term": self._mk("9"),
+        }
+        self.parser._derive_terms_from_dates(sd)
+        return sd
+
+    def test_one_year_term_with_end_day_gt_12(self):
+        # 01/10/2026 -> 30/09/2027, end day 30 > 12 would crash the old %m/%d parse.
+        sd = self._terms("01/10/2026", "30/09/2027")
+        self.assertEqual(sd["policy_term"]["value"], "1")
+        self.assertEqual(sd["od_term"]["value"], "1")
+        self.assertEqual(sd["tp_term"]["value"], "1")
+
+    def test_three_year_tp_term(self):
+        # A long-term TP span (start/end days both > 12) derives to 3 years.
+        sd = self._terms("25/09/2024", "24/09/2027")
+        self.assertEqual(sd["tp_term"]["value"], "3")
+
+    def test_blank_dates_leave_default(self):
+        sd = {
+            "policy_start_date": self._mk(""),
+            "policy_end_date": self._mk(""),
+            "policy_term": self._mk("1"),
+        }
+        self.parser._derive_terms_from_dates(sd)
+        self.assertEqual(sd["policy_term"]["value"], "1")
+
+    def test_non_positive_span_leaves_term_untouched(self):
+        # end == start (0-day span) -> term_years rounds to 0, the `> 0` guard
+        # fires, and the seeded term is preserved rather than zeroed.
+        sd = self._terms("01/10/2026", "01/10/2026")
+        self.assertEqual(sd["policy_term"]["value"], "9")
+        self.assertEqual(sd["tp_term"]["value"], "9")
+
+    def test_unparsable_slash_date_leaves_term_untouched(self):
+        # A slash-containing but invalid date raises ValueError in strptime; the
+        # except swallows it and the seeded term is left unchanged.
+        sd = self._terms("01/10/2026", "45/13/2027")
+        self.assertEqual(sd["policy_term"]["value"], "9")
+        self.assertEqual(sd["tp_term"]["value"], "9")
+
+
 class EnsureSchemaFieldsTests(unittest.TestCase):
     """_ensure_schema_fields guarantees every schema key is present after mapping,
     so a Stage-2 drop never surfaces as an absent field downstream."""
