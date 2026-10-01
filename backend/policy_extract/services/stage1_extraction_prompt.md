@@ -472,8 +472,8 @@ locations:
   city-PIN. Tag it with context "address". Do NOT truncate a multi-line address to its last line.
 - PIN CODE: capture the 6-digit PIN / postal code from the customer address when present
   (labels "PIN", "Pincode", "PIN Code", "Postal Code"). When the address itself contains
-  more than one 6-digit PIN, capture the FIRST one that appears in the customer address —
-  it is the customer's own PIN — NOT the trailing city/branch PIN. Tag with context "pincode".
+  more than one 6-digit PIN, capture the LAST one that appears in the customer address —
+  the trailing PIN is the one we want. Tag with context "pincode".
 
 references:
 
