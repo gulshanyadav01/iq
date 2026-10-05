@@ -19,6 +19,15 @@ class ClassifyErrorTests(SimpleTestCase):
         msg = "The uploaded file is not a valid PDF. Only .pdf files are supported."
         self.assertEqual(classify_error(msg), "unsupported_file")
 
+    def test_precheck_messages_are_unsupported_file(self):
+        for msg in (
+            "PDF is encrypted or unreadable: Failed to load document (PDFium: Incorrect password error).",
+            "PDF has 51 pages; limit is 50",
+            "File is 30.2 MB; limit is 25 MB",
+        ):
+            with self.subTest(msg=msg):
+                self.assertEqual(classify_error(msg), "unsupported_file")
+
     def test_missing_source(self):
         self.assertEqual(
             classify_error("No source_url and no file_link in metadata"),

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import requests
 from celery import shared_task
 from celery.exceptions import Ignore
+from celery.utils.time import get_exponential_backoff_interval
 from django.conf import settings
 from django.utils.timezone import now
 
@@ -25,6 +26,19 @@ _PARSER_TIME_LIMIT = int(os.getenv("POLICY_EXTRACT_TIME_LIMIT", "1080"))
 # must stay above the hard time limit (a SIGKILL at _PARSER_TIME_LIMIT leaves no code
 # running to mark the row failed — the reconciler is the only thing that can).
 _STALE_AFTER_SECONDS = int(os.getenv("POLICY_EXTRACT_STALE_AFTER", "1500"))
+
+# Transient MinerU failures (502 while its container restarts, 503 when its limiter
+# is full, 504, network errors) are retried with jittered exponential backoff
+# instead of failing the document for good. Each retry is a fresh message, so the
+# parse time limits above apply per attempt.
+_MINERU_MAX_RETRIES = 5
+_MINERU_RETRY_BACKOFF_FACTOR = 2
+_MINERU_RETRY_BACKOFF_MAX = 120
+
+# Local pre-check before the PDF reaches MinerU: an encrypted, corrupt or oversized
+# document would otherwise hold a GPU concurrency slot only to fail.
+_MAX_PAGES = int(os.getenv("POLICY_EXTRACT_MAX_PAGES", "50"))
+_MAX_BYTES = int(os.getenv("POLICY_EXTRACT_MAX_BYTES", str(25 * 1024 * 1024)))
 
 # Cap the callback body we persist. The callback receiver is a trust boundary, so
 # an oversized (or hostile/MITM'd) response must not bloat the row or freeze the
@@ -131,7 +145,9 @@ def _set_processing_status(self, extraction_request_id: str):
 
 
 @shared_task(
+    bind=True,
     queue=POLICY_EXTRACT_QUEUE,
+    max_retries=_MINERU_MAX_RETRIES,
     # A child killed mid-extraction (OOM / --max-memory-per-child recycle) requeues
     # the task instead of silently dropping it; _run_parser is idempotent
     # (re-downloads, overwrites result), so re-execution is safe.
@@ -140,9 +156,11 @@ def _set_processing_status(self, extraction_request_id: str):
     soft_time_limit=_PARSER_SOFT_TIME_LIMIT,
     time_limit=_PARSER_TIME_LIMIT,
 )
-def _run_parser(extraction_request_id: str):
+def _run_parser(self, extraction_request_id: str):
     """Download the uploaded file from storage and run MinervaGeminiParser."""
     from django.core.files.storage import default_storage
+
+    from core.services.mineru import precheck_pdf
     from policy_extract.models import PolicyExtractionRequest
     from policy_extract.services.content_type import (
         is_extractable,
@@ -232,6 +250,7 @@ def _run_parser(extraction_request_id: str):
                     f"Unsupported file type for '{req.original_filename}'. "
                     "Only PDF files can be extracted."
                 )
+            precheck_pdf(tmp_path, max_pages=_MAX_PAGES, max_bytes=_MAX_BYTES)
 
             # Run parser — saves .md and _raw.json into intermediate_dir
             parser = MineruGeminiParser(
@@ -271,7 +290,33 @@ def _run_parser(extraction_request_id: str):
         return extraction_request_id
 
     except Exception as exc:
-        # Mark as failed and stop the chain
+        from core.services.mineru import is_retryable, response_status
+
+        if is_retryable(exc) and self.request.retries < self.max_retries:
+            countdown = get_exponential_backoff_interval(
+                factor=_MINERU_RETRY_BACKOFF_FACTOR,
+                retries=self.request.retries,
+                maximum=_MINERU_RETRY_BACKOFF_MAX,
+                full_jitter=True,
+            )
+            logger.warning(
+                "_run_parser: transient failure for %s (status=%s, attempt %d/%d), "
+                "retrying in %ss: %s",
+                extraction_request_id,
+                response_status(exc),
+                self.request.retries + 1,
+                self.max_retries,
+                countdown,
+                exc,
+            )
+            # Back to `initiated` while the retry waits in the queue — the reconciler
+            # only sweeps `processing` rows, so a long queue can't fail it meanwhile.
+            PolicyExtractionRequest.objects.filter(id=extraction_request_id).update(
+                status=PolicyExtractionRequest.Status.INITIATED, updated_at=now()
+            )
+            raise self.retry(exc=exc, countdown=countdown)
+
+        # Permanent failure (or retries exhausted): mark as failed and stop.
         from policy_extract.services.error_classification import classify_error
 
         try:

@@ -19,10 +19,18 @@ than raising.
 _RULES: list[tuple[str, list[str]]] = [
     # storage_error_message() text for an expired/invalid presigned link.
     ("expired_link", ["link is no longer valid", "has expired"]),
-    # Task guard + create serializer for a non-PDF upload/download.
+    # Task guard + create serializer for a non-PDF upload/download, and the
+    # pre-MinerU precheck_pdf() rejections (encrypted/corrupt, page or size cap).
     (
         "unsupported_file",
-        ["unsupported file type", "not a valid pdf", "files are supported"],
+        [
+            "unsupported file type",
+            "not a valid pdf",
+            "files are supported",
+            "encrypted or unreadable",
+            "pages; limit is",
+            "mb; limit is",
+        ],
     ),
     # Neither a stored file nor a link to fetch.
     ("missing_source", ["no source_url and no file_link"]),

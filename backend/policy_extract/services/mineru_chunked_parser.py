@@ -19,32 +19,23 @@ from typing import Dict, List, Tuple
 
 import pdfplumber
 
+from core.services.mineru import (
+    MINERU_TIMEOUT_SECONDS,
+    MINERU_URL,
+    base_form,
+    get_session,
+)
+
 
 class MineruChunkedParser:
-    MINERVA_API_URL = os.getenv(
-        "MINERVA_API_URL",
-        "https://rhobots.pbpartners.com/api/mineru/file_parse",
-    )
+    MINERVA_API_URL = MINERU_URL
     CHUNK_PAGES = int(os.getenv("MINERU_CHUNK_PAGES", "50"))
     MAX_WORKERS = int(os.getenv("MINERU_MAX_WORKERS", "4"))
-    REQUEST_TIMEOUT = int(os.getenv("MINERU_CHUNK_TIMEOUT", "600"))
-
-    BASE_FORM = {
-        "return_middle_json": "false",
-        "return_model_output": "false",
-        "return_md": "true",
-        "return_images": "false",
-        "parse_method": "auto",
-        "lang_list": "en",
-        "output_dir": "./output",
-        "server_url": "string",
-        "return_content_list": "false",
-        "backend": "hybrid-auto-engine",
-        "table_enable": "true",
-        "response_format_zip": "false",
-        "formula_enable": "true",
-        "force_enable_ocr": "true",
-    }
+    # Capped by nginx's 300s proxy_read_timeout in front of MinerU — anything
+    # longer is unreachable and just surfaces as a 504.
+    REQUEST_TIMEOUT = int(
+        os.getenv("MINERU_CHUNK_TIMEOUT", str(MINERU_TIMEOUT_SECONDS))
+    )
 
     def __init__(self, output_dir: str = None):
         self.output_dir = Path(output_dir or "minerva_chunked_output")
@@ -79,12 +70,8 @@ class MineruChunkedParser:
     ) -> Tuple[int, str]:
         with open(pdf_path, "rb") as f:
             files = {"files": (Path(pdf_path).name, f, "application/pdf")}
-            data = {
-                **self.BASE_FORM,
-                "start_page_id": str(start),
-                "end_page_id": str(end),
-            }
-            resp = requests.post(
+            data = base_form(start_page_id=str(start), end_page_id=str(end))
+            resp = get_session().post(
                 self.MINERVA_API_URL,
                 files=files,
                 data=data,
@@ -142,8 +129,5 @@ class MineruChunkedParser:
 
         ordered = "\n\n".join(results[i] for i in sorted(results))
         (self.output_dir / "full.md").write_text(ordered, encoding="utf-8")
-        print(
-            f"   ✓ {total} pages → {len(ordered)} chars "
-            f"in {time.time() - t0:.1f}s"
-        )
+        print(f"   ✓ {total} pages → {len(ordered)} chars in {time.time() - t0:.1f}s")
         return ordered

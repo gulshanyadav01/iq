@@ -6,8 +6,8 @@ Writes ``md.md`` and ``blocks.json`` to MinIO. Returns refs + ``has_bbox`` flag.
 
 Hard limits (v1, per F6 / design Pass 2 in the approved plan):
   - 25MB upload cap   — enforced server-side in the create serializer
-  - 50-page cap       — enforced HERE post-conversion (count blocks[].page_idx)
-  - PDF MIME check    — enforced server-side
+  - 50-page cap       — enforced HERE before the Minerva call (precheck_pdf)
+  - PDF MIME check    — enforced server-side, and again by precheck_pdf
 
 If Minerva returns no usable content_list, the executor still completes the
 step and sets ``has_bbox=False`` so LLM_EXTRACT degrades to "no sentinels, no
@@ -28,14 +28,21 @@ import requests
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 
+from core.services.mineru import (
+    MINERU_URL,
+    PageLimitExceeded,
+    PermanentDocumentError,
+    base_form,
+    get_session,
+    precheck_pdf,
+)
+from pipelines.serializers.pipeline_run import MAX_FILE_SIZE_BYTES
 from pipelines.steps.executor import PrevStepOutput, StepExecutor
 from pipelines.steps.registry import register_executor
 
 logger = logging.getLogger(__name__)
 
-MINERVA_API_URL = os.getenv(
-    "MINERVA_API_URL", "https://rhobots.pbpartners.com/api/mineru/file_parse"
-)
+MINERVA_API_URL = MINERU_URL
 MINERVA_TIMEOUT_SECONDS = int(os.getenv("MINERVA_TIMEOUT_SECONDS", "300"))
 MAX_PAGES = int(os.getenv("PIPELINES_MAX_PAGES", "50"))
 
@@ -72,36 +79,29 @@ class PdfToMdExecutor(StepExecutor):
             pdf_bytes = pdf_fp.read()
         filename = os.path.basename(pdf_key) or "upload.pdf"
 
+        # Reject what Minerva can never parse before it holds a GPU slot.
+        try:
+            precheck_pdf(pdf_bytes, max_pages=MAX_PAGES, max_bytes=MAX_FILE_SIZE_BYTES)
+        except PageLimitExceeded as exc:
+            raise PageCapExceeded(str(exc)) from exc
+        except PermanentDocumentError as exc:
+            raise MinervaError(str(exc)) from exc
+
         files = {"files": (filename, io.BytesIO(pdf_bytes), "application/pdf")}
-        data = {
-            # middle.json carries per-block bbox in PDF point space — the only
-            # reliable source for citation highlights. content_list is flat
-            # reading-order but Minerva drops bbox on OCR-heavy tabular PDFs.
-            "return_middle_json": "true",
-            "return_model_output": "false",
-            "return_md": "true",
-            "return_images": "false",
-            "return_content_list": "true",
-            "end_page_id": "99999",
-            "parse_method": "auto",
-            "start_page_id": "0",
-            "lang_list": "en",
-            "output_dir": "./output",
-            "server_url": "string",
-            "backend": "hybrid-auto-engine",
-            "table_enable": "true",
-            "response_format_zip": "false",
-            "formula_enable": "true",
-            "force_enable_ocr": "true",
-        }
+        # middle.json carries per-block bbox in PDF point space — the only
+        # reliable source for citation highlights. content_list is flat
+        # reading-order but Minerva drops bbox on OCR-heavy tabular PDFs.
+        data = base_form(return_middle_json="true", return_content_list="true")
 
         logger.info(
             "PDF_TO_MD: calling Minerva pipeline_run=%s pdf_key=%s bytes=%d",
-            step_run.pipeline_run_id, pdf_key, len(pdf_bytes),
+            step_run.pipeline_run_id,
+            pdf_key,
+            len(pdf_bytes),
         )
 
         try:
-            response = requests.post(
+            response = get_session().post(
                 MINERVA_API_URL,
                 files=files,
                 data=data,
@@ -134,14 +134,6 @@ class PdfToMdExecutor(StepExecutor):
         blocks_from_middle = self._blocks_from_middle_json(middle_json)
         if blocks_from_middle:
             content_list = blocks_from_middle
-
-        # --- 4. Page cap enforcement --------------------------------------
-        if content_list:
-            max_page = max((b.get("page_idx", 0) for b in content_list), default=0)
-            if max_page + 1 > MAX_PAGES:
-                raise PageCapExceeded(
-                    f"PDF has {max_page + 1} pages; current cap is {MAX_PAGES}."
-                )
 
         return self._persist(
             step_run,
@@ -241,7 +233,11 @@ class PdfToMdExecutor(StepExecutor):
             if not isinstance(page, dict):
                 continue
             page_idx = page.get("page_idx", 0)
-            page_size = page.get("page_size") if isinstance(page.get("page_size"), list) else None
+            page_size = (
+                page.get("page_size")
+                if isinstance(page.get("page_size"), list)
+                else None
+            )
             for source_key in ("para_blocks", "tables", "images", "discarded_blocks"):
                 source = page.get(source_key)
                 if not isinstance(source, list):
@@ -260,7 +256,11 @@ class PdfToMdExecutor(StepExecutor):
     ) -> list[dict[str, Any]]:
         """If a table block dominates the page, split it row-wise so each <tr>
         gets its own bbox for citation highlights. Otherwise return [block]."""
-        if block.get("type") != "table" or not block.get("html") or not block.get("bbox"):
+        if (
+            block.get("type") != "table"
+            or not block.get("html")
+            or not block.get("bbox")
+        ):
             return [block]
         bbox = block["bbox"]
         if not (page_size and len(page_size) == 2):
@@ -350,7 +350,9 @@ class PdfToMdExecutor(StepExecutor):
                         if not html:
                             html = span.get("html")
                     elif span_type in (
-                        "equation", "interline_equation", "inline_equation"
+                        "equation",
+                        "interline_equation",
+                        "inline_equation",
                     ):
                         if not latex:
                             latex = span.get("latex") or span.get("content")
@@ -415,7 +417,9 @@ class PdfToMdExecutor(StepExecutor):
             if "<" in md_content and ">" in md_content:
                 # HTML-heavy md (e.g. Minerva flattened a tabular PDF to <table>).
                 # Split on table boundaries; classify each chunk.
-                parts = re.split(r"(<table[\s\S]*?</table>)", md_content, flags=re.IGNORECASE)
+                parts = re.split(
+                    r"(<table[\s\S]*?</table>)", md_content, flags=re.IGNORECASE
+                )
                 idx = 0
                 for part in parts:
                     chunk = part.strip()
@@ -469,8 +473,7 @@ class PdfToMdExecutor(StepExecutor):
         )
 
         has_bbox = bool(
-            normalized_blocks
-            and any(b.get("bbox") for b in normalized_blocks)
+            normalized_blocks and any(b.get("bbox") for b in normalized_blocks)
         )
         page_count = (
             max((b["page_idx"] for b in normalized_blocks), default=-1) + 1

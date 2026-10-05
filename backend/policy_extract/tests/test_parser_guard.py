@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 from celery.exceptions import Ignore
 from django.test import TestCase
 
+from core.tests.pdf_fixtures import make_pdf
 from policy_extract import tasks
 from policy_extract.models import PolicyExtractionRequest
 
@@ -92,7 +93,7 @@ class ParserGuardTests(TestCase):
         self.assertNotIn("Unsupported file type", req.error)
 
     def test_real_pdf_passes_guard_and_runs_parser(self):
-        storage = _storage_returning(b"%PDF-1.5\n%real pdf bytes\n")
+        storage = _storage_returning(make_pdf())
         with (
             patch("django.core.files.storage.default_storage", storage),
             patch(
