@@ -27,10 +27,13 @@ import pypdfium2 as pdfium
 import requests
 from requests.adapters import HTTPAdapter
 
-MINERU_URL = os.getenv(
-    "MINERVA_API_URL", "https://rhobots.pbpartners.com/api/mineru/file_parse"
+# `or`, not a getenv default: docker-compose.prod.yml passes these through as
+# `${VAR:-}`, so an unset host var arrives as an empty string.
+MINERU_URL = (
+    os.getenv("MINERVA_API_URL")
+    or "https://rhobots.pbpartners.com/api/mineru/file_parse"
 )
-MINERU_BACKEND = os.getenv("MINERU_BACKEND", "hybrid-auto-engine")
+MINERU_BACKEND = os.getenv("MINERU_BACKEND") or "hybrid-auto-engine"
 
 # nginx's proxy_read_timeout in front of MinerU is 300s; a longer client timeout
 # is unreachable and just surfaces as a 504.

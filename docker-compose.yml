@@ -47,6 +47,12 @@ services:
       POLICY_EXTRACT_SOFT_TIME_LIMIT: ${POLICY_EXTRACT_SOFT_TIME_LIMIT:-900}
       POLICY_EXTRACT_TIME_LIMIT: ${POLICY_EXTRACT_TIME_LIMIT:-1080}
       POLICY_EXTRACT_STALE_AFTER: ${POLICY_EXTRACT_STALE_AFTER:-1500}
+      # Pre-MinerU PDF precheck caps (policy_extract/tasks.py).
+      POLICY_EXTRACT_MAX_PAGES: ${POLICY_EXTRACT_MAX_PAGES:-50}
+      POLICY_EXTRACT_MAX_BYTES: ${POLICY_EXTRACT_MAX_BYTES:-26214400}
+      # MinerU `backend` form field (core/services/mineru.py). Flip to
+      # hybrid-http-client only in lockstep with the MinerU server cutover.
+      MINERU_BACKEND: ${MINERU_BACKEND:-hybrid-auto-engine}
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
