@@ -26,6 +26,7 @@ from typing import Any
 
 from celery import chain, shared_task
 from celery.exceptions import Ignore
+from celery.utils.time import get_exponential_backoff_interval
 from django.db import transaction
 from django.utils import timezone
 
@@ -42,9 +43,7 @@ def enqueue_pipeline_run(pipeline_run_id: str) -> None:
     from pipelines.models import PipelineRun
 
     run = PipelineRun.objects.get(id=pipeline_run_id)
-    step_run_ids = list(
-        run.step_runs.order_by("order").values_list("id", flat=True)
-    )
+    step_run_ids = list(run.step_runs.order_by("order").values_list("id", flat=True))
 
     tasks = [_set_processing_status.si(str(run.id))]
     for sr_id in step_run_ids:
@@ -75,7 +74,7 @@ def _set_processing_status(self, pipeline_run_id: str) -> str:
 
 @shared_task(bind=True, max_retries=3)
 def _set_completed_status(self, pipeline_run_id: str) -> str:
-    from pipelines.models import PipelineRun, StepRun
+    from pipelines.models import PipelineRun
 
     try:
         run = PipelineRun.objects.get(id=pipeline_run_id)
@@ -108,7 +107,7 @@ def _set_completed_status(self, pipeline_run_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@shared_task(bind=True, max_retries=2)
+@shared_task(bind=True, max_retries=5)
 def _execute_step(self, step_run_id: str) -> str:
     """Run one step with idempotency + status bookkeeping.
 
@@ -118,7 +117,6 @@ def _execute_step(self, step_run_id: str) -> str:
     """
     from pipelines.models import StepRun, PipelineRun
     from pipelines.steps.registry import get_executor
-    from pipelines.steps.executor import PrevStepOutput
 
     try:
         with transaction.atomic():
@@ -166,6 +164,29 @@ def _execute_step(self, step_run_id: str) -> str:
         return step_run_id
 
     except Exception as exc:
+        from core.services.mineru import is_retryable
+
+        # A transient Minerva failure (502 restart, 503 limiter full, 504, network)
+        # is retried with backoff instead of failing the run. The step goes back to
+        # PENDING; the COMPLETED guard above keeps a retry from re-firing work that
+        # already finished.
+        if is_retryable(exc) and self.request.retries < self.max_retries:
+            countdown = get_exponential_backoff_interval(
+                factor=2, retries=self.request.retries, maximum=120, full_jitter=True
+            )
+            logger.warning(
+                "STEP %s transient failure (attempt %d/%d), retrying in %ss: %s",
+                step_run_id,
+                self.request.retries + 1,
+                self.max_retries,
+                countdown,
+                exc,
+            )
+            StepRun.objects.filter(id=step_run_id).update(
+                status=StepRun.Status.PENDING, updated_at=timezone.now()
+            )
+            raise self.retry(exc=exc, countdown=countdown)
+
         logger.exception("STEP %s failed: %s", step_run_id, exc)
         try:
             sr = StepRun.objects.get(id=step_run_id)

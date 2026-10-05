@@ -6,8 +6,19 @@ Uses API-based extraction with OCR, table detection, and formula support.
 """
 
 from pathlib import Path
+import time
 import requests
 import logging
+
+from core.services.mineru import (
+    MINERU_BACKEND,
+    MINERU_TIMEOUT_SECONDS,
+    MINERU_URL,
+    base_form,
+    get_session,
+    is_retryable,
+    precheck_pdf,
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -21,17 +32,22 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
 
+# Waits between attempts on a transient MinerU failure (502 restart, 503 limiter
+# full, 504, network). This runs synchronously inside the CINS task, so the retry
+# is in-process and bounded rather than a Celery re-queue.
+_RETRY_WAITS_SECONDS = (5, 15, 45)
+
 
 def extract_pdf_content(
     file_path: str,
-    api_url: str = "https://rhobots.pbpartners.com/api/mineru/file_parse",
+    api_url: str = MINERU_URL,
     return_md: bool = True,
     return_images: bool = False,
     table_enable: bool = True,
     formula_enable: bool = True,
     force_enable_ocr: bool = True,
     parse_method: str = "auto",
-    backend: str = "hybrid-auto-engine",
+    backend: str = MINERU_BACKEND,
     lang_list: str = "en",
     start_page_id: int = 0,
     end_page_id: int = 99999,
@@ -59,7 +75,9 @@ def extract_pdf_content(
     Raises:
         ValueError: If the file is not a PDF
         FileNotFoundError: If the file does not exist
-        requests.RequestException: If the API request fails
+        PermanentDocumentError: If the PDF is encrypted or corrupt
+        requests.RequestException: If the API request fails (after retrying
+            transient failures)
     """
     logger.debug(f"Starting PDF extraction for file: {file_path}")
     path = Path(file_path)
@@ -77,25 +95,23 @@ def extract_pdf_content(
     file_size = path.stat().st_size
     logger.info(f"Processing PDF: {path.name} (size: {file_size:,} bytes)")
 
+    # Encrypted/corrupt PDFs fail inside MinerU after holding a GPU slot; reject
+    # them locally. No page/size cap here — commission grids can run long.
+    precheck_pdf(str(path))
+
     # Prepare form data
-    data = {
-        "return_middle_json": "false",
-        "return_model_output": "false",
-        "return_md": str(return_md).lower(),
-        "return_images": str(return_images).lower(),
-        "end_page_id": str(end_page_id),
-        "parse_method": parse_method,
-        "start_page_id": str(start_page_id),
-        "lang_list": lang_list,
-        "output_dir": "./output",
-        "server_url": "string",
-        "return_content_list": "false",
-        "backend": backend,
-        "table_enable": str(table_enable).lower(),
-        "response_format_zip": "false",
-        "formula_enable": str(formula_enable).lower(),
-        "force_enable_ocr": str(force_enable_ocr).lower(),
-    }
+    data = base_form(
+        return_md=str(return_md).lower(),
+        return_images=str(return_images).lower(),
+        end_page_id=str(end_page_id),
+        parse_method=parse_method,
+        start_page_id=str(start_page_id),
+        lang_list=lang_list,
+        backend=backend,
+        table_enable=str(table_enable).lower(),
+        formula_enable=str(formula_enable).lower(),
+        force_enable_ocr=str(force_enable_ocr).lower(),
+    )
 
     logger.debug(f"API endpoint: {api_url}")
     logger.debug(
@@ -104,19 +120,36 @@ def extract_pdf_content(
         f"tables={table_enable}, formulas={formula_enable}"
     )
 
-    # Open and send the file
+    attempts = len(_RETRY_WAITS_SECONDS) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return _post_pdf(path, api_url, data)
+        except Exception as e:
+            if attempt < attempts and is_retryable(e):
+                wait = _RETRY_WAITS_SECONDS[attempt - 1]
+                logger.warning(
+                    f"Transient MinerU failure (attempt {attempt}/{attempts}), "
+                    f"retrying in {wait}s: {e}"
+                )
+                time.sleep(wait)
+                continue
+            raise
+
+
+def _post_pdf(path: Path, api_url: str, data: dict) -> dict:
+    """One POST of the PDF to file_parse; logs and re-raises any failure."""
     logger.debug("Sending PDF to API for processing...")
     response = None
     try:
         with open(path, "rb") as f:
             files = {"files": (path.name, f, "application/pdf")}
 
-            response = requests.post(
+            response = get_session().post(
                 api_url,
                 data=data,
                 files=files,
                 headers={"accept": "application/json"},
-                timeout=300,  # 5 minute timeout for large PDFs
+                timeout=MINERU_TIMEOUT_SECONDS,
             )
 
         logger.debug(f"API response status: {response.status_code}")
@@ -132,15 +165,15 @@ def extract_pdf_content(
         return result
 
     except requests.exceptions.Timeout:
-        logger.error("API request timed out after 300 seconds")
+        logger.error(f"API request timed out after {MINERU_TIMEOUT_SECONDS} seconds")
         raise
     except requests.exceptions.ConnectionError as e:
         logger.error(f"Failed to connect to API at {api_url}: {str(e)}")
         raise
     except requests.exceptions.HTTPError as e:
-        error_msg = f"API returned error status {e.response.status_code}"
+        error_msg = "API returned error status"
         if e.response is not None:
-            error_msg += f": {e.response.text[:500]}"
+            error_msg += f" {e.response.status_code}: {e.response.text[:500]}"
         logger.error(error_msg)
         raise
     except Exception as e:

@@ -28,6 +28,7 @@ whitenoise==6.9.0
 langfuse>=4.3.1
 # CINS pipeline dependencies
 pdfplumber>=0.10.0
+pypdfium2>=4.18
 openpyxl>=3.1.0
 python-magic>=0.4.27
 beautifulsoup4>=4.12.0

@@ -20,6 +20,13 @@ from datetime import datetime
 
 from django.conf import settings
 
+from core.services.mineru import (
+    MINERU_TIMEOUT_SECONDS,
+    MINERU_URL,
+    base_form,
+    get_session,
+)
+
 try:
     from google import genai
     from google.genai import types
@@ -42,9 +49,7 @@ class MineruGeminiParser:
     - Stage 2: Model focuses on mapping clean data to schema
     """
 
-    MINERVA_API_URL = os.getenv(
-        "MINERVA_API_URL", "https://rhobots.pbpartners.com/api/mineru/file_parse"
-    )
+    MINERVA_API_URL = MINERU_URL
 
     def __init__(
         self, api_key: str = None, model: str = None, intermediate_dir: str = None
@@ -875,32 +880,15 @@ class MineruGeminiParser:
         # Prepare the multipart form data
         with open(pdf_path, "rb") as pdf_file:
             files = {"files": (Path(pdf_path).name, pdf_file, "application/pdf")}
-            data = {
-                "return_middle_json": "false",
-                "return_model_output": "false",
-                "return_md": "true",
-                "return_images": "false",
-                "end_page_id": "99999",
-                "parse_method": "auto",
-                "start_page_id": "0",
-                "lang_list": "en",
-                "output_dir": "./output",
-                "server_url": "string",
-                "return_content_list": "false",
-                "backend": "hybrid-auto-engine",
-                "table_enable": "true",
-                "response_format_zip": "false",
-                "formula_enable": "true",
-                "force_enable_ocr": "true",
-            }
+            data = base_form()
 
             try:
-                response = requests.post(
+                response = get_session().post(
                     self.MINERVA_API_URL,
                     files=files,
                     data=data,
                     headers={"accept": "application/json"},
-                    timeout=300,  # 5 minute timeout for large PDFs
+                    timeout=MINERU_TIMEOUT_SECONDS,
                 )
                 response.raise_for_status()
 

@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 from celery.exceptions import Ignore
 from django.test import TestCase, override_settings
 
+from core.tests.pdf_fixtures import make_pdf
 from policy_extract import tasks
 from policy_extract.models import PolicyExtractionRequest
 
@@ -33,7 +34,7 @@ class CompletionStatusTests(TestCase):
             source_url="policy_extractions/originals/abc/policy.pdf",
             status=PolicyExtractionRequest.Status.INITIATED,
         )
-        self.storage = _storage_returning(b"%PDF-1.5\n%real pdf bytes\n")
+        self.storage = _storage_returning(make_pdf())
 
     def _run(self):
         with (
