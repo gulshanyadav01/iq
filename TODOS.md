@@ -13,6 +13,22 @@
       `default_zero_fields`. A declarative registry would make add-ons single-source
       and remove the drift hazard. Effort: human ~1 day / CC ~2h. Not blocking.
 
+- [ ] **finalTotalDiscount reconciliation guard** — cross-check the direct
+      line-sum against the `basic_od − (od − addons)` derivation and flag/review
+      when they diverge beyond a tolerance.
+      **Priority:** P2
+      **Context:** Deferred follow-up to branch
+      `gulshanyadav01/pbp10908791-finaldiscount-correct`, which switched
+      `_apply_final_total_discount` to sum the labeled OD discount lines
+      (NCB + Others). The direct sum is correct when Stage-1 captures every
+      discount line, but it has no cross-check: if Stage-1 captures only one of
+      two discount components it silently undercounts, and an OCR-inflated
+      "Others" line (e.g. PBP10908859 Others -58951) silently overcounts. A
+      reconciliation against basic_od−(od−addons) with a review flag on
+      divergence would catch both. Flagged by the `finaltotaldiscount-godigit-bundles-unitemized-addons`
+      learning and the pre-landing red-team/adversarial passes. Not blocking;
+      the direct sum is a strict improvement over the prior derivation.
+
 ## cins
 
 - [ ] **Declarative `RuleConditions` field registry** — replace the ten
