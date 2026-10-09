@@ -955,14 +955,16 @@ class CoverTermsTests(unittest.TestCase):
 
 class FinalTotalDiscountTests(unittest.TestCase):
     """_apply_final_total_discount sets finalTotalDiscount to the TOTAL OD discount =
-    basic_od_premium - (od_premium - totalAddonPremium), not the NCB component alone.
-    od_premium is the last OD total (post-discount AND post-add-on), so add-ons folded
-    into it must be added back to isolate the pure discount."""
+    the direct SUM of the raw discount line items (NCB discount + every "Others" OD
+    discount), read from raw_data["premiums"]/["ncb_details"]. When no itemised discount
+    line exists it falls back to the derivation basic_od - (od_premium - totalAddonPremium),
+    clamped at 0. The _run() helper below passes no raw_data, so it exercises the FALLBACK
+    path; the *FromLines tests exercise the primary direct-sum path."""
 
     def setUp(self):
         self.parser = MineruGeminiParser.__new__(MineruGeminiParser)
 
-    def _run(self, basic_od, od, addon=0, current=None):
+    def _run(self, basic_od, od, addon=0, current=None, raw_data=None):
         sd = {
             "basic_od_premium": _field(basic_od),
             "od_premium": _field(od),
@@ -970,36 +972,34 @@ class FinalTotalDiscountTests(unittest.TestCase):
         }
         if current is not None:
             sd["finalTotalDiscount"] = _field(current)
-        self.parser._apply_final_total_discount(sd)
+        self.parser._apply_final_total_discount(sd, raw_data)
         return sd["finalTotalDiscount"]["value"]
 
-    def test_total_discount_no_addons(self):
-        # Policy with NCB Discount (-5475) AND "Others" (-14127), no add-ons: the field
-        # must carry the full 21903-2299 = 19604, not the NCB-only 5475 the LLM emitted.
+    # ---- Fallback path: no raw discount lines -> derivation -----------------
+
+    def test_fallback_no_addons(self):
+        # No raw discount lines -> fall back to basic_od - od = 21903 - 2299 = 19604.
         self.assertEqual(self._run("21903", "2299", current="5475"), "19604")
 
-    def test_overrides_ncb_only_llm_value(self):
+    def test_fallback_overrides_stale_value(self):
         # PBP10908859 (real prod doc): basic_od 98280, Total OD 56451, no add-ons ->
-        # 41829 total discount, overriding the NCB-only 34398.
+        # fallback 41829, overriding a stale 34398.
         self.assertEqual(self._run("98280", "56451", addon=0, current="34398"), "41829")
 
-    def test_addons_folded_into_od_added_back(self):
-        # PBP10909606 (real prod doc): basic 45131, Total OD 19215 includes ~14815 of
-        # add-ons (zero-dep/EP/…). True discount = 45131 - (19215 - 14815) = 40731.
-        # Without the add-back it would wrongly report 25916.
+    def test_fallback_addons_folded_into_od_added_back(self):
+        # PBP10909606: basic 45131, Total OD 19215 includes ~14815 add-ons. Fallback
+        # derivation = 45131 - (19215 - 14815) = 40731.
         self.assertEqual(
             self._run("45131", "19215", addon=14815, current="11283"), "40731"
         )
 
-    def test_ncb_percent_zero_still_derives_discount(self):
-        # Layer-3 edge: NCB% not recovered, but a discount exists -> subtraction finds it.
+    def test_fallback_ncb_percent_zero_still_derives_discount(self):
         self.assertEqual(self._run("12547", "1542", current="0"), "11005")
 
-    def test_no_discount_is_zero(self):
-        # basic_od == od (or od >= basic via fallback) -> no discount.
+    def test_fallback_no_discount_is_zero(self):
         self.assertEqual(self._run("8254", "8254", current="0"), "0")
 
-    def test_never_negative(self):
+    def test_fallback_never_negative(self):
         # A larger od than basic (shouldn't happen) clamps to 0, never negative.
         self.assertEqual(self._run("100", "500", current="0"), "0")
 
@@ -1018,14 +1018,13 @@ class FinalTotalDiscountTests(unittest.TestCase):
             {"id", "value", "confidence_score", "is_extracted", "do_verification"},
         )
 
-    def test_missing_addon_field_treated_as_zero(self):
-        # totalAddonPremium absent -> _num returns 0, formula reduces to basic_od - od.
+    def test_fallback_missing_addon_field_treated_as_zero(self):
+        # totalAddonPremium absent -> _num returns 0, derivation reduces to basic_od - od.
         sd = {"basic_od_premium": _field("1000"), "od_premium": _field("400")}
         self.parser._apply_final_total_discount(sd)
         self.assertEqual(sd["finalTotalDiscount"]["value"], "600")
 
-    def test_tolerates_messy_numeric_strings(self):
-        # Commas / currency artifacts are stripped before subtracting.
+    def test_fallback_tolerates_messy_numeric_strings(self):
         sd = {
             "basic_od_premium": _field("21,903"),
             "od_premium": _field("Rs 2,299"),
@@ -1033,6 +1032,257 @@ class FinalTotalDiscountTests(unittest.TestCase):
         }
         self.parser._apply_final_total_discount(sd)
         self.assertEqual(sd["finalTotalDiscount"]["value"], "19604")
+
+    # ---- Primary path: direct sum of raw discount lines ---------------------
+
+    def test_sum_ncb_plus_others_from_premiums(self):
+        # NCB Discount (-5475) + "Others" (-14127) summed directly from premiums[] =
+        # 19602, read off the schedule rather than derived from OD totals (note this
+        # differs from the basic_od-od derivation's 19604 — the lines are the truth).
+        raw = {
+            "premiums": [
+                {"label": "Total Basic Own Damage Premium", "value": "21903"},
+                {
+                    "label": "NCB Discount",
+                    "value": "-5475",
+                    "is_discount": True,
+                    "discount_type": "ncb",
+                },
+                {
+                    "label": "Others",
+                    "value": "-14127",
+                    "is_discount": True,
+                    "discount_type": "other",
+                },
+                {"label": "Own Damage Premium", "value": "2299"},
+            ]
+        }
+        # basic/od deliberately inconsistent with the sum to prove the lines win.
+        self.assertEqual(self._run("999", "999", current="0", raw_data=raw), "19602")
+
+    def test_ncb_amount_from_ncb_details_when_absent_in_premiums(self):
+        # No NCB line in premiums -> the ncb_details discount_amount is added once.
+        raw = {
+            "premiums": [
+                {
+                    "label": "Others",
+                    "value": "-14127",
+                    "is_discount": True,
+                    "discount_type": "other",
+                },
+            ],
+            "ncb_details": [
+                {"ncb_type": "percentage", "value": "20"},
+                {"ncb_type": "discount_amount", "value": "-5475"},
+            ],
+        }
+        self.assertEqual(self._run("0", "0", current="0", raw_data=raw), "19602")
+
+    def test_ncb_not_double_counted_across_buckets(self):
+        # NCB appears in BOTH premiums[] and ncb_details[] -> counted once (5475), not
+        # twice. Total = 5475 (NCB) + 14127 (Others) = 19602.
+        raw = {
+            "premiums": [
+                {
+                    "label": "NCB Discount",
+                    "value": "-5475",
+                    "is_discount": True,
+                    "discount_type": "ncb",
+                },
+                {
+                    "label": "Others",
+                    "value": "-14127",
+                    "is_discount": True,
+                    "discount_type": "other",
+                },
+            ],
+            "ncb_details": [
+                {"ncb_type": "discount_amount", "value": "-5475"},
+            ],
+        }
+        self.assertEqual(self._run("0", "0", current="0", raw_data=raw), "19602")
+
+    def test_ncb_deduped_by_label_when_discount_type_not_ncb(self):
+        # The NCB premium line is mislabeled discount_type="other" (Stage-1 is an LLM and
+        # does not always tag discount_type reliably), but its LABEL says "NCB Discount".
+        # The label arm of the ncb-seen check ("ncb" in label) must still fire so the same
+        # amount in ncb_details is NOT added on top -> NCB counted once.
+        # 5475 (NCB) + 14127 (Others) = 19602, NOT 25077 (double-counted NCB).
+        raw = {
+            "premiums": [
+                {
+                    "label": "NCB Discount",
+                    "value": "-5475",
+                    "is_discount": True,
+                    "discount_type": "other",
+                },
+                {
+                    "label": "Others",
+                    "value": "-14127",
+                    "is_discount": True,
+                    "discount_type": "other",
+                },
+            ],
+            "ncb_details": [
+                {"ncb_type": "discount_amount", "value": "-5475"},
+            ],
+        }
+        self.assertEqual(self._run("0", "0", current="0", raw_data=raw), "19602")
+
+    def test_ncb_deduped_by_spelled_out_no_claim_bonus_label(self):
+        # Same dedup, but the label spells out "No Claim Bonus" instead of "NCB".
+        # That string does NOT contain the substring "ncb", so the separate
+        # "no claim bonus" arm of the ncb-seen check must fire. Without it the
+        # ncb_details amount would be added on top -> NCB double-counted.
+        # 5475 (NCB) + 14127 (Others) = 19602, NOT 25077.
+        raw = {
+            "premiums": [
+                {
+                    "label": "No Claim Bonus",
+                    "value": "-5475",
+                    "is_discount": True,
+                    "discount_type": "other",
+                },
+                {
+                    "label": "Others",
+                    "value": "-14127",
+                    "is_discount": True,
+                    "discount_type": "other",
+                },
+            ],
+            "ncb_details": [
+                {"ncb_type": "discount_amount", "value": "-5475"},
+            ],
+        }
+        self.assertEqual(self._run("0", "0", current="0", raw_data=raw), "19602")
+
+    def test_loading_line_excluded(self):
+        # A "Loading" line is is_discount-tagged by Stage-1 but INCREASES premium; it must
+        # not be summed. Only the NCB (-5475) counts.
+        raw = {
+            "premiums": [
+                {
+                    "label": "NCB Discount",
+                    "value": "-5475",
+                    "is_discount": True,
+                    "discount_type": "ncb",
+                },
+                {"label": "Underwriting Loading", "value": "1200", "is_discount": True},
+            ]
+        }
+        self.assertEqual(self._run("0", "0", current="0", raw_data=raw), "5475")
+
+    def test_tax_line_excluded(self):
+        # is_tax_line entries are skipped even if mis-tagged is_discount.
+        raw = {
+            "premiums": [
+                {
+                    "label": "NCB Discount",
+                    "value": "-5475",
+                    "is_discount": True,
+                    "discount_type": "ncb",
+                },
+                {
+                    "label": "CGST",
+                    "value": "-100",
+                    "is_discount": True,
+                    "is_tax_line": True,
+                },
+            ]
+        }
+        self.assertEqual(self._run("0", "0", current="0", raw_data=raw), "5475")
+
+    def test_positive_magnitude_discount_summed(self):
+        # Doc prints the discount without a minus sign; is_discount flag still counts it.
+        raw = {
+            "premiums": [
+                {
+                    "label": "NCB Discount",
+                    "value": "5475",
+                    "is_discount": True,
+                    "discount_type": "ncb",
+                },
+            ]
+        }
+        self.assertEqual(self._run("0", "0", current="0", raw_data=raw), "5475")
+
+    def test_duplicate_discount_line_counted_once(self):
+        # Stage-1 can capture the same premium table twice (detail + summary). A discount
+        # line repeated with the same label + amount must be summed once, not doubled.
+        raw = {
+            "premiums": [
+                {
+                    "label": "Others",
+                    "value": "-14127",
+                    "is_discount": True,
+                    "discount_type": "other",
+                },
+                {
+                    "label": "Others",
+                    "value": "-14127",
+                    "is_discount": True,
+                    "discount_type": "other",
+                },
+            ]
+        }
+        self.assertEqual(self._run("0", "0", current="0", raw_data=raw), "14127")
+
+    def test_zero_value_discount_line_does_not_suppress_fallback(self):
+        # An is_discount line whose value is unparsable/zero contributes nothing and must
+        # NOT count as "a discount line found" — otherwise it would skip the fallback and
+        # zero out a doc that should derive basic_od - od = 1000 - 400 = 600.
+        raw = {
+            "premiums": [
+                {"label": "NCB Discount", "value": "", "is_discount": True},
+            ]
+        }
+        self.assertEqual(self._run("1000", "400", current="0", raw_data=raw), "600")
+
+    def test_indian_format_discount_value_parsed(self):
+        # Indian motor schedules write amounts like "5,475/-" or with a ₹ prefix. The
+        # value must parse to 5475, not get dropped to 0 by a float() failure.
+        raw = {
+            "premiums": [
+                {
+                    "label": "NCB Discount",
+                    "value": "5,475/-",
+                    "is_discount": True,
+                    "discount_type": "ncb",
+                },
+                {
+                    "label": "Others",
+                    "value": "₹14,127.00",
+                    "is_discount": True,
+                    "discount_type": "other",
+                },
+            ]
+        }
+        self.assertEqual(self._run("0", "0", current="0", raw_data=raw), "19602")
+
+    def test_ncb_deduped_by_no_claim_wording_without_bonus(self):
+        # Label is "No Claim Discount" (no "bonus", no "ncb" substring) with
+        # discount_type="other"; the punctuation-normalised "noclaim" match must still
+        # fire so the ncb_details amount is not double-counted.
+        raw = {
+            "premiums": [
+                {
+                    "label": "No Claim Discount",
+                    "value": "-5475",
+                    "is_discount": True,
+                    "discount_type": "other",
+                },
+                {
+                    "label": "Others",
+                    "value": "-14127",
+                    "is_discount": True,
+                    "discount_type": "other",
+                },
+            ],
+            "ncb_details": [
+                {"ncb_type": "discount_amount", "value": "-5475"},
+            ],
+        }
+        self.assertEqual(self._run("0", "0", current="0", raw_data=raw), "19602")
 
 
 if __name__ == "__main__":

@@ -1459,31 +1459,41 @@ class MineruGeminiParser:
                 "do_verification": "FALSE",
             }
 
-    def _apply_final_total_discount(self, structured_data: Dict[str, Any]) -> None:
-        """Set finalTotalDiscount = total of ALL OD discounts.
+    def _apply_final_total_discount(
+        self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
+    ) -> None:
+        """Set finalTotalDiscount = direct SUM of the OD discount line items.
 
-        "Final Total Discount" is the TOTAL discount applied to the Own Damage premium
-        (NCB + "Others" + experience/model/loyalty …), NOT the NCB component alone. The
-        lite model historically emitted only the NCB discount, so the exported value was
-        systematically low on any policy carrying a non-NCB discount line.
+        "Final Total Discount" is the TOTAL discount applied to the Own Damage premium —
+        NCB discount + every "Others"/experience/model/loyalty OD discount — NOT the NCB
+        component alone. We sum the ACTUAL discount lines captured in Stage-1 raw_data,
+        rather than deriving the value arithmetically:
 
-        Formula: ``basic_od_premium − (od_premium − totalAddonPremium)``.
-          • basic_od_premium is the pre-discount OD base.
-          • od_premium is the LAST OD-section total, which is AFTER all discounts AND
-            AFTER add-ons are added back (stage2 takes the highest-line-order OD total —
-            "Total OD Premium" — which folds in zero-dep/EP/RSA/… add-on premiums).
-        So ``basic_od − od_premium`` alone NETS OUT the add-ons and understates the
-        discount whenever any OD add-on is priced (verified on real prod docs, e.g.
-        PBP10909606: basic 45131, Total OD 19215 incl. ~14815 add-ons, true discount
-        40731 — not 25916). Adding totalAddonPremium back isolates the pure discount.
-        When there are no add-ons (totalAddonPremium=0) this reduces to basic_od − od.
+          • raw_data["premiums"][] entries flagged is_discount (each carries a signed
+            ``value`` and a ``discount_type`` of "ncb"/"other"), and
+          • raw_data["ncb_details"][] entries with ncb_type="discount_amount".
 
-        Deterministic and needs no ncb_percent; robust to the LLM missing a discount
-        line. Call AFTER the rounding/default-zero loops, AFTER _apply_total_addon_premium
-        (so totalAddonPremium is populated) and AFTER the basic_od ↔ od_premium fallback
-        (so both operands are clean numeric strings; when one was missing they are equal,
-        giving a correct 0). Mirrors the derived-field convention of
-        _apply_total_addon_premium / serviceTax (is_extracted="TRUE").
+        This replaces the old derivation ``basic_od − (od_premium − totalAddonPremium)``,
+        which only equalled the true discount when od_premium was add-on INCLUSIVE and
+        totalAddonPremium captured exactly those folded-in add-ons; when the add-on
+        bookkeeping was off it over-/under-counted by the add-on amount (e.g. PBP10908791
+        exported 15232 from the formula vs a true 18352, the 3120 gap being the add-on
+        premium). Summing the real lines reads the discount straight off the schedule.
+
+        Dedupe: the NCB discount amount can appear in BOTH premiums[] and ncb_details[]
+        (Stage-1 notes this), so ncb_details discount_amount is only added when no NCB
+        line was already counted in premiums. "Loading" lines are excluded — Stage-1 tags
+        them is_discount but they INCREASE the premium.
+
+        Fallback: when raw_data surfaces NO discount lines at all (missing raw_data, or a
+        doc that prints only net-vs-basic OD with no itemised discount line), fall back to
+        the previous derivation ``max(0, basic_od − (od_premium − totalAddonPremium))`` so
+        those documents don't regress to 0.
+
+        Deterministic. Mirrors _apply_ncb_percent's raw_data read and the derived-field
+        stamping convention of _apply_total_addon_premium (is_extracted="TRUE"). Call AFTER
+        the rounding/default-zero loops, AFTER _apply_total_addon_premium and AFTER the
+        basic_od ↔ od_premium fallback so the fallback branch's operands are clean.
         """
 
         def _num(field_name: str) -> float:
@@ -1498,8 +1508,75 @@ class MineruGeminiParser:
             except (ValueError, TypeError):
                 return 0.0
 
-        net_od_before_addons = _num("od_premium") - _num("totalAddonPremium")
-        discount = max(0.0, _num("basic_od_premium") - net_od_before_addons)
+        def _abs_amount(value) -> float:
+            # Pull the first signed decimal out of a raw Stage-1 value. Regex (not a
+            # bare digit-strip) so Indian-format noise like "5,475/-" or a "Rs"/"₹"
+            # prefix yields 5475 instead of a float() failure that silently drops the
+            # line. Commas are grouping separators, so strip them before matching.
+            m = re.search(r"-?\d+(?:\.\d+)?", str(value).replace(",", ""))
+            if not m:
+                return 0.0
+            try:
+                return abs(float(m.group()))
+            except (ValueError, TypeError):
+                return 0.0
+
+        # --- Primary: direct sum of the raw discount line items ---------------
+        raw = raw_data or {}
+        line_sum = 0.0
+        found_discount_line = False
+        ncb_counted_in_premiums = False
+        # Stage-1 may capture the same premium table twice (detail + summary block),
+        # so collapse exact-duplicate discount lines by (normalised label, amount) to
+        # avoid double counting a repeated NCB/Others line.
+        seen_discount_lines = set()
+        for prem in raw.get("premiums", []) or []:
+            if not isinstance(prem, dict):
+                continue
+            if not prem.get("is_discount") or prem.get("is_tax_line"):
+                continue
+            label = str(prem.get("label") or "")
+            low = label.lower()
+            if "loading" in low:
+                # Loading is an addition, not a discount, despite the is_discount tag.
+                continue
+            amount = _abs_amount(prem.get("value"))
+            if not amount:
+                # A line that parses to nothing contributes no discount and must not
+                # suppress the fallback derivation below.
+                continue
+            key = (re.sub(r"\s+", " ", low.strip()), round(amount, 2))
+            if key in seen_discount_lines:
+                continue
+            seen_discount_lines.add(key)
+            line_sum += amount
+            found_discount_line = True
+            # Normalise punctuation so "N.C.B." -> "ncb" and "No Claim Discount"/
+            # "No Claim Bonus" both match "noclaim"; otherwise a non-"ncb"-labelled NCB
+            # line with discount_type!="ncb" would let ncb_details add the amount again.
+            norm = re.sub(r"[^a-z0-9]", "", low)
+            if prem.get("discount_type") == "ncb" or "ncb" in norm or "noclaim" in norm:
+                ncb_counted_in_premiums = True
+
+        # NCB discount amount may live in ncb_details[] instead of premiums[]; add it
+        # only when it wasn't already summed above (avoid double counting).
+        if not ncb_counted_in_premiums:
+            for ncb in raw.get("ncb_details", []) or []:
+                if not isinstance(ncb, dict):
+                    continue
+                if ncb.get("ncb_type") != "discount_amount":
+                    continue
+                amount = _abs_amount(ncb.get("value"))
+                if amount:
+                    line_sum += amount
+                    found_discount_line = True
+
+        if found_discount_line:
+            discount = line_sum
+        else:
+            # Fallback: no itemised discount line → previous derivation.
+            net_od_before_addons = _num("od_premium") - _num("totalAddonPremium")
+            discount = max(0.0, _num("basic_od_premium") - net_od_before_addons)
         total_value = str(round(discount))
         if isinstance(structured_data.get("finalTotalDiscount"), dict):
             structured_data["finalTotalDiscount"]["value"] = total_value
@@ -2808,11 +2885,12 @@ class MineruGeminiParser:
                 structured_data["od_premium"]["value"] = basic_od
                 structured_data["od_premium"]["is_extracted"] = "TRUE"
 
-        # finalTotalDiscount = total OD discount = basic_od - (od_premium - add-ons).
-        # Runs AFTER _apply_total_addon_premium (above) and the basic_od ↔ od_premium
-        # fallback so all three operands are set; overrides the LLM's NCB-only value with
-        # the full discount, net of add-ons folded into Total OD Premium (see docstring).
-        self._apply_final_total_discount(structured_data)
+        # finalTotalDiscount = direct SUM of the raw OD discount lines (NCB + Others).
+        # Reads raw_data["premiums"]/["ncb_details"]; falls back to the basic_od − (od −
+        # add-ons) derivation only when no itemised discount line exists. Runs AFTER
+        # _apply_total_addon_premium (above) and the basic_od ↔ od_premium fallback so the
+        # fallback branch's operands are clean (see docstring).
+        self._apply_final_total_discount(structured_data, raw_data)
 
         # Fallback: basic_tp_premium ↔ tp_premium when one is missing
         basic_tp = (
