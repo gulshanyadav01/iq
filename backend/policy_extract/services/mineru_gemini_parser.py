@@ -269,23 +269,25 @@ class MineruGeminiParser:
         if not prefixes:
             return ""
 
-        from master_data.services.rto import RTO_PREFIX_TO_STATE_SLUG
-
-        # Every prefix for a state maps to the same slug, so any that resolves
-        # gives the scope for the locality match.
-        state_slug = ""
-        for prefix in prefixes:
-            state_slug = RTO_PREFIX_TO_STATE_SLUG.get(prefix.lower(), "")
-            if state_slug:
-                break
-        if not state_slug:
-            return ""
-
-        # Built once per parser instance (one SELECT), then held. Guarded with
-        # getattr because tests construct the parser via __new__ (bypassing
-        # __init__). Any master_data failure degrades to "" (no code) rather than
-        # aborting the whole policy parse — this is a best-effort enrichment.
+        # Everything that touches master_data is guarded: any failure (import,
+        # app-registry ordering, DB error/timeout) degrades to "" (no code)
+        # rather than aborting the whole policy parse — this is best-effort
+        # enrichment. The locality index is built once per parser instance (one
+        # SELECT) then held; getattr guards tests that build the parser via
+        # __new__ (bypassing __init__).
         try:
+            from master_data.services.rto import RTO_PREFIX_TO_STATE_SLUG
+
+            # Every prefix for a state maps to the same slug, so any that
+            # resolves gives the scope for the locality match.
+            state_slug = ""
+            for prefix in prefixes:
+                state_slug = RTO_PREFIX_TO_STATE_SLUG.get(prefix.lower(), "")
+                if state_slug:
+                    break
+            if not state_slug:
+                return ""
+
             index = getattr(self, "_rto_locality_index", None)
             if index is None:
                 from master_data.services.resolver import rto_locality_expansions
