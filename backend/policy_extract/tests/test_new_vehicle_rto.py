@@ -59,6 +59,16 @@ class NewVehicleRtoCodeTests(TestCase):
             value="UP03-Pithoragarh(Uttar Pradesh)(Group B)",
             state_slug="uttar-pradesh",
         )
+        # Cross-zone RTO: Faridabad is physically Haryana (HR prefix) but the
+        # master files it under the delhi-ncr zone slug (its value names "Delhi
+        # NCR"), the same slug state=DELHI resolves to. Used to prove the
+        # city/state fallback does not flip the extracted state to HARYANA.
+        RTOMaster.objects.create(
+            rto_id=6,
+            code="HR29",
+            value="HR29-Faridabad(Delhi NCR)(Group B)",
+            state_slug="delhi-ncr",
+        )
 
     def setUp(self):
         parser = MineruGeminiParser.__new__(MineruGeminiParser)
@@ -88,6 +98,23 @@ class NewVehicleRtoCodeTests(TestCase):
 
     def test_unknown_state_returns_blank(self):
         self.assertEqual(self.parser._rto_code_from_city_state("NAGPUR", "WAKANDA"), "")
+
+    def test_known_state_unmatched_city_returns_blank(self):
+        # Value: protects=_rto_code_from_city_state returns "" for a known state
+        # whose city matches no RTOMaster locality;
+        # fails_when=the `if not codes: return ""` guard is removed (return codes[0]
+        # then raises IndexError);
+        # why_new=the other blank-return tests exit before the DB lookup, this one
+        # exercises match_rto_localities returning [];
+        # seam=none
+        #
+        # The state resolves (Maharashtra -> MH) but the city is in no RTOMaster
+        # locality for it. The lookup must return "" rather than a spurious code
+        # (e.g. the state's first RTO), so a NEW-vehicle policy is never pinned
+        # to a wrong RTO just because the model misread the city.
+        self.assertEqual(
+            self.parser._rto_code_from_city_state("ATLANTIS", "MAHARASHTRA"), ""
+        )
 
     def test_blank_inputs_return_blank(self):
         self.assertEqual(self.parser._rto_code_from_city_state("", "MAHARASHTRA"), "")
@@ -130,3 +157,80 @@ class NewVehicleRtoCodeTests(TestCase):
         }
         out = self.parser._post_process(data)
         self.assertEqual(out["rto_num"]["value"], "")
+
+    def test_raw_data_rto_location_wins_over_city_state(self):
+        # Value: protects=the rto_location path (path 1) takes precedence and the
+        # city/state fallback does not run once path 1 yields a code;
+        # fails_when=the `if not rto_code` guard before the fallback is dropped so
+        # the city/state lookup overwrites the location-derived code;
+        # why_new=every other test leaves rto_reverse_map empty and passes no
+        # raw_data, so path 1 and the path-1-wins precedence are otherwise unexercised;
+        # seam=none
+        self.parser.rto_reverse_map = {("MAHARASHTRA", "PUNE"): "MH12"}
+        data = {
+            "reg_num": {"value": "NEW"},
+            "rto_num": {"value": ""},
+            "rto_city": {"value": "NAGPUR"},
+            "rto_state": {"value": "MAHARASHTRA"},
+        }
+        raw = {"vehicles": [{"rto_location": "MAHARASHTRA - Pune"}]}
+        out = self.parser._post_process(data, raw_data=raw)
+        # Path 1 (rto_location → MH12) wins; the Nagpur city/state fallback (MH31)
+        # must not run.
+        self.assertEqual(out["rto_num"]["value"], "MH12")
+
+    def test_falls_back_to_city_state_when_rto_location_unresolved(self):
+        # Value: protects=the city/state fallback runs when path 1 is present but
+        # yields no code;
+        # fails_when=path 1 swallows the branch or the fallback is gated on raw_data
+        # being absent;
+        # why_new=exercises path1-miss -> path2-hit, distinct from the no-raw_data case;
+        # seam=none
+        self.parser.rto_reverse_map = {}  # location cannot resolve
+        data = {
+            "reg_num": {"value": "NEW"},
+            "rto_num": {"value": ""},
+            "rto_city": {"value": "NAGPUR"},
+            "rto_state": {"value": "MAHARASHTRA"},
+        }
+        raw = {"vehicles": [{"rto_location": "SOMEWHERE - Nowhere"}]}
+        out = self.parser._post_process(data, raw_data=raw)
+        self.assertEqual(out["rto_num"]["value"], "MH31")
+
+    def test_cross_zone_fallback_fills_code_without_clobbering_state(self):
+        # Value: protects=the city/state fallback fills rto_num but leaves the
+        # authoritative extracted rto_state untouched for a cross-zone RTO whose
+        # registration prefix differs from the zone state (Faridabad is HR, zone
+        # delhi-ncr, extracted state DELHI);
+        # fails_when=the fallback re-derives rto_state from the matched code's
+        # prefix, flipping DELHI -> HARYANA;
+        # why_new=all other fallback tests use same-prefix states (MH/UK/UP) so the
+        # cross-zone clobber is invisible to them;
+        # seam=none
+        data = {
+            "reg_num": {"value": "NEW"},
+            "rto_num": {"value": ""},
+            "rto_city": {"value": "FARIDABAD"},
+            "rto_state": {"value": "DELHI"},
+        }
+        out = self.parser._post_process(data)
+        # HR29 is the correct RTO for Faridabad (filed under the delhi-ncr zone).
+        self.assertEqual(out["rto_num"]["value"], "HR29")
+        # ...but the extracted state must survive — not be rewritten to HARYANA.
+        self.assertEqual(out["rto_state"]["value"], "DELHI")
+
+    def test_fallback_does_not_override_model_extracted_rto_num(self):
+        # Value: protects=a NEW vehicle that already carries an rto_num keeps it;
+        # the city/state fallback only fills a blank rto_num;
+        # fails_when=the fallback overwrites a non-blank rto_num at confidence 0.90;
+        # why_new=guards the "fill only when blank" rule added for the broadened
+        # is_new_vehicle branch;
+        # seam=none
+        data = {
+            "reg_num": {"value": "NEW"},
+            "rto_num": {"value": "MH12"},  # model read a code off the document
+            "rto_city": {"value": "NAGPUR"},
+            "rto_state": {"value": "MAHARASHTRA"},
+        }
+        out = self.parser._post_process(data)
+        self.assertEqual(out["rto_num"]["value"], "MH12")
