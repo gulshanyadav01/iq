@@ -713,7 +713,7 @@ class MineruGeminiParser:
                     "default": "0",
                 },
                 "finalTotalDiscount": {
-                    "description": "NCB Discount amount in rupees (monetary deduction for claim-free years, NOT NCB protection addon)",
+                    "description": "Total of ALL discounts applied to the Own Damage premium in rupees (NCB + other/experience/model/loyalty discounts summed; equals basic_od_premium - od_premium). NOT the NCB discount alone, and NOT the NCB protection addon",
                     "default": "0",
                 },
                 "policy_start_date": {"description": "Start date (dd/mm/yyyy)"},
@@ -1385,6 +1385,61 @@ class MineruGeminiParser:
             structured_data["totalAddonPremium"]["confidence_score"] = 0.95
         else:
             structured_data["totalAddonPremium"] = {
+                "id": "",
+                "value": total_value,
+                "confidence_score": 0.95,
+                "is_extracted": "TRUE",
+                "do_verification": "FALSE",
+            }
+
+    def _apply_final_total_discount(self, structured_data: Dict[str, Any]) -> None:
+        """Set finalTotalDiscount = total of ALL OD discounts.
+
+        "Final Total Discount" is the TOTAL discount applied to the Own Damage premium
+        (NCB + "Others" + experience/model/loyalty …), NOT the NCB component alone. The
+        lite model historically emitted only the NCB discount, so the exported value was
+        systematically low on any policy carrying a non-NCB discount line.
+
+        Formula: ``basic_od_premium − (od_premium − totalAddonPremium)``.
+          • basic_od_premium is the pre-discount OD base.
+          • od_premium is the LAST OD-section total, which is AFTER all discounts AND
+            AFTER add-ons are added back (stage2 takes the highest-line-order OD total —
+            "Total OD Premium" — which folds in zero-dep/EP/RSA/… add-on premiums).
+        So ``basic_od − od_premium`` alone NETS OUT the add-ons and understates the
+        discount whenever any OD add-on is priced (verified on real prod docs, e.g.
+        PBP10909606: basic 45131, Total OD 19215 incl. ~14815 add-ons, true discount
+        40731 — not 25916). Adding totalAddonPremium back isolates the pure discount.
+        When there are no add-ons (totalAddonPremium=0) this reduces to basic_od − od.
+
+        Deterministic and needs no ncb_percent; robust to the LLM missing a discount
+        line. Call AFTER the rounding/default-zero loops, AFTER _apply_total_addon_premium
+        (so totalAddonPremium is populated) and AFTER the basic_od ↔ od_premium fallback
+        (so both operands are clean numeric strings; when one was missing they are equal,
+        giving a correct 0). Mirrors the derived-field convention of
+        _apply_total_addon_premium / serviceTax (is_extracted="TRUE").
+        """
+
+        def _num(field_name: str) -> float:
+            data = structured_data.get(field_name)
+            if not isinstance(data, dict):
+                return 0.0
+            clean = "".join(
+                c for c in str(data.get("value", "")) if c.isdigit() or c in ".-"
+            )
+            try:
+                return abs(float(clean)) if clean else 0.0
+            except (ValueError, TypeError):
+                return 0.0
+
+        net_od_before_addons = _num("od_premium") - _num("totalAddonPremium")
+        discount = max(0.0, _num("basic_od_premium") - net_od_before_addons)
+        total_value = str(round(discount))
+        if isinstance(structured_data.get("finalTotalDiscount"), dict):
+            structured_data["finalTotalDiscount"]["value"] = total_value
+            structured_data["finalTotalDiscount"]["is_extracted"] = "TRUE"
+            structured_data["finalTotalDiscount"]["confidence_score"] = 0.95
+        else:
+            structured_data["finalTotalDiscount"] = {
                 "id": "",
                 "value": total_value,
                 "confidence_score": 0.95,
@@ -2664,6 +2719,12 @@ class MineruGeminiParser:
             ):
                 structured_data["od_premium"]["value"] = basic_od
                 structured_data["od_premium"]["is_extracted"] = "TRUE"
+
+        # finalTotalDiscount = total OD discount = basic_od - (od_premium - add-ons).
+        # Runs AFTER _apply_total_addon_premium (above) and the basic_od ↔ od_premium
+        # fallback so all three operands are set; overrides the LLM's NCB-only value with
+        # the full discount, net of add-ons folded into Total OD Premium (see docstring).
+        self._apply_final_total_discount(structured_data)
 
         # Fallback: basic_tp_premium ↔ tp_premium when one is missing
         basic_tp = (
