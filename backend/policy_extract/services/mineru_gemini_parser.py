@@ -243,6 +243,67 @@ class MineruGeminiParser:
 
         return ""
 
+    def _rto_code_from_city_state(self, city: str, state: str) -> str:
+        """Reverse-look-up an RTO code from an extracted RTO city + state.
+
+        For a NEW vehicle there is no registration number to slice a code off
+        of, so the city/state the model reads off the document (e.g. "Nagpur" /
+        "Maharashtra") are the only route to the code (MH31). This resolves them
+        against the DB-backed ``RTOMaster`` via ``master_data`` — the same table
+        whose display values the export expects — rather than the absent flat
+        ``RTO.csv`` the ``rto_reverse_map`` path was wired to.
+
+        Ambiguous localities (Pithoragarh is UA05, UK05 and UP03) resolve to the
+        state's canonical registration prefix — the one ``RTO_STATE_MAP`` lists
+        first (UK over UA, OD over OR) — which is what the client system fills.
+        Returns "" when the state is unknown or the locality does not match.
+        """
+        city = (city or "").strip()
+        state = (state or "").strip().upper()
+        if not city or not state:
+            return ""
+
+        # Registration prefixes for this state name, canonical-first (dict order
+        # in RTO_STATE_MAP: UK before UA, OD before OR).
+        prefixes = [p for p, name in self.RTO_STATE_MAP.items() if name == state]
+        if not prefixes:
+            return ""
+
+        from master_data.services.rto import RTO_PREFIX_TO_STATE_SLUG
+
+        # Every prefix for a state maps to the same slug, so any that resolves
+        # gives the scope for the locality match.
+        state_slug = ""
+        for prefix in prefixes:
+            state_slug = RTO_PREFIX_TO_STATE_SLUG.get(prefix.lower(), "")
+            if state_slug:
+                break
+        if not state_slug:
+            return ""
+
+        # Built once per parser instance (one SELECT), then held. Guarded with
+        # getattr because tests construct the parser via __new__ (bypassing
+        # __init__).
+        index = getattr(self, "_rto_locality_index", None)
+        if index is None:
+            from master_data.services.resolver import rto_locality_expansions
+
+            index = rto_locality_expansions()
+            self._rto_locality_index = index
+
+        from master_data.services.resolver import match_rto_localities
+
+        codes = match_rto_localities(index, [state_slug], city)
+        if not codes:
+            return ""
+
+        # Prefer the canonical prefix (UK05 over UA05); fall back to the lowest.
+        for prefix in prefixes:
+            for code in codes:
+                if code[:2].upper() == prefix.upper():
+                    return code
+        return codes[0]
+
     def _get_rto_code(self, reg_num: str) -> str:
         """Extract RTO code from registration number (e.g., MH12AB1234 → MH12)"""
         import re
@@ -3101,57 +3162,70 @@ class MineruGeminiParser:
         )
         is_new_vehicle = reg_value in ("NEW", "")
 
-        if is_new_vehicle and raw_data:
-            # Extract rto_location from raw data (vehicles array or locations array)
-            rto_location = ""
-            # Check vehicles array first
-            vehicles = raw_data.get("vehicles", [])
-            if vehicles and isinstance(vehicles, list):
-                rto_location = vehicles[0].get("rto_location", "")
-            # Fallback: check locations array for RTO Location context
-            if not rto_location:
-                for loc in raw_data.get("locations", []):
-                    if (
-                        isinstance(loc, dict)
-                        and "RTO" in loc.get("context", "").upper()
-                    ):
-                        rto_location = loc.get("value", "")
-                        break
+        if is_new_vehicle:
+            rto_code = ""
 
-            if rto_location:
-                rto_code = self._find_rto_code_from_location(rto_location)
-                if rto_code:
-                    # Set rto_num
-                    if "rto_num" in structured_data and isinstance(
-                        structured_data["rto_num"], dict
-                    ):
-                        structured_data["rto_num"]["value"] = rto_code
-                        structured_data["rto_num"]["is_extracted"] = "TRUE"
-                        structured_data["rto_num"]["confidence_score"] = 0.90
-                    # Set rto_city from the looked-up code
-                    if "rto_city" in structured_data and isinstance(
-                        structured_data["rto_city"], dict
-                    ):
-                        if rto_code in self.rto_city_map:
-                            structured_data["rto_city"]["value"] = self.rto_city_map[
-                                rto_code
-                            ]
-                            structured_data["rto_city"]["is_extracted"] = "TRUE"
-                    # Set rto_state from the code prefix
-                    if "rto_state" in structured_data and isinstance(
-                        structured_data["rto_state"], dict
-                    ):
-                        import re
+            # 1) An explicit RTO location string in the raw data, if present.
+            if raw_data:
+                rto_location = ""
+                # Check vehicles array first
+                vehicles = raw_data.get("vehicles", [])
+                if vehicles and isinstance(vehicles, list):
+                    rto_location = vehicles[0].get("rto_location", "")
+                # Fallback: check locations array for RTO Location context
+                if not rto_location:
+                    for loc in raw_data.get("locations", []):
+                        if (
+                            isinstance(loc, dict)
+                            and "RTO" in loc.get("context", "").upper()
+                        ):
+                            rto_location = loc.get("value", "")
+                            break
+                if rto_location:
+                    rto_code = self._find_rto_code_from_location(rto_location)
 
-                        state_match = re.match(r"^([A-Z]{2})", rto_code)
-                        if state_match and state_match.group(1) in self.RTO_STATE_MAP:
-                            structured_data["rto_state"]["value"] = self.RTO_STATE_MAP[
-                                state_match.group(1)
-                            ]
-                            structured_data["rto_state"]["is_extracted"] = "TRUE"
-                    print(
-                        f"   ✓ New vehicle: derived RTO {rto_code} from location '{rto_location}'"
-                    )
+            # 2) Fall back to the RTO city/state the model already extracted.
+            # A NEW vehicle usually surfaces these as structured fields rather
+            # than as an rto_location string, so without this the code stays
+            # blank even when "Nagpur"/"Maharashtra" were captured.
+            if not rto_code:
+                _city = structured_data.get("rto_city")
+                _state = structured_data.get("rto_state")
+                rto_code = self._rto_code_from_city_state(
+                    _city.get("value", "") if isinstance(_city, dict) else "",
+                    _state.get("value", "") if isinstance(_state, dict) else "",
+                )
+
+            if rto_code:
+                # Set rto_num
+                if "rto_num" in structured_data and isinstance(
+                    structured_data["rto_num"], dict
+                ):
+                    structured_data["rto_num"]["value"] = rto_code
+                    structured_data["rto_num"]["is_extracted"] = "TRUE"
+                    structured_data["rto_num"]["confidence_score"] = 0.90
+                # Set rto_city from the looked-up code
+                if "rto_city" in structured_data and isinstance(
+                    structured_data["rto_city"], dict
+                ):
+                    if rto_code in self.rto_city_map:
+                        structured_data["rto_city"]["value"] = self.rto_city_map[
+                            rto_code
+                        ]
+                        structured_data["rto_city"]["is_extracted"] = "TRUE"
+                # Set rto_state from the code prefix
+                if "rto_state" in structured_data and isinstance(
+                    structured_data["rto_state"], dict
+                ):
+                    import re
+
+                    state_match = re.match(r"^([A-Z]{2})", rto_code)
+                    if state_match and state_match.group(1) in self.RTO_STATE_MAP:
+                        structured_data["rto_state"]["value"] = self.RTO_STATE_MAP[
+                            state_match.group(1)
+                        ]
+                        structured_data["rto_state"]["is_extracted"] = "TRUE"
+                print(f"   ✓ New vehicle: derived RTO {rto_code}")
         else:
             # Derive rto_state from reg_num prefix (e.g., RJ10... → RAJASTHAN)
             if "rto_state" in structured_data and isinstance(
