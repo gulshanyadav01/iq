@@ -774,7 +774,7 @@ class MineruGeminiParser:
                     "default": "0",
                 },
                 "finalTotalDiscount": {
-                    "description": "NCB Discount amount in rupees (monetary deduction for claim-free years, NOT NCB protection addon)",
+                    "description": "Total of ALL discounts applied to the Own Damage premium in rupees (NCB + other/experience/model/loyalty discounts summed; equals basic_od_premium - od_premium). NOT the NCB discount alone, and NOT the NCB protection addon",
                     "default": "0",
                 },
                 "policy_start_date": {"description": "Start date (dd/mm/yyyy)"},
@@ -1453,6 +1453,61 @@ class MineruGeminiParser:
                 "do_verification": "FALSE",
             }
 
+    def _apply_final_total_discount(self, structured_data: Dict[str, Any]) -> None:
+        """Set finalTotalDiscount = total of ALL OD discounts.
+
+        "Final Total Discount" is the TOTAL discount applied to the Own Damage premium
+        (NCB + "Others" + experience/model/loyalty …), NOT the NCB component alone. The
+        lite model historically emitted only the NCB discount, so the exported value was
+        systematically low on any policy carrying a non-NCB discount line.
+
+        Formula: ``basic_od_premium − (od_premium − totalAddonPremium)``.
+          • basic_od_premium is the pre-discount OD base.
+          • od_premium is the LAST OD-section total, which is AFTER all discounts AND
+            AFTER add-ons are added back (stage2 takes the highest-line-order OD total —
+            "Total OD Premium" — which folds in zero-dep/EP/RSA/… add-on premiums).
+        So ``basic_od − od_premium`` alone NETS OUT the add-ons and understates the
+        discount whenever any OD add-on is priced (verified on real prod docs, e.g.
+        PBP10909606: basic 45131, Total OD 19215 incl. ~14815 add-ons, true discount
+        40731 — not 25916). Adding totalAddonPremium back isolates the pure discount.
+        When there are no add-ons (totalAddonPremium=0) this reduces to basic_od − od.
+
+        Deterministic and needs no ncb_percent; robust to the LLM missing a discount
+        line. Call AFTER the rounding/default-zero loops, AFTER _apply_total_addon_premium
+        (so totalAddonPremium is populated) and AFTER the basic_od ↔ od_premium fallback
+        (so both operands are clean numeric strings; when one was missing they are equal,
+        giving a correct 0). Mirrors the derived-field convention of
+        _apply_total_addon_premium / serviceTax (is_extracted="TRUE").
+        """
+
+        def _num(field_name: str) -> float:
+            data = structured_data.get(field_name)
+            if not isinstance(data, dict):
+                return 0.0
+            clean = "".join(
+                c for c in str(data.get("value", "")) if c.isdigit() or c in ".-"
+            )
+            try:
+                return abs(float(clean)) if clean else 0.0
+            except (ValueError, TypeError):
+                return 0.0
+
+        net_od_before_addons = _num("od_premium") - _num("totalAddonPremium")
+        discount = max(0.0, _num("basic_od_premium") - net_od_before_addons)
+        total_value = str(round(discount))
+        if isinstance(structured_data.get("finalTotalDiscount"), dict):
+            structured_data["finalTotalDiscount"]["value"] = total_value
+            structured_data["finalTotalDiscount"]["is_extracted"] = "TRUE"
+            structured_data["finalTotalDiscount"]["confidence_score"] = 0.95
+        else:
+            structured_data["finalTotalDiscount"] = {
+                "id": "",
+                "value": total_value,
+                "confidence_score": 0.95,
+                "is_extracted": "TRUE",
+                "do_verification": "FALSE",
+            }
+
     @staticmethod
     def _is_non_addon_lookalike(text: str) -> bool:
         """True for a STANDARD/STATUTORY cover that shares keywords with an add-on
@@ -2071,31 +2126,34 @@ class MineruGeminiParser:
     def _apply_package_cover_date_fallback(
         self, structured_data: Dict[str, Any]
     ) -> None:
-        """Fill blank OD cover dates from the overall policy period.
+        """Fill blank OD/TP cover dates from the overall policy period.
 
         Most motor policies print a single combined "Period of Policy" range and
-        no separate OD cover-period label — so Stage 2 and _apply_raw_date_fallbacks
-        (which key off explicit "own damage from/to" context) leave od_startdate/
-        od_enddate blank even though the own-damage cover runs for the policy
-        period. On every motor policy the OD/own-damage cover IS the annual policy
-        period, so copying policy_start_date/policy_end_date into blank OD dates is
-        always sound.
+        no separate OD/TP cover-period label — so Stage 2 and _apply_raw_date_fallbacks
+        (which key off explicit "own damage from/to" / "third party from/to" context)
+        leave od_startdate/od_enddate and tpStartDate/tpEndDate blank even though the
+        covers run for the policy period. On every motor policy the OD/own-damage
+        cover IS the annual policy period, so copying policy_start_date/
+        policy_end_date into blank OD dates is always sound.
 
-        TP is deliberately NOT backfilled. A long-term bundle (e.g. 1yr-OD +
-        3/5yr-TP, the common new-vehicle case) prints only the 1-year leg as the
-        policy period, so stamping it onto a blank TP cover would write a wrong end
-        date and let term derivation overwrite a correct multi-year tp_term with 1.
-        There is no reliable in-record signal here that distinguishes a comprehensive
-        annual TP (== policy period) from a long-term TP (> policy period), so TP
-        dates are left to Stage 1/2, which extracts the explicit TP period reliably;
-        a genuinely blank TP flags "not extracted" rather than guessing wrong.
+        TP is backfilled the same way BUT guarded against the long-term bundle. A
+        long-term bundle (e.g. 1yr-OD + 3/5yr-TP, the common new-vehicle case) prints
+        only the 1-year leg as the policy period, so stamping it onto a blank TP cover
+        would write a wrong end date and let term derivation overwrite a correct
+        multi-year tp_term with 1. The in-record signal for that case is tp_term: when
+        it is > 1 year the TP runs longer than the printed policy period, so TP is left
+        to Stage 1/2 (which extracts the explicit multi-year TP period reliably). When
+        tp_term is annual (blank/1), TP == policy period, so copying is sound. TP is also
+        atomic on the pair: only backfilled when BOTH tpStartDate and tpEndDate are
+        blank — a lone explicit TP date is itself a long-term signal and is left alone.
 
-        Only fills a PRICED OD cover (od_premium/basic_od_premium > 0), and only
-        when BOTH policy endpoints are present (atomic — never a start with no end).
-        Never overwrites a value an explicit OD label already produced. Runs AFTER
-        _apply_raw_date_fallbacks (so explicit labels win) and BEFORE the
-        DATE_FIELDS conversion and term derivation (so copied dates are normalized
-        and od_term derives from them).
+        Only fills a PRICED cover (od_premium/basic_od_premium > 0 for OD;
+        tp_premium/basic_tp_premium > 0 for TP), and only when BOTH policy endpoints
+        are present (atomic — never a start with no end). Never overwrites a value an
+        explicit OD/TP label already produced. Runs AFTER _apply_raw_date_fallbacks
+        (so explicit labels win) and BEFORE the DATE_FIELDS conversion and term
+        derivation (so copied dates are normalized and od_term/tp_term derive from
+        them).
         """
 
         def _pnum(field: str) -> float:
@@ -2135,6 +2193,24 @@ class MineruGeminiParser:
         if od_priced:
             _fill("od_startdate", start_val)
             _fill("od_enddate", end_val)
+
+        def _blank(date_field: str) -> bool:
+            fld = structured_data.get(date_field)
+            return not (isinstance(fld, dict) and (fld.get("value") or "").strip())
+
+        tp_priced = _pnum("basic_tp_premium") > 0 or _pnum("tp_premium") > 0
+        # Long-term bundle guard: tp_term > 1 means the TP cover runs longer than
+        # the printed policy period, so copying it would truncate a correct
+        # multi-year term. Blank/"1" => annual TP == policy period => safe to copy.
+        tp_term_years = _pnum("tp_term")
+        # Atomic for TP: only when BOTH endpoints are blank. A lone explicit TP date
+        # (a multi-year tpEndDate on a bundle whose OD renewed mid-term) is itself a
+        # long-term signal — stamping the 1-year policy start against it would write a
+        # mismatched TP period — so a half-filled TP is left to Stage 1/2.
+        tp_dates_blank = _blank("tpStartDate") and _blank("tpEndDate")
+        if tp_priced and tp_term_years <= 1 and tp_dates_blank:
+            _fill("tpStartDate", start_val)
+            _fill("tpEndDate", end_val)
 
     def _apply_markdown_identifier_fallback(
         self, structured_data: Dict[str, Any], markdown: str = ""
@@ -2726,6 +2802,12 @@ class MineruGeminiParser:
                 structured_data["od_premium"]["value"] = basic_od
                 structured_data["od_premium"]["is_extracted"] = "TRUE"
 
+        # finalTotalDiscount = total OD discount = basic_od - (od_premium - add-ons).
+        # Runs AFTER _apply_total_addon_premium (above) and the basic_od ↔ od_premium
+        # fallback so all three operands are set; overrides the LLM's NCB-only value with
+        # the full discount, net of add-ons folded into Total OD Premium (see docstring).
+        self._apply_final_total_discount(structured_data)
+
         # Fallback: basic_tp_premium ↔ tp_premium when one is missing
         basic_tp = (
             structured_data.get("basic_tp_premium", {}).get("value", "") or ""
@@ -3316,11 +3398,12 @@ class MineruGeminiParser:
         # are normalized and od_term/tp_term/stp_nstp derive from them.
         self._apply_raw_date_fallbacks(structured_data, raw_data)
 
-        # Fill blank OD cover dates from the policy period when OD is priced (the
-        # OD cover is always the annual policy period). TP is deliberately NOT
-        # backfilled — a long-term bundle's TP period differs from the policy
-        # period. Runs AFTER the raw-date recovery (explicit OD labels win) and
-        # BEFORE the date conversion + term derivation below.
+        # Fill blank OD/TP cover dates from the policy period when that cover is
+        # priced (the OD cover is always the annual policy period). TP is backfilled
+        # the same way but only when tp_term <= 1 — a long-term bundle's TP period
+        # differs from the policy period and is left to Stage 1/2. Runs AFTER the
+        # raw-date recovery (explicit OD/TP labels win) and BEFORE the date
+        # conversion + term derivation below.
         self._apply_package_cover_date_fallback(structured_data)
 
         # Normalize/infer business_type — runs AFTER previous_policy_number and

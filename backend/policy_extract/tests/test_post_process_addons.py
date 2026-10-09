@@ -953,5 +953,87 @@ class CoverTermsTests(unittest.TestCase):
         )
 
 
+class FinalTotalDiscountTests(unittest.TestCase):
+    """_apply_final_total_discount sets finalTotalDiscount to the TOTAL OD discount =
+    basic_od_premium - (od_premium - totalAddonPremium), not the NCB component alone.
+    od_premium is the last OD total (post-discount AND post-add-on), so add-ons folded
+    into it must be added back to isolate the pure discount."""
+
+    def setUp(self):
+        self.parser = MineruGeminiParser.__new__(MineruGeminiParser)
+
+    def _run(self, basic_od, od, addon=0, current=None):
+        sd = {
+            "basic_od_premium": _field(basic_od),
+            "od_premium": _field(od),
+            "totalAddonPremium": _field(addon),
+        }
+        if current is not None:
+            sd["finalTotalDiscount"] = _field(current)
+        self.parser._apply_final_total_discount(sd)
+        return sd["finalTotalDiscount"]["value"]
+
+    def test_total_discount_no_addons(self):
+        # Policy with NCB Discount (-5475) AND "Others" (-14127), no add-ons: the field
+        # must carry the full 21903-2299 = 19604, not the NCB-only 5475 the LLM emitted.
+        self.assertEqual(self._run("21903", "2299", current="5475"), "19604")
+
+    def test_overrides_ncb_only_llm_value(self):
+        # PBP10908859 (real prod doc): basic_od 98280, Total OD 56451, no add-ons ->
+        # 41829 total discount, overriding the NCB-only 34398.
+        self.assertEqual(self._run("98280", "56451", addon=0, current="34398"), "41829")
+
+    def test_addons_folded_into_od_added_back(self):
+        # PBP10909606 (real prod doc): basic 45131, Total OD 19215 includes ~14815 of
+        # add-ons (zero-dep/EP/…). True discount = 45131 - (19215 - 14815) = 40731.
+        # Without the add-back it would wrongly report 25916.
+        self.assertEqual(
+            self._run("45131", "19215", addon=14815, current="11283"), "40731"
+        )
+
+    def test_ncb_percent_zero_still_derives_discount(self):
+        # Layer-3 edge: NCB% not recovered, but a discount exists -> subtraction finds it.
+        self.assertEqual(self._run("12547", "1542", current="0"), "11005")
+
+    def test_no_discount_is_zero(self):
+        # basic_od == od (or od >= basic via fallback) -> no discount.
+        self.assertEqual(self._run("8254", "8254", current="0"), "0")
+
+    def test_never_negative(self):
+        # A larger od than basic (shouldn't happen) clamps to 0, never negative.
+        self.assertEqual(self._run("100", "500", current="0"), "0")
+
+    def test_field_auto_created_when_absent(self):
+        sd = {
+            "basic_od_premium": _field("1000"),
+            "od_premium": _field("400"),
+            "totalAddonPremium": _field("0"),
+        }
+        self.parser._apply_final_total_discount(sd)
+        field = sd["finalTotalDiscount"]
+        self.assertEqual(field["value"], "600")
+        self.assertEqual(field["is_extracted"], "TRUE")
+        self.assertEqual(
+            set(field.keys()),
+            {"id", "value", "confidence_score", "is_extracted", "do_verification"},
+        )
+
+    def test_missing_addon_field_treated_as_zero(self):
+        # totalAddonPremium absent -> _num returns 0, formula reduces to basic_od - od.
+        sd = {"basic_od_premium": _field("1000"), "od_premium": _field("400")}
+        self.parser._apply_final_total_discount(sd)
+        self.assertEqual(sd["finalTotalDiscount"]["value"], "600")
+
+    def test_tolerates_messy_numeric_strings(self):
+        # Commas / currency artifacts are stripped before subtracting.
+        sd = {
+            "basic_od_premium": _field("21,903"),
+            "od_premium": _field("Rs 2,299"),
+            "totalAddonPremium": _field("0"),
+        }
+        self.parser._apply_final_total_discount(sd)
+        self.assertEqual(sd["finalTotalDiscount"]["value"], "19604")
+
+
 if __name__ == "__main__":
     unittest.main()
