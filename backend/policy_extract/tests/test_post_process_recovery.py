@@ -446,14 +446,15 @@ class OdTpDatesFallbackTests(unittest.TestCase):
 
 
 class PackageCoverDateFallbackTests(unittest.TestCase):
-    """_apply_package_cover_date_fallback fills blank OD cover dates from the
-    policy period when OD is priced — the reported "comprehensive Go Digit CV
-    leaves OD dates blank" failure (PBP10799078), where the document prints one
-    combined "Period of Policy" and no separate OD label, so the context-keyed
-    _apply_raw_date_fallbacks finds nothing. The OD cover is always the annual
-    policy period, so this is sound. TP is deliberately NOT backfilled: a
-    long-term bundle (1yr OD + 3/5yr TP) prints only the 1-year leg as the policy
-    period, so TP dates are left to Stage 1/2 rather than guessed wrong."""
+    """_apply_package_cover_date_fallback fills blank OD/TP cover dates from the
+    policy period when that cover is priced — the reported "comprehensive Go Digit
+    CV leaves cover dates blank" failure (PBP10799078), where the document prints
+    one combined "Period of Policy" and no separate OD/TP label, so the context-keyed
+    _apply_raw_date_fallbacks finds nothing. The OD cover is always the annual policy
+    period, so OD is copied unconditionally. TP is copied too, but guarded: when
+    tp_term > 1 the policy is a long-term bundle (1yr OD + 3/5yr TP) whose TP period
+    differs from the 1-year policy period, so TP is left to Stage 1/2 rather than
+    guessed wrong."""
 
     def setUp(self):
         self.parser = MineruGeminiParser.__new__(MineruGeminiParser)
@@ -473,6 +474,7 @@ class PackageCoverDateFallbackTests(unittest.TestCase):
         *,
         od_premium="0",
         tp_premium="0",
+        tp_term="",
         dates=None,
         policy=True,
         policy_end=None,
@@ -489,28 +491,30 @@ class PackageCoverDateFallbackTests(unittest.TestCase):
             sd["policy_end_date"] = self._mk("30/09/2027" if policy else "")
         sd["od_premium"] = self._mk(od_premium)
         sd["tp_premium"] = self._mk(tp_premium)
+        sd["tp_term"] = self._mk(tp_term)
         self.parser._apply_package_cover_date_fallback(sd)
         return {
             k: (sd[k]["value"], sd[k]["is_extracted"])
             for k in ("od_startdate", "od_enddate", "tpStartDate", "tpEndDate")
         }
 
-    def test_comprehensive_fills_od_leaves_tp_to_llm(self):
-        # PBP10799078: OD 4134.37 and TP 7267 both priced, blank OD/TP dates.
-        # OD is backfilled from the policy period; TP is left blank for Stage 1/2.
+    def test_comprehensive_fills_both(self):
+        # PBP10799078: OD 4134.37 and TP 7267 both priced, blank OD/TP dates, annual
+        # tp_term -> BOTH OD and TP backfilled from the policy period.
         out = self._run(od_premium="4134.37", tp_premium="7267")
         self.assertEqual(out["od_startdate"], ("01/10/2026", "TRUE"))
         self.assertEqual(out["od_enddate"], ("30/09/2027", "TRUE"))
-        self.assertEqual(out["tpStartDate"], ("", "FALSE"))
-        self.assertEqual(out["tpEndDate"], ("", "FALSE"))
+        self.assertEqual(out["tpStartDate"], ("01/10/2026", "TRUE"))
+        self.assertEqual(out["tpEndDate"], ("30/09/2027", "TRUE"))
 
-    def test_liability_only_fills_nothing(self):
-        # No OD cover (od_premium 0) -> OD stays blank; TP is never backfilled.
+    def test_liability_only_fills_tp(self):
+        # No OD cover (od_premium 0) -> OD stays blank; TP is priced with an annual
+        # tp_term, so TP is backfilled from the policy period.
         out = self._run(od_premium="0", tp_premium="7267")
         self.assertEqual(out["od_startdate"], ("", "FALSE"))
         self.assertEqual(out["od_enddate"], ("", "FALSE"))
-        self.assertEqual(out["tpStartDate"], ("", "FALSE"))
-        self.assertEqual(out["tpEndDate"], ("", "FALSE"))
+        self.assertEqual(out["tpStartDate"], ("01/10/2026", "TRUE"))
+        self.assertEqual(out["tpEndDate"], ("30/09/2027", "TRUE"))
 
     def test_saod_fills_od(self):
         out = self._run(od_premium="4134.37", tp_premium="0")
@@ -531,11 +535,18 @@ class PackageCoverDateFallbackTests(unittest.TestCase):
         self.assertEqual(sd["od_startdate"]["value"], "01/10/2026")
         self.assertEqual(sd["od_enddate"]["value"], "30/09/2027")
 
-    def test_never_backfills_tp(self):
-        # Even with TP priced, TP dates are never stamped with the policy period:
-        # on a long-term bundle that would write a wrong end date and corrupt a
-        # correct multi-year tp_term. TP is left to Stage 1/2.
+    def test_annual_tp_backfilled(self):
+        # Both priced, annual tp_term (blank) -> TP backfilled alongside OD.
         out = self._run(od_premium="806", tp_premium="4351")
+        self.assertEqual(out["od_startdate"], ("01/10/2026", "TRUE"))
+        self.assertEqual(out["od_enddate"], ("30/09/2027", "TRUE"))
+        self.assertEqual(out["tpStartDate"], ("01/10/2026", "TRUE"))
+        self.assertEqual(out["tpEndDate"], ("30/09/2027", "TRUE"))
+
+    def test_long_term_tp_bundle_not_backfilled(self):
+        # 1yr-OD + 3yr-TP bundle: tp_term 3 means TP runs longer than the printed
+        # policy period, so TP dates are left to Stage 1/2; only OD is backfilled.
+        out = self._run(od_premium="806", tp_premium="4351", tp_term="3")
         self.assertEqual(out["od_startdate"], ("01/10/2026", "TRUE"))
         self.assertEqual(out["od_enddate"], ("30/09/2027", "TRUE"))
         self.assertEqual(out["tpStartDate"], ("", "FALSE"))
@@ -543,7 +554,8 @@ class PackageCoverDateFallbackTests(unittest.TestCase):
 
     def test_does_not_overwrite_existing_od_start(self):
         # An OD start already extracted (explicit label) is kept; only the blank
-        # OD end is backfilled. TP is never touched.
+        # OD end is backfilled. TP is left alone here: an explicit tpEndDate is
+        # already present, so the pair is not both-blank and TP is not backfilled.
         out = self._run(
             od_premium="4134.37",
             tp_premium="7267",
