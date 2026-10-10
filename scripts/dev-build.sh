@@ -22,7 +22,7 @@ case "$SERVICE" in
     TARGETS="web"
     ;;
   backend)
-    TARGETS="backend celery celery_policy_extract celery_commission_intake beat"
+    TARGETS="backend celery celery_policy_extract celery_policy_extract_llm celery_commission_intake beat"
     ;;
   "")
     TARGETS=""

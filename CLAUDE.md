@@ -85,21 +85,21 @@ synchronously in the request thread — prefer the CSV seed path for full books.
 
 Copy `.env.example` → `.env` at project root. Key vars:
 
-| Variable             | Purpose                                                                                      |
-| -------------------- | -------------------------------------------------------------------------------------------- |
-| `SECRET_KEY`         | Django secret key                                                                            |
-| `WEBHOOK_SECRET_KEY` | Auth webhook HMAC key                                                                        |
-| `BETTER_AUTH_URL`    | Internal URL to auth service                                                                 |
-| `DB_*`               | PostgreSQL connection                                                                        |
-| `AWS_*`              | MinIO/S3 connection                                                                          |
-| `CELERY_*`           | Redis broker/backend config                                                                  |
-| `POLICY_EXTRACT_*`   | policy_extract worker tuning (concurrency, task time limits, mem limit) — see `.env.example` |
-| `REDIS_MAXMEMORY`    | Redis broker memory cap (dev compose; `noeviction`)                                          |
-| `MINERU_BACKEND`     | MinerU `backend` form field; flip only in lockstep with the server cutover                   |
-| `CINS_*`             | CINS pipeline flags — see the table below                                                    |
-| `NUXT_PUBLIC_*`      | Frontend runtime config                                                                      |
-| `SERVER_NAME`        | Nginx server name (prod)                                                                     |
-| `PROXY_PORT`         | Nginx external port (default 8080)                                                           |
+| Variable             | Purpose                                                                                                                                                           |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SECRET_KEY`         | Django secret key                                                                                                                                                 |
+| `WEBHOOK_SECRET_KEY` | Auth webhook HMAC key                                                                                                                                             |
+| `BETTER_AUTH_URL`    | Internal URL to auth service                                                                                                                                      |
+| `DB_*`               | PostgreSQL connection                                                                                                                                             |
+| `AWS_*`              | MinIO/S3 connection                                                                                                                                               |
+| `CELERY_*`           | Redis broker/backend config                                                                                                                                       |
+| `POLICY_EXTRACT_*`   | policy_extract worker tuning (concurrency, time limits, page gate, OCR/LLM split, capacity metrics) — see `.env.example` and `docs/policy-extract-autoscaling.md` |
+| `REDIS_MAXMEMORY`    | Redis broker memory cap (dev compose; `noeviction`)                                                                                                               |
+| `MINERU_BACKEND`     | MinerU `backend` form field; flip only in lockstep with the server cutover                                                                                        |
+| `CINS_*`             | CINS pipeline flags — see the table below                                                                                                                         |
+| `NUXT_PUBLIC_*`      | Frontend runtime config                                                                                                                                           |
+| `SERVER_NAME`        | Nginx server name (prod)                                                                                                                                          |
+| `PROXY_PORT`         | Nginx external port (default 8080)                                                                                                                                |
 
 ### CINS pipeline flags
 

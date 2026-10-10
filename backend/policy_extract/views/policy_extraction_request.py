@@ -331,6 +331,8 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
         instance.error_category = None
         instance.result = None
         instance.callback_response = None
+        # A retry is a full re-run: drop the split pipeline's OCR checkpoint too.
+        instance.ocr_markdown = ""
         instance.save(
             update_fields=[
                 "status",
@@ -338,6 +340,7 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
                 "error_category",
                 "result",
                 "callback_response",
+                "ocr_markdown",
                 "updated_at",
             ]
         )

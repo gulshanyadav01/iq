@@ -32,6 +32,7 @@ class RetryActionTests(APITestCase):
             error="boom during parse",
             result={"extracted_fields": {"policy_number": {"value": "X"}}},
             callback_response={"ok": False, "status_code": 500},
+            ocr_markdown="# stale OCR from the previous run",
         )
 
     def _url(self, pk):
@@ -55,6 +56,8 @@ class RetryActionTests(APITestCase):
         self.assertIsNone(self.req.error)
         self.assertIsNone(self.req.result)
         self.assertIsNone(self.req.callback_response)
+        # A retry is a full re-run: the split pipeline's OCR checkpoint goes too.
+        self.assertEqual(self.req.ocr_markdown, "")
         enqueue.assert_called_once_with(str(self.req.id))
 
     def test_retry_completed_request_resets_and_reenqueues(self):

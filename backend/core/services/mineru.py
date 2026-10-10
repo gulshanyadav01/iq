@@ -91,6 +91,11 @@ def base_form(**overrides: str) -> dict[str, str]:
     return form
 
 
+class GateWaitTimeout(Exception):
+    """The pages-in-flight gate (``mineru_gate.page_gate``) stayed full past its
+    wait budget. Transient: requeue the task rather than pin a worker child."""
+
+
 def is_retryable(exc: BaseException | None) -> bool:
     """True when ``exc`` (or anything in its ``__cause__`` chain) is transient.
 
@@ -101,7 +106,9 @@ def is_retryable(exc: BaseException | None) -> bool:
     seen: set[int] = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
-        if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        if isinstance(
+            exc, (requests.Timeout, requests.ConnectionError, GateWaitTimeout)
+        ):
             return True
         if isinstance(exc, requests.HTTPError):
             response = exc.response

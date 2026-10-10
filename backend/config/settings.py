@@ -47,6 +47,13 @@ env = environ.Env(
     POLICY_EXTRACT_GEMINI_MODEL=(str, "gemini-2.5-flash-lite"),
     POLICY_EXTRACT_GEMINI_SEED=(int, 42),
     POLICY_EXTRACT_STAGE2_RESPONSE_SCHEMA=(bool, True),
+    POLICY_EXTRACT_PAGE_GATE=(bool, False),
+    POLICY_EXTRACT_MAX_PAGES_IN_FLIGHT=(int, 75),
+    POLICY_EXTRACT_GATE_MAX_WAIT=(int, 240),
+    POLICY_EXTRACT_GATE_RESERVE_PAGES=(int, 0),
+    POLICY_EXTRACT_GATE_BACKFILL_SECONDS=(int, 30),
+    POLICY_EXTRACT_SPLIT_LLM=(bool, False),
+    POLICY_EXTRACT_METRICS_ENABLED=(bool, False),
     CINS_SKIP_HIDDEN_SHEETS=(bool, True),
     CINS_INDICATIVE_SHEETS=(bool, True),
 )
@@ -83,6 +90,30 @@ POLICY_EXTRACT_GEMINI_SEED = env("POLICY_EXTRACT_GEMINI_SEED")
 # so flash-lite must return every schema field, instead of intermittently dropping
 # some. No-redeploy rollback switch: flip off to fall back to the prompt-only config.
 POLICY_EXTRACT_STAGE2_RESPONSE_SCHEMA = env("POLICY_EXTRACT_STAGE2_RESPONSE_SCHEMA")
+
+# Pages-in-flight admission control in front of MinerU (core/services/mineru_gate.py).
+# MinerU's constraint is pages in flight (its sweep peaks near 75), not documents.
+# The Redis key `mineru:pages_capacity`, written by the GPU fleet's capacity sync,
+# overrides MAX_PAGES_IN_FLIGHT; RESERVE_PAGES is held back for the ungated callers
+# (CINS extract_pdf, pipelines PDF_TO_MD). Rollback switch: PAGE_GATE=false.
+POLICY_EXTRACT_PAGE_GATE = env("POLICY_EXTRACT_PAGE_GATE")
+POLICY_EXTRACT_MAX_PAGES_IN_FLIGHT = env("POLICY_EXTRACT_MAX_PAGES_IN_FLIGHT")
+POLICY_EXTRACT_GATE_MAX_WAIT = env("POLICY_EXTRACT_GATE_MAX_WAIT")
+POLICY_EXTRACT_GATE_RESERVE_PAGES = env("POLICY_EXTRACT_GATE_RESERVE_PAGES")
+# Smaller documents may backfill past a waiting head of line only while the head
+# has waited less than this; 0 = strict FIFO.
+POLICY_EXTRACT_GATE_BACKFILL_SECONDS = env("POLICY_EXTRACT_GATE_BACKFILL_SECONDS")
+
+# Split _run_parser into _run_ocr (queue policy_extract) -> _run_llm_map (queue
+# policy_extract_llm), checkpointing the markdown on the row, so an OCR child holds
+# its gate slot for its whole life and an LLM failure never re-burns GPU work.
+# Needs the celery_policy_extract_llm worker running before it is flipped on.
+POLICY_EXTRACT_SPLIT_LLM = env("POLICY_EXTRACT_SPLIT_LLM")
+
+# Publish policy_extract capacity metrics (queue depth, pages in flight, pages/hour,
+# estimated lag) to CloudWatch every minute — the GPU autoscaling signal. Off: the
+# beat task still logs them, so hosts without cloudwatch:PutMetricData don't break.
+POLICY_EXTRACT_METRICS_ENABLED = env("POLICY_EXTRACT_METRICS_ENABLED")
 
 # Exclude worksheets whose Excel tab is hidden/veryHidden from commission
 # extraction. Rollout switch — set to False to restore the previous behaviour
@@ -366,11 +397,21 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 # code-defined schedule still works (and stays overridable from the admin).
 CELERY_BEAT_SCHEDULE = {
     # Safety net for policy extractions whose worker died before writing a terminal
-    # status — see policy_extract/services/reconcile.py.
+    # status — see policy_extract/services/reconcile.py. Routed to the default
+    # `celery` queue, not `policy_extract`: behind a parse backlog the sweep ran
+    # days after beat scheduled it, which made the STALE_AFTER check meaningless.
     "reconcile-stuck-policy-extractions": {
         "task": "policy_extract.tasks.reconcile_stuck_policy_extractions",
         "schedule": 300.0,
-        "options": {"queue": "policy_extract"},
+        "options": {"queue": "celery"},
+    },
+    # Queue depth / pages in flight / pages-per-hour / estimated lag, the MinerU
+    # GPU fleet's autoscaling signal — see policy_extract/services/capacity_metrics.py.
+    # Logs every minute; ships to CloudWatch only with POLICY_EXTRACT_METRICS_ENABLED.
+    "publish-policy-extract-capacity-metrics": {
+        "task": "policy_extract.tasks.publish_capacity_metrics",
+        "schedule": 60.0,
+        "options": {"queue": "celery", "expires": 55},
     },
 }
 CELERY_RESULT_EXPIRES = 2592000

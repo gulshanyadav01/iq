@@ -84,6 +84,15 @@ services:
       # Pre-MinerU PDF precheck caps (policy_extract/tasks.py).
       POLICY_EXTRACT_MAX_PAGES: ${POLICY_EXTRACT_MAX_PAGES:-50}
       POLICY_EXTRACT_MAX_BYTES: ${POLICY_EXTRACT_MAX_BYTES:-26214400}
+      # Pages-in-flight gate, split OCR/LLM pipeline, capacity metrics — see .env.example.
+      POLICY_EXTRACT_PAGE_GATE: ${POLICY_EXTRACT_PAGE_GATE:-false}
+      POLICY_EXTRACT_MAX_PAGES_IN_FLIGHT: ${POLICY_EXTRACT_MAX_PAGES_IN_FLIGHT:-75}
+      POLICY_EXTRACT_GATE_MAX_WAIT: ${POLICY_EXTRACT_GATE_MAX_WAIT:-240}
+      POLICY_EXTRACT_GATE_RESERVE_PAGES: ${POLICY_EXTRACT_GATE_RESERVE_PAGES:-0}
+      POLICY_EXTRACT_GATE_BACKFILL_SECONDS: ${POLICY_EXTRACT_GATE_BACKFILL_SECONDS:-30}
+      POLICY_EXTRACT_SPLIT_LLM: ${POLICY_EXTRACT_SPLIT_LLM:-false}
+      POLICY_EXTRACT_METRICS_ENABLED: ${POLICY_EXTRACT_METRICS_ENABLED:-false}
+      POLICY_EXTRACT_METRICS_REGION: ${POLICY_EXTRACT_METRICS_REGION:-}
       # MinerU `backend` form field (core/services/mineru.py). Flip to
       # hybrid-http-client only in lockstep with the MinerU server cutover.
       MINERU_BACKEND: ${MINERU_BACKEND:-hybrid-auto-engine}
@@ -146,7 +155,20 @@ services:
       <<: *backend-env
       # Read by entrypoint.sh for --concurrency. Peak memory scales with it —
       # budget ~512MB of host RAM per child. See .env.example.
-      POLICY_EXTRACT_CONCURRENCY: ${POLICY_EXTRACT_CONCURRENCY:-12}
+      POLICY_EXTRACT_CONCURRENCY: ${POLICY_EXTRACT_CONCURRENCY:-10}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+
+  celery_policy_extract_llm:
+    image: insur-iq-backend:latest
+    volumes: *backend-volumes
+    command: ["bash", "./entrypoint.sh", "celery-policy-extract-llm"]
+    # Gemini stages of the split pipeline (POLICY_EXTRACT_SPLIT_LLM). I/O-bound on
+    # Gemini; idle until the flag is on.
+    environment:
+      <<: *backend-env
+      POLICY_EXTRACT_LLM_CONCURRENCY: ${POLICY_EXTRACT_LLM_CONCURRENCY:-4}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always

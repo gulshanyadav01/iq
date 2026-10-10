@@ -49,17 +49,29 @@ def reconcile_stuck_requests(
     """Resolve each stuck request to a terminal status. Returns per-outcome counts.
 
     A row with a `result` had a successful parse whose status write was lost, so it
-    becomes `completed` (and fires the callback the caller never got). A row without one
-    never produced anything and becomes `failed`.
+    becomes `completed` (and fires the callback the caller never got). A row with only
+    an OCR checkpoint (split pipeline) lost its LLM stage — a dropped hand-off or a
+    killed `_run_llm_map` — so it goes back to `initiated` and `_run_llm_map` is
+    re-enqueued: the GPU work is already done, failing it would waste it. A row with
+    neither never produced anything and becomes `failed`.
     """
     from policy_extract.models import PolicyExtractionRequest
-    from policy_extract.tasks import _fire_completed_callback
+    from policy_extract.tasks import (
+        POLICY_EXTRACT_LLM_QUEUE,
+        _fire_completed_callback,
+        _run_llm_map,
+    )
 
-    counts = {"scanned": 0, "completed": 0, "failed": 0, "skipped": 0}
+    counts = {"scanned": 0, "completed": 0, "requeued": 0, "failed": 0, "skipped": 0}
 
     for req in find_stuck_requests(stale_after_seconds, ids):
         counts["scanned"] += 1
-        outcome = "completed" if req.result else "failed"
+        if req.result:
+            outcome = "completed"
+        elif req.ocr_markdown:
+            outcome = "requeued"
+        else:
+            outcome = "failed"
 
         if dry_run:
             counts[outcome] += 1
@@ -68,7 +80,12 @@ def reconcile_stuck_requests(
         # Conditional write: this runs on a different worker than any real in-flight
         # parse, so a row that finished between the select and here must not be
         # clobbered (nor its callback fired twice).
-        fields = {"status": outcome, "updated_at": now()}
+        status = (
+            PolicyExtractionRequest.Status.INITIATED
+            if outcome == "requeued"
+            else outcome
+        )
+        fields = {"status": status, "updated_at": now()}
         if outcome == "failed":
             fields["error"] = STUCK_ERROR
         updated = PolicyExtractionRequest.objects.filter(
@@ -89,5 +106,7 @@ def reconcile_stuck_requests(
         if outcome == "completed":
             req.refresh_from_db()
             _fire_completed_callback(req)
+        elif outcome == "requeued":
+            _run_llm_map.apply_async(args=[str(req.pk)], queue=POLICY_EXTRACT_LLM_QUEUE)
 
     return counts
