@@ -23,20 +23,23 @@ More workers than MinerU's page capacity just wait on the gate. Without the gate
 | Pages-in-flight gate (FIFO + bounded backfill, 60s renewed leases) | `backend/core/services/mineru_gate.py`                | `POLICY_EXTRACT_PAGE_GATE` (`false`)        |
 | Gate capacity: Redis `mineru:pages_capacity`, else env             | same                                                  | `POLICY_EXTRACT_MAX_PAGES_IN_FLIGHT` (`75`) |
 | OCR → LLM split with markdown checkpoint                           | `policy_extract/tasks.py` `_run_ocr` / `_run_llm_map` | `POLICY_EXTRACT_SPLIT_LLM` (`false`)        |
-| Capacity metrics, published every minute                           | `policy_extract/services/capacity_metrics.py`         | `POLICY_EXTRACT_METRICS_ENABLED` (`false`)  |
+| Capacity metrics, collected every cycle                            | `policy_extract/services/capacity_metrics.py`         | `POLICY_EXTRACT_METRICS_ENABLED` (`false`)  |
+| GPU fleet: capacity sync + autoscaling, in-app (no Lambda)         | `policy_extract/services/gpu_fleet.py`                | `POLICY_EXTRACT_GPU_AUTOSCALE` (`off`)      |
 | Reconciler on the default `celery` queue                           | `config/settings.py` beat schedule                    | none                                        |
 
 The metrics are published to CloudWatch namespace `InsurIQ/PolicyExtract`:
 
-| Metric                            | Meaning                                                            |
-| --------------------------------- | ------------------------------------------------------------------ |
-| `QueueDepthDocs`                  | `LLEN policy_extract`                                              |
-| `LlmQueueDepth`                   | `LLEN policy_extract_llm`                                          |
-| `MeanPagesPerDoc`                 | admitted pages ÷ admitted docs over 15 min                         |
-| `BacklogPages`                    | QueueDepthDocs × MeanPagesPerDoc                                   |
-| `PagesInFlight` / `PagesCapacity` | gate state                                                         |
-| `PagesPerHour`                    | pages MinerU finished over 15 min                                  |
-| `EstimatedLagHours`               | BacklogPages ÷ PagesPerHour, capped at 72. **The scaling signal.** |
+| Metric                            | Meaning                                                                          |
+| --------------------------------- | -------------------------------------------------------------------------------- |
+| `QueueDepthDocs`                  | `LLEN policy_extract`                                                            |
+| `LlmQueueDepth`                   | `LLEN policy_extract_llm`                                                        |
+| `MeanPagesPerDoc`                 | admitted pages ÷ admitted docs over 15 min                                       |
+| `GateWaitingDocs`                 | documents a worker holds, waiting in the gate's line                             |
+| `BacklogPages`                    | QueueDepthDocs × MeanPagesPerDoc + the exact pages waiting in the gate's line    |
+| `PagesInFlight` / `PagesCapacity` | gate state                                                                       |
+| `PagesPerHour`                    | pages MinerU finished over 15 min                                                |
+| `EstimatedLagHours`               | BacklogPages ÷ PagesPerHour, capped at 72. **The scaling signal.**               |
+| `LagKnown`                        | 0 while there is a backlog but nothing finished in the window yet; scaling holds |
 
 The gate's counters are kept even with the gate off, so the rates can be measured before it is turned on. CloudWatch uses the host's instance role. The `AWS_*` env keys are the storage credentials and are deliberately skipped.
 
@@ -47,25 +50,66 @@ The gate's counters are kept even with the gate off, so the rates can be measure
 - Fleet capacity: `mineru:pages_capacity = healthy_nodes × C_node`. Hold back pages for the ungated callers with `POLICY_EXTRACT_GATE_RESERVE_PAGES`.
 - Break-even: `ceil(arrival_pages_per_hour ÷ P_node)`. At 465 docs/hour × 6.25 pages/doc that is about 2,900 pages/hour, plus headroom to drain.
 
-## GPU fleet (MinerU ASG)
+## GPU fleet (MinerU ASG), managed from the app
 
-- **Image:** a launch template from a baked AMI, with model weights on the AMI or a pre-warmed snapshot, never downloaded at boot. An ASG **warm pool** of stopped instances cuts cold start to about 1–2 min. Nodes register with the existing ALB target group.
-- **Scale out:** step scaling on `EstimatedLagHours`. Lag > 1h for 3 min adds 1 node; lag > 3h adds 2. Cooldown equals the measured warm-up.
-- **Scale in:** lag < 0.25h **and** `PagesInFlight < 0.5 × PagesCapacity` for 30 min removes 1 node. Scale in slowly; the daily cycle refills the queue.
-- **Scheduled baseline:** the queue peaks around 00:16 India time and drains by 10:00. Arrivals run 2–9/hour between 02:00 and 08:00 India time. Raise the scheduled `min` for the business-day ramp and drop it to 1 after 02:00 India time.
-- **Bounds:** `min = 1` (never zero OCR capacity). `max` is set by budget, starting at about 2× the break-even node count.
-- **Capacity sync** keeps the gate consistent with the fleet. An EventBridge rule on ASG lifecycle events triggers a Lambda, which `SET`s `mineru:pages_capacity` from the target group's healthy-host count:
-  - Launch: raise the key only once the target is _healthy_.
-  - Terminate, via an `EC2_INSTANCE_TERMINATING` hook with a 10 min heartbeat:
-    1. Lower the key.
-    2. Deregister the node. The ALB deregistration delay is ≥ 420s, matching MinerU's `proxy_read_timeout`.
-    3. Complete the lifecycle action.
-  - Every 5 min, re-sync the key from the healthy-host count as a failsafe. If the key is missing, the gate falls back to the env value for one node.
-- **Alarms:**
-  - MinerU 5xx/504 rate (baseline 21 in 59h).
-  - `PagesInFlight > PagesCapacity`, which means a gate bug.
-  - `EstimatedLagHours > 6`.
-  - Metrics missing for 5 min.
+Everything runs inside the app — no Lambda, no EventBridge, no CloudWatch alarms. One beat task, `capacity_cycle`, runs every `POLICY_EXTRACT_CAPACITY_CYCLE_SECONDS` (60) on the default `celery` worker, under a Redis lock so only one worker runs it per tick:
+
+1. **Sync capacity.** Keep `mineru:pages_capacity`, the number the gate admits up to, equal to the GPUs actually serving.
+2. **Collect metrics**, including `EstimatedLagHours`, and send them to CloudWatch if enabled.
+3. **Scale** the MinerU ASG from the lag, if `POLICY_EXTRACT_GPU_AUTOSCALE` allows it.
+
+### 1. Capacity sync
+
+| Source                | When                                                           | How                                                                                                                                                                                                           |
+| --------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `alb` (recommended)   | `MINERU_TARGET_GROUP_ARN` is set                               | One `DescribeTargetHealth` call per cycle: capacity = healthy targets × `POLICY_EXTRACT_PAGES_PER_GPU`                                                                                                        |
+| `adaptive` (fallback) | `POLICY_EXTRACT_ADAPTIVE_CAPACITY=true`, or the AWS call fails | AIMD on MinerU's own responses: any 429/503/504/timeout since the last cycle cuts capacity by a quarter; documents turned away by the gate with no overload add 5 pages. Bounded by `PAGES_PER_GPU × GPU_MAX` |
+| `static`              | neither                                                        | Leave the key alone: `POLICY_EXTRACT_MAX_PAGES_IN_FLIGHT`, or a value set by hand                                                                                                                             |
+
+How the `alb` source tracks the fleet:
+
+- **GPU added:** the target is `initial` while the model loads and counts only once it is `healthy`.
+- **GPU removed:** the ASG deregisters it from the target group first. It shows as `draining` for the deregistration delay and stops counting at the next cycle, while it finishes its in-flight requests.
+- **GPU crashed:** it turns `unhealthy` and drops out at the next cycle.
+- **No healthy GPU:** capacity becomes 1, so documents wait in the gate instead of burning their MinerU retries against a dead fleet.
+
+The adaptive source needs no cloud access, but it finds new GPUs only by probing, and it learns the limit by briefly exceeding it.
+
+### 2. Scaling decision
+
+`POLICY_EXTRACT_GPU_AUTOSCALE` sets the mode:
+
+- `off`: no scaling.
+- `watch`: logs and records what it would do (`gpu_fleet:last_decision`), without calling AWS. Run this first.
+- `on`: calls `SetDesiredCapacity` on `MINERU_ASG_NAME`.
+
+| Rule         | Default                                                                                                          |
+| ------------ | ---------------------------------------------------------------------------------------------------------------- |
+| Scale out +1 | lag > `SCALE_OUT_LAG_HOURS` (1h), sustained `SCALE_OUT_SUSTAIN_SECONDS` (180s)                                   |
+| Scale out +2 | lag > `SCALE_OUT_FAST_LAG_HOURS` (3h), sustained the same                                                        |
+| Scale in −1  | lag < `SCALE_IN_LAG_HOURS` (0.25h) **and** gate under half full, sustained `SCALE_IN_SUSTAIN_SECONDS` (1800s)    |
+| Hold         | while a scale-out is still booting (desired > healthy), and for `SCALE_COOLDOWN_SECONDS` (600s) after any action |
+| Bounds       | `[GPU_MIN, GPU_MAX]` (1–4) and the ASG's own min/max                                                             |
+
+While the lag is unknown (`LagKnown=0`: a backlog but nothing finished in the window yet, as just after an idle night), the decision holds and leaves the sustain clocks alone. Otherwise the lag's 72h cap would read as "far behind". On scale-in, the app lowers the gate's capacity **before** it calls the ASG, so the gate never admits work for a GPU that is about to leave.
+
+If beat or the default worker stops, scaling simply stops. The GPU count stays where it is, which is safe, and the ASG's min/max still hold.
+
+### What the client still provisions
+
+- A GPU ASG: a launch template from a baked AMI with the model weights on it, never downloaded at boot. An optional warm pool cuts cold start to about 1–2 min.
+- The ASG attached to the existing MinerU target group, so the ASG deregisters a node, waits for draining, then terminates it. ALB deregistration delay ≥ 420s, matching MinerU's `proxy_read_timeout`.
+- Optional ASG **scheduled actions** for the daily cycle; these are native to the ASG. The queue peaks around 00:16 India time and drains by 10:00, so raise `min` for the business-day ramp and drop it to 1 after 02:00.
+- IAM on the worker host role: `elasticloadbalancing:DescribeTargetHealth`, `autoscaling:DescribeAutoScalingGroups`, `autoscaling:SetDesiredCapacity` (only for `on`), and `cloudwatch:PutMetricData` (only with metrics enabled).
+
+### Worth alerting on
+
+These need no infrastructure of their own; log alerts or CloudWatch alarms both work:
+
+- MinerU 5xx/504 rate (baseline 21 in 59h).
+- `PagesInFlight > PagesCapacity`, which means a gate bug.
+- `EstimatedLagHours > 6`.
+- The capacity cycle missing for 5 min.
 
 ## Where documents wait: the two queues
 
@@ -104,10 +148,10 @@ If one host cannot hold the max-fleet count, either add worker hosts in step wit
   - With the split on: `POLICY_EXTRACT_CONCURRENCY ≥ max_nodes × C_node ÷ pages_per_doc`.
   - Before the split: divide by a further 0.78.
   - Children waiting on the gate are idle and cheap: about 512 MB RAM each, no CPU.
-  - If one host's RAM cannot hold that, add a worker ASG whose desired count the same capacity-sync Lambda sets to `ceil(nodes ÷ nodes_per_worker_host)`. Do not give it a scaling loop of its own.
+  - If one host's RAM cannot hold that, see "Sizing workers for the GPU budget" above.
 - **LLM workers** (`celery_policy_extract_llm`): static, `POLICY_EXTRACT_LLM_CONCURRENCY=4` per OCR host. Gemini's rate limit is their ceiling. Alarm if `LlmQueueDepth` keeps growing for more than 15 min.
 - **Restarts and scale-in:** keep `stop_grace_period: 300s`. A worker-ASG terminate hook needs a heartbeat ≥ `POLICY_EXTRACT_TIME_LIMIT` (1080s) so warm shutdown can finish in-flight tasks. `acks_late` plus `reject_on_worker_lost` cover a hard kill. Restart workers with `up -d --no-deps <service>` only; restarting the whole stack caused API 502s on 6 Oct.
-- **Not scaled:** the API, beat (must stay a single instance), and the default `celery` worker. The reconciler and the metrics publisher both depend on the default worker.
+- **Not scaled:** the API, beat (must stay a single instance), and the default `celery` worker. The reconciler and the capacity cycle both depend on the default worker.
 
 ## Rollout
 
@@ -119,7 +163,8 @@ Deploy each step in the 02:00–08:00 India time window. Allow a 5 min ramp, the
    - Success: `PagesInFlight` holds near capacity instead of about 78%, and pages/hour rises.
    - Flat pages/hour means the server was already saturated: lower the target.
 4. Start `celery_policy_extract_llm`, then `POLICY_EXTRACT_SPLIT_LLM=true`.
-5. Raise `POLICY_EXTRACT_CONCURRENCY` to the max-fleet value from the sizing table, then run the GPU ASG in shadow mode (alarms and dashboards, scaled by hand), then enable the step policies and the scheduled baseline.
+5. Raise `POLICY_EXTRACT_CONCURRENCY` to the max-fleet value from the sizing table. Set `MINERU_TARGET_GROUP_ARN` so capacity follows the fleet; scale GPUs by hand to check it.
+6. `POLICY_EXTRACT_GPU_AUTOSCALE=watch` for a week, comparing `gpu_fleet:last_decision` with what you would have done, then `on`.
 
 Rollback for every step is its flag. With the split off, messages already on `policy_extract_llm` still drain as long as the LLM worker keeps running, so stop that worker only once its queue is empty.
 
@@ -133,15 +178,16 @@ Rollback for every step is its flag. With the split off, messages already on `po
   - `POLICY_EXTRACT_PAGE_GATE`, `POLICY_EXTRACT_MAX_PAGES_IN_FLIGHT`, `POLICY_EXTRACT_GATE_MAX_WAIT`, `POLICY_EXTRACT_GATE_RESERVE_PAGES`
   - `POLICY_EXTRACT_SPLIT_LLM`, `POLICY_EXTRACT_LLM_CONCURRENCY`
   - `POLICY_EXTRACT_METRICS_ENABLED`, `POLICY_EXTRACT_METRICS_REGION`
+  - `POLICY_EXTRACT_CAPACITY_CYCLE_SECONDS`, `POLICY_EXTRACT_PAGES_PER_GPU`, `MINERU_TARGET_GROUP_ARN`, `POLICY_EXTRACT_ADAPTIVE_CAPACITY`
+  - `POLICY_EXTRACT_GPU_AUTOSCALE`, `MINERU_ASG_NAME`, `POLICY_EXTRACT_GPU_MIN`, `POLICY_EXTRACT_GPU_MAX`, and the `POLICY_EXTRACT_SCALE_*` thresholds
 - **LLM worker:**
   - Helm: a `celery.policyExtractLlm` values entry (`queues: policy_extract_llm`, `concurrency: 4`), plus an `else if` branch in `templates/pdb.yaml`.
   - EC2: a `celery_policy_extract_llm` service running `entrypoint.sh celery-policy-extract-llm` (`*backend-env`, `stop_grace_period: 300s`, the GCP volume).
 - **Keep the env var name `POLICY_EXTRACT_CONCURRENCY`.** Renaming it in the image, for example to the `CELERY_CONCURRENCY` that MinerU proposed, silently drops the production value.
-- **Terraform:**
-  - GPU ASG, launch template and AMI pipeline, warm pool.
-  - Step and scheduled policies, lifecycle hooks, the EventBridge rule and the capacity-sync Lambda (in the VPC, with access to the broker Redis).
-  - ALB deregistration delay ≥ 420s, the CloudWatch alarms above.
-  - `cloudwatch:PutMetricData` on the worker host role.
+- **Terraform** (no Lambda, EventBridge or scaling alarms; the app makes the decisions):
+  - GPU ASG attached to the MinerU target group, launch template and AMI pipeline, optional warm pool and scheduled actions.
+  - ALB deregistration delay ≥ 420s.
+  - The IAM permissions listed under "What the client still provisions" on the worker host role.
 
 ## Still owed by MinerU
 

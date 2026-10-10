@@ -60,6 +60,17 @@ class CapacityMetricsTests(SimpleTestCase):
         self.assertAlmostEqual(m["EstimatedLagHours"], 0.16, delta=0.01)
         self.assertEqual(m["PagesCapacity"], 75)
 
+    def test_documents_waiting_in_the_gate_count_as_backlog(self):
+        # Workers sized for the max fleet hold most of the backlog in the gate's
+        # line; leaving it out made the lag read near zero with one GPU up.
+        self._baseline(900, 0, 0, 0)
+        self.r.hset(gate.KEY_STATS, mapping={"pages_done": 750})
+        self.r.hset(gate.KEY_WAIT_PAGES, mapping={"a": 12, "b": 8})
+        m = cm.collect()
+        self.assertEqual(m["GateWaitingDocs"], 2)
+        self.assertEqual(m["BacklogPages"], 20.0)
+        self.assertGreater(m["EstimatedLagHours"], 0)
+
     def test_capacity_follows_the_autoscaler_key(self):
         self.r.set(gate.CAPACITY_KEY, 150)
         self.assertEqual(cm.collect()["PagesCapacity"], 150)
@@ -69,6 +80,7 @@ class CapacityMetricsTests(SimpleTestCase):
         m = cm.collect()
         self.assertEqual(m["MeanPagesPerDoc"], cm.DEFAULT_PAGES_PER_DOC)
         self.assertEqual(m["EstimatedLagHours"], cm.MAX_LAG_HOURS)
+        self.assertEqual(m["LagKnown"], 0)
 
     def test_empty_queue_is_zero_lag(self):
         self.assertEqual(cm.collect()["EstimatedLagHours"], 0.0)
@@ -76,10 +88,10 @@ class CapacityMetricsTests(SimpleTestCase):
     def test_publish_only_when_enabled(self):
         with patch.object(cm, "publish") as publish:
             with override_settings(POLICY_EXTRACT_METRICS_ENABLED=False):
-                cm.collect_and_publish()
+                cm.publish_if_enabled({"X": 1})
             publish.assert_not_called()
             with override_settings(POLICY_EXTRACT_METRICS_ENABLED=True):
-                cm.collect_and_publish()
+                cm.publish_if_enabled({"X": 1})
             publish.assert_called_once()
 
     def test_publish_failure_does_not_raise(self):
@@ -87,4 +99,4 @@ class CapacityMetricsTests(SimpleTestCase):
             override_settings(POLICY_EXTRACT_METRICS_ENABLED=True),
             patch.object(cm, "publish", side_effect=RuntimeError("no creds")),
         ):
-            cm.collect_and_publish()
+            cm.publish_if_enabled({"X": 1})

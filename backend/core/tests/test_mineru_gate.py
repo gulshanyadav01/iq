@@ -89,6 +89,16 @@ class AdmissionTests(_GateTestCase):
         gate.release("running")
         self.assertTrue(gate.try_acquire("big", 15)[0])
 
+    def test_waiting_pages_are_tracked_until_admitted_or_gone(self):
+        gate.try_acquire("running", 20)
+        gate.try_acquire("w1", 7)
+        gate.try_acquire("w2", 4)
+        self.assertEqual(gate.waiting(), (2, 11))
+        gate.leave_queue("w2")
+        gate.release("running")
+        gate.try_acquire("w1", 7)
+        self.assertEqual(gate.waiting(), (0, 0))
+
     def test_document_larger_than_capacity_is_admitted_alone(self):
         self.assertTrue(gate.try_acquire("a", 5)[0])
         self.assertFalse(gate.try_acquire("huge", 50)[0])
@@ -171,6 +181,24 @@ class PageGateContextTests(_GateTestCase):
                 self.fail("must not be admitted")
         self.assertTrue(is_retryable(ctx.exception))
         self.assertEqual(self.r.zcard(gate.KEY_QUEUE), 0)
+
+    def test_overloads_and_refusals_are_counted(self):
+        import requests
+
+        gate.try_acquire("running", 20)
+        self.assertFalse(gate.try_acquire("waiting", 5)[0])
+        gate.leave_queue("waiting")
+        gate.release("running")
+        with gate.page_gate(3) as call:
+            call.status = 503
+        with self.assertRaises(requests.Timeout):
+            with gate.page_gate(3):
+                raise requests.Timeout()
+        with gate.page_gate(3) as call:
+            call.status = 200
+        stats = self.r.hgetall(gate.KEY_STATS)
+        self.assertEqual(stats["overload"], "2")
+        self.assertGreaterEqual(int(stats["refused"]), 1)
 
     def test_flag_off_never_waits_but_still_counts(self):
         gate.try_acquire("running", 20)

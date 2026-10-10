@@ -955,7 +955,7 @@ class MineruGeminiParser:
             data = base_form()
 
             try:
-                with page_gate(page_count):
+                with page_gate(page_count) as call:
                     response = get_session().post(
                         self.MINERVA_API_URL,
                         files=files,
@@ -963,6 +963,7 @@ class MineruGeminiParser:
                         headers={"accept": "application/json"},
                         timeout=MINERU_TIMEOUT_SECONDS,
                     )
+                    call.status = response.status_code
                 response.raise_for_status()
 
                 result = response.json()

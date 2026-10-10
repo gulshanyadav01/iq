@@ -54,6 +54,20 @@ env = environ.Env(
     POLICY_EXTRACT_GATE_BACKFILL_SECONDS=(int, 30),
     POLICY_EXTRACT_SPLIT_LLM=(bool, False),
     POLICY_EXTRACT_METRICS_ENABLED=(bool, False),
+    POLICY_EXTRACT_CAPACITY_CYCLE_SECONDS=(int, 60),
+    POLICY_EXTRACT_PAGES_PER_GPU=(int, 75),
+    MINERU_TARGET_GROUP_ARN=(str, ""),
+    POLICY_EXTRACT_ADAPTIVE_CAPACITY=(bool, False),
+    POLICY_EXTRACT_GPU_AUTOSCALE=(str, "off"),
+    MINERU_ASG_NAME=(str, ""),
+    POLICY_EXTRACT_GPU_MIN=(int, 1),
+    POLICY_EXTRACT_GPU_MAX=(int, 4),
+    POLICY_EXTRACT_SCALE_OUT_LAG_HOURS=(float, 1.0),
+    POLICY_EXTRACT_SCALE_OUT_FAST_LAG_HOURS=(float, 3.0),
+    POLICY_EXTRACT_SCALE_IN_LAG_HOURS=(float, 0.25),
+    POLICY_EXTRACT_SCALE_OUT_SUSTAIN_SECONDS=(int, 180),
+    POLICY_EXTRACT_SCALE_IN_SUSTAIN_SECONDS=(int, 1800),
+    POLICY_EXTRACT_SCALE_COOLDOWN_SECONDS=(int, 600),
     CINS_SKIP_HIDDEN_SHEETS=(bool, True),
     CINS_INDICATIVE_SHEETS=(bool, True),
 )
@@ -114,6 +128,27 @@ POLICY_EXTRACT_SPLIT_LLM = env("POLICY_EXTRACT_SPLIT_LLM")
 # estimated lag) to CloudWatch every minute — the GPU autoscaling signal. Off: the
 # beat task still logs them, so hosts without cloudwatch:PutMetricData don't break.
 POLICY_EXTRACT_METRICS_ENABLED = env("POLICY_EXTRACT_METRICS_ENABLED")
+
+# In-app MinerU GPU fleet management (policy_extract/services/gpu_fleet.py) — no
+# Lambda. Capacity sync: MINERU_TARGET_GROUP_ARN set -> count healthy ALB targets x
+# PAGES_PER_GPU; else ADAPTIVE_CAPACITY probes MinerU (AIMD); else static.
+# GPU_AUTOSCALE: off | watch (log "would scale") | on (set the ASG's desired count).
+POLICY_EXTRACT_CAPACITY_CYCLE_SECONDS = env("POLICY_EXTRACT_CAPACITY_CYCLE_SECONDS")
+POLICY_EXTRACT_PAGES_PER_GPU = env("POLICY_EXTRACT_PAGES_PER_GPU")
+MINERU_TARGET_GROUP_ARN = env("MINERU_TARGET_GROUP_ARN")
+POLICY_EXTRACT_ADAPTIVE_CAPACITY = env("POLICY_EXTRACT_ADAPTIVE_CAPACITY")
+POLICY_EXTRACT_GPU_AUTOSCALE = env("POLICY_EXTRACT_GPU_AUTOSCALE").strip().lower()
+MINERU_ASG_NAME = env("MINERU_ASG_NAME")
+POLICY_EXTRACT_GPU_MIN = env("POLICY_EXTRACT_GPU_MIN")
+POLICY_EXTRACT_GPU_MAX = env("POLICY_EXTRACT_GPU_MAX")
+POLICY_EXTRACT_SCALE_OUT_LAG_HOURS = env("POLICY_EXTRACT_SCALE_OUT_LAG_HOURS")
+POLICY_EXTRACT_SCALE_OUT_FAST_LAG_HOURS = env("POLICY_EXTRACT_SCALE_OUT_FAST_LAG_HOURS")
+POLICY_EXTRACT_SCALE_IN_LAG_HOURS = env("POLICY_EXTRACT_SCALE_IN_LAG_HOURS")
+POLICY_EXTRACT_SCALE_OUT_SUSTAIN_SECONDS = env(
+    "POLICY_EXTRACT_SCALE_OUT_SUSTAIN_SECONDS"
+)
+POLICY_EXTRACT_SCALE_IN_SUSTAIN_SECONDS = env("POLICY_EXTRACT_SCALE_IN_SUSTAIN_SECONDS")
+POLICY_EXTRACT_SCALE_COOLDOWN_SECONDS = env("POLICY_EXTRACT_SCALE_COOLDOWN_SECONDS")
 
 # Exclude worksheets whose Excel tab is hidden/veryHidden from commission
 # extraction. Rollout switch — set to False to restore the previous behaviour
@@ -405,13 +440,16 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": 300.0,
         "options": {"queue": "celery"},
     },
-    # Queue depth / pages in flight / pages-per-hour / estimated lag, the MinerU
-    # GPU fleet's autoscaling signal — see policy_extract/services/capacity_metrics.py.
-    # Logs every minute; ships to CloudWatch only with POLICY_EXTRACT_METRICS_ENABLED.
-    "publish-policy-extract-capacity-metrics": {
-        "task": "policy_extract.tasks.publish_capacity_metrics",
-        "schedule": 60.0,
-        "options": {"queue": "celery", "expires": 55},
+    # Sync the page gate's capacity to the live GPU fleet, collect capacity metrics
+    # (the scaling signal) and, if enabled, scale the MinerU ASG — all in-app, see
+    # policy_extract/services/gpu_fleet.py.
+    "policy-extract-capacity-cycle": {
+        "task": "policy_extract.tasks.capacity_cycle",
+        "schedule": float(POLICY_EXTRACT_CAPACITY_CYCLE_SECONDS),
+        "options": {
+            "queue": "celery",
+            "expires": max(POLICY_EXTRACT_CAPACITY_CYCLE_SECONDS - 5, 1),
+        },
     },
 }
 CELERY_RESULT_EXPIRES = 2592000

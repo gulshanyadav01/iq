@@ -1,16 +1,19 @@
 """policy_extract capacity metrics: the GPU fleet's autoscaling signal.
 
-Published once a minute by the ``publish_capacity_metrics`` beat task. Everything
+Collected every capacity cycle (``gpu_fleet.run_cycle``). Everything
 is in pages, MinerU's own invariant — docs/hour moves with document mix and has
 already produced false regressions on both sides.
 
 - ``QueueDepthDocs`` / ``LlmQueueDepth``: broker list lengths.
 - ``MeanPagesPerDoc``: admitted pages / admitted docs over the sample window.
-- ``BacklogPages``: QueueDepthDocs x MeanPagesPerDoc.
+- ``GateWaitingDocs``: documents a worker holds, waiting in the gate's line.
+- ``BacklogPages``: QueueDepthDocs x MeanPagesPerDoc + the exact pages waiting
+  in the gate's line.
 - ``PagesInFlight`` / ``PagesCapacity``: the page gate's live state.
 - ``PagesPerHour``: pages MinerU finished over the sample window.
-- ``EstimatedLagHours``: BacklogPages / PagesPerHour — what the GPU ASG's step
-  policies scale on.
+- ``EstimatedLagHours``: BacklogPages / PagesPerHour — what the GPU fleet
+  scales on (``gpu_fleet.decide``). ``LagKnown`` is 0 while nothing has finished
+  in the window yet; the lag is then only its cap, and scaling holds.
 
 The gate's counters (``mineru:gate:stats``) are kept even with the gate off, so
 the rates are measurable before the gate is turned on. Window deltas come from
@@ -24,7 +27,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 
 from django.conf import settings
@@ -94,7 +96,10 @@ def collect() -> dict:
             pages_per_hour = d_done * 3600.0 / elapsed
 
     queue_docs = r.llen(POLICY_EXTRACT_QUEUE)
-    backlog_pages = queue_docs * pages_per_doc
+    # Documents a worker already holds but the gate hasn't admitted are backlog
+    # too — with workers sized for the max GPU fleet, most of it can sit there.
+    gate_docs, gate_pages = mineru_gate.waiting()
+    backlog_pages = queue_docs * pages_per_doc + gate_pages
     if backlog_pages <= 0:
         lag_hours = 0.0
     elif pages_per_hour <= 0:
@@ -104,6 +109,7 @@ def collect() -> dict:
 
     return {
         "QueueDepthDocs": queue_docs,
+        "GateWaitingDocs": gate_docs,
         "LlmQueueDepth": r.llen(POLICY_EXTRACT_LLM_QUEUE),
         "MeanPagesPerDoc": round(pages_per_doc, 2),
         "BacklogPages": round(backlog_pages, 1),
@@ -111,26 +117,17 @@ def collect() -> dict:
         "PagesCapacity": mineru_gate.capacity(),
         "PagesPerHour": round(pages_per_hour, 1),
         "EstimatedLagHours": round(lag_hours, 3),
+        # 0 while there is a backlog but nothing finished in the window yet (just
+        # after an idle spell): the lag then reads as its cap, which is "unknown",
+        # not "72h behind". The scaling decision holds on it.
+        "LagKnown": int(backlog_pages <= 0 or pages_per_hour > 0),
     }
 
 
-def _cloudwatch_client():
-    import boto3
-    import botocore.session
-
-    session = botocore.session.get_session()
-    # Skip the env-var provider: AWS_ACCESS_KEY_ID here is the storage key.
-    session.get_component("credential_provider").remove("env")
-    region = os.getenv("POLICY_EXTRACT_METRICS_REGION") or os.getenv(
-        "AWS_REGION", "ap-south-1"
-    )
-    return boto3.Session(botocore_session=session).client(
-        "cloudwatch", region_name=region
-    )
-
-
 def publish(metrics: dict) -> None:
-    _cloudwatch_client().put_metric_data(
+    from policy_extract.services.gpu_fleet import aws_client
+
+    aws_client("cloudwatch").put_metric_data(
         Namespace=NAMESPACE,
         MetricData=[
             {"MetricName": name, "Value": float(value), "Unit": "None"}
@@ -139,12 +136,9 @@ def publish(metrics: dict) -> None:
     )
 
 
-def collect_and_publish() -> dict:
-    metrics = collect()
-    logger.info("policy_extract capacity: %s", metrics)
+def publish_if_enabled(metrics: dict) -> None:
     if settings.POLICY_EXTRACT_METRICS_ENABLED:
         try:
             publish(metrics)
         except Exception:
             logger.warning("CloudWatch publish failed", exc_info=True)
-    return metrics

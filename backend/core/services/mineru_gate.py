@@ -48,6 +48,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Iterator
 
 import redis
@@ -65,8 +66,11 @@ KEY_QUEUE = _PREFIX + "queue"
 KEY_HB = _PREFIX + "hb"
 KEY_SEQ = _PREFIX + "seq"
 KEY_SINCE = _PREFIX + "since"
-# Cumulative counters (pages_admitted, docs_admitted, pages_done) for the
-# capacity-metrics publisher.
+# Pages of each document waiting in line. Picked-up documents waiting here are
+# real backlog the Celery queue no longer shows; the lag metric counts them.
+KEY_WAIT_PAGES = _PREFIX + "wait_pages"
+# Cumulative counters for the capacity cycle: pages_admitted, docs_admitted,
+# pages_done (metrics), refused and overload (adaptive capacity fallback).
 KEY_STATS = _PREFIX + "stats"
 
 _LEASE_MS = 60_000
@@ -89,12 +93,13 @@ for _, tok in ipairs(stale) do
   redis.call('ZREM', KEYS[3], tok)
   redis.call('ZREM', KEYS[4], tok)
   redis.call('HDEL', KEYS[8], tok)
+  redis.call('HDEL', KEYS[9], tok)
 end
 local in_flight = 0
 for _, v in ipairs(redis.call('HVALS', KEYS[2])) do in_flight = in_flight + tonumber(v) end
 """
 
-# KEYS: res, pages, queue, hb, seq, capacity, stats, since
+# KEYS: res, pages, queue, hb, seq, capacity, stats, since, wait_pages
 # ARGV: token, pages, default_capacity, reserve, reservation_ttl_ms, ticket_ttl_ms,
 #       backfill_ms
 # Returns {admitted (0|1), in_flight, capacity}.
@@ -109,6 +114,7 @@ if not redis.call('ZSCORE', KEYS[3], token) then
   redis.call('ZADD', KEYS[3], redis.call('INCR', KEYS[5]), token)
   redis.call('HSET', KEYS[8], token, now)
 end
+redis.call('HSET', KEYS[9], token, pages)
 redis.call('ZADD', KEYS[4], now, token)
 local head = redis.call('ZRANGE', KEYS[3], 0, 0)[1]
 local fits = in_flight + pages <= cap
@@ -123,12 +129,15 @@ if ok then
   redis.call('ZREM', KEYS[3], token)
   redis.call('ZREM', KEYS[4], token)
   redis.call('HDEL', KEYS[8], token)
+  redis.call('HDEL', KEYS[9], token)
   redis.call('ZADD', KEYS[1], now + tonumber(ARGV[5]), token)
   redis.call('HSET', KEYS[2], token, pages)
   redis.call('HINCRBY', KEYS[7], 'pages_admitted', pages)
   redis.call('HINCRBY', KEYS[7], 'docs_admitted', 1)
   return {1, in_flight + pages, cap}
 end
+-- Unmet demand: the adaptive capacity fallback only grows while this moves.
+redis.call('HINCRBY', KEYS[7], 'refused', 1)
 return {0, in_flight, cap}
 """
 )
@@ -198,6 +207,13 @@ def pages_in_flight() -> int:
     return sum(int(v) for v in vals)
 
 
+def waiting() -> tuple[int, int]:
+    """(documents, pages) waiting in the gate's line. Abandoned tickets are reaped
+    on the next acquire, so this can briefly overcount by a killed worker's few."""
+    vals = get_redis().hvals(KEY_WAIT_PAGES)
+    return len(vals), sum(int(v) for v in vals)
+
+
 def try_acquire(token: str, pages: int) -> tuple[bool, int, int]:
     """One admission attempt. Joins the wait line on first call; returns
     (admitted, in_flight, effective_capacity)."""
@@ -211,6 +227,7 @@ def try_acquire(token: str, pages: int) -> tuple[bool, int, int]:
             CAPACITY_KEY,
             KEY_STATS,
             KEY_SINCE,
+            KEY_WAIT_PAGES,
         ],
         args=[
             token,
@@ -261,11 +278,31 @@ def leave_queue(token: str) -> None:
     pipe.zrem(KEY_QUEUE, token)
     pipe.zrem(KEY_HB, token)
     pipe.hdel(KEY_SINCE, token)
+    pipe.hdel(KEY_WAIT_PAGES, token)
     pipe.execute()
 
 
+OVERLOAD_STATUS = frozenset({429, 503, 504})
+
+
+@dataclass
+class GatedCall:
+    """Handle yielded by ``page_gate``; the caller sets ``status`` from MinerU's
+    response so overloads feed the adaptive capacity fallback."""
+
+    status: int | None = None
+
+
+def _record_outcome(call: GatedCall, exc: BaseException | None) -> None:
+    import requests
+
+    overloaded = call.status in OVERLOAD_STATUS or isinstance(exc, requests.Timeout)
+    if overloaded:
+        _count(overload=1)
+
+
 @contextmanager
-def page_gate(pages: int | None) -> Iterator[None]:
+def page_gate(pages: int | None) -> Iterator[GatedCall]:
     """Hold ``pages`` of MinerU capacity for the duration of the block.
 
     No-op when ``POLICY_EXTRACT_PAGE_GATE`` is off. Waits FIFO up to
@@ -274,14 +311,20 @@ def page_gate(pages: int | None) -> Iterator[None]:
     worker child.
     """
     pages = max(int(pages or 1), 1)
+    call = GatedCall()
     if not settings.POLICY_EXTRACT_PAGE_GATE:
         # Ungated, but still counted: the capacity metrics (pages/doc, pages/hour)
         # must be measurable before the gate is turned on.
         _count(pages_admitted=pages, docs_admitted=1)
+        exc = None
         try:
-            yield
+            yield call
+        except BaseException as e:
+            exc = e
+            raise
         finally:
             _count(pages_done=pages)
+            _record_outcome(call, exc)
         return
 
     token = uuid.uuid4().hex
@@ -317,10 +360,15 @@ def page_gate(pages: int | None) -> Iterator[None]:
         threading.Thread(
             target=_keep_alive, args=(token, stop), daemon=True, name="mineru-lease"
         ).start()
+    exc = None
     try:
-        yield
+        yield call
+    except BaseException as e:
+        exc = e
+        raise
     finally:
         stop.set()
+        _record_outcome(call, exc)
         if admitted:
             try:
                 release(token)

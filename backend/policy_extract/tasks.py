@@ -15,7 +15,7 @@ from django.utils.timezone import now
 logger = logging.getLogger(__name__)
 
 POLICY_EXTRACT_QUEUE = "policy_extract"
-# Housekeeping (the reconciler, the capacity-metrics publisher) runs on the idle
+# Housekeeping (the reconciler, the capacity cycle) runs on the idle
 # default queue so a parse backlog can never delay it.
 DEFAULT_QUEUE = "celery"
 # Gemini stages of the split pipeline (POLICY_EXTRACT_SPLIT_LLM).
@@ -546,12 +546,13 @@ def reconcile_stuck_policy_extractions():
 
 
 @shared_task(queue=DEFAULT_QUEUE, ignore_result=True)
-def publish_capacity_metrics():
-    """Minute-by-minute capacity metrics — the GPU autoscaling signal. See
-    policy_extract/services/capacity_metrics.py."""
-    from policy_extract.services.capacity_metrics import collect_and_publish
+def capacity_cycle():
+    """Every POLICY_EXTRACT_CAPACITY_CYCLE_SECONDS: sync the page gate's capacity to
+    the live GPU fleet, collect capacity metrics, and (if enabled) scale the MinerU
+    ASG. See policy_extract/services/gpu_fleet.py."""
+    from policy_extract.services.gpu_fleet import run_cycle
 
-    return collect_and_publish()
+    return run_cycle()
 
 
 def enqueue_processing_chain(extraction_request_id: str):
