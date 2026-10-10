@@ -244,6 +244,73 @@ class MineruGeminiParser:
 
         return ""
 
+    def _rto_code_from_city_state(self, city: str, state: str) -> str:
+        """Reverse-look-up an RTO code from an extracted RTO city + state.
+
+        For a NEW vehicle there is no registration number to slice a code off
+        of, so the city/state the model reads off the document (e.g. "Nagpur" /
+        "Maharashtra") are the only route to the code (MH31). This resolves them
+        against the DB-backed ``RTOMaster`` via ``master_data`` — the same table
+        whose display values the export expects — rather than the absent flat
+        ``RTO.csv`` the ``rto_reverse_map`` path was wired to.
+
+        Ambiguous localities (Pithoragarh is UA05, UK05 and UP03) resolve to the
+        state's canonical registration prefix — the one ``RTO_STATE_MAP`` lists
+        first (UK over UA, OD over OR) — which is what the client system fills.
+        Returns "" when the state is unknown or the locality does not match.
+        """
+        city = (city or "").strip()
+        state = (state or "").strip().upper()
+        if not city or not state:
+            return ""
+
+        # Registration prefixes for this state name, canonical-first (dict order
+        # in RTO_STATE_MAP: UK before UA, OD before OR).
+        prefixes = [p for p, name in self.RTO_STATE_MAP.items() if name == state]
+        if not prefixes:
+            return ""
+
+        # Everything that touches master_data is guarded: any failure (import,
+        # app-registry ordering, DB error/timeout) degrades to "" (no code)
+        # rather than aborting the whole policy parse — this is best-effort
+        # enrichment. The locality index is built once per parser instance (one
+        # SELECT) then held; getattr guards tests that build the parser via
+        # __new__ (bypassing __init__).
+        try:
+            from master_data.services.rto import RTO_PREFIX_TO_STATE_SLUG
+
+            # Every prefix for a state maps to the same slug, so any that
+            # resolves gives the scope for the locality match.
+            state_slug = ""
+            for prefix in prefixes:
+                state_slug = RTO_PREFIX_TO_STATE_SLUG.get(prefix.lower(), "")
+                if state_slug:
+                    break
+            if not state_slug:
+                return ""
+
+            index = getattr(self, "_rto_locality_index", None)
+            if index is None:
+                from master_data.services.resolver import rto_locality_expansions
+
+                index = rto_locality_expansions()
+                self._rto_locality_index = index
+
+            from master_data.services.resolver import match_rto_localities
+
+            codes = match_rto_localities(index, [state_slug], city)
+        except Exception:
+            return ""
+        if not codes:
+            return ""
+
+        # Prefer the canonical prefix (UK05 over UA05); fall back to the lowest.
+        for prefix in prefixes:
+            for code in codes:
+                if code[:2].upper() == prefix.upper():
+                    return code
+        return codes[0]
+
     def _get_rto_code(self, reg_num: str) -> str:
         """Extract RTO code from registration number (e.g., MH12AB1234 → MH12)"""
         import re
@@ -714,7 +781,7 @@ class MineruGeminiParser:
                     "default": "0",
                 },
                 "finalTotalDiscount": {
-                    "description": "NCB Discount amount in rupees (monetary deduction for claim-free years, NOT NCB protection addon)",
+                    "description": "Total of ALL discounts applied to the Own Damage premium in rupees (NCB + other/experience/model/loyalty discounts summed; equals basic_od_premium - od_premium). NOT the NCB discount alone, and NOT the NCB protection addon",
                     "default": "0",
                 },
                 "policy_start_date": {"description": "Start date (dd/mm/yyyy)"},
@@ -1391,6 +1458,138 @@ class MineruGeminiParser:
             structured_data["totalAddonPremium"]["confidence_score"] = 0.95
         else:
             structured_data["totalAddonPremium"] = {
+                "id": "",
+                "value": total_value,
+                "confidence_score": 0.95,
+                "is_extracted": "TRUE",
+                "do_verification": "FALSE",
+            }
+
+    def _apply_final_total_discount(
+        self, structured_data: Dict[str, Any], raw_data: Dict[str, Any] = None
+    ) -> None:
+        """Set finalTotalDiscount = direct SUM of the OD discount line items.
+
+        "Final Total Discount" is the TOTAL discount applied to the Own Damage premium —
+        NCB discount + every "Others"/experience/model/loyalty OD discount — NOT the NCB
+        component alone. We sum the ACTUAL discount lines captured in Stage-1 raw_data,
+        rather than deriving the value arithmetically:
+
+          • raw_data["premiums"][] entries flagged is_discount (each carries a signed
+            ``value`` and a ``discount_type`` of "ncb"/"other"), and
+          • raw_data["ncb_details"][] entries with ncb_type="discount_amount".
+
+        This replaces the old derivation ``basic_od − (od_premium − totalAddonPremium)``,
+        which only equalled the true discount when od_premium was add-on INCLUSIVE and
+        totalAddonPremium captured exactly those folded-in add-ons; when the add-on
+        bookkeeping was off it over-/under-counted by the add-on amount (e.g. PBP10908791
+        exported 15232 from the formula vs a true 18352, the 3120 gap being the add-on
+        premium). Summing the real lines reads the discount straight off the schedule.
+
+        Dedupe: the NCB discount amount can appear in BOTH premiums[] and ncb_details[]
+        (Stage-1 notes this), so ncb_details discount_amount is only added when no NCB
+        line was already counted in premiums. "Loading" lines are excluded — Stage-1 tags
+        them is_discount but they INCREASE the premium.
+
+        Fallback: when raw_data surfaces NO discount lines at all (missing raw_data, or a
+        doc that prints only net-vs-basic OD with no itemised discount line), fall back to
+        the previous derivation ``max(0, basic_od − (od_premium − totalAddonPremium))`` so
+        those documents don't regress to 0.
+
+        Deterministic. Mirrors _apply_ncb_percent's raw_data read and the derived-field
+        stamping convention of _apply_total_addon_premium (is_extracted="TRUE"). Call AFTER
+        the rounding/default-zero loops, AFTER _apply_total_addon_premium and AFTER the
+        basic_od ↔ od_premium fallback so the fallback branch's operands are clean.
+        """
+
+        def _num(field_name: str) -> float:
+            data = structured_data.get(field_name)
+            if not isinstance(data, dict):
+                return 0.0
+            clean = "".join(
+                c for c in str(data.get("value", "")) if c.isdigit() or c in ".-"
+            )
+            try:
+                return abs(float(clean)) if clean else 0.0
+            except (ValueError, TypeError):
+                return 0.0
+
+        def _abs_amount(value) -> float:
+            # Pull the first signed decimal out of a raw Stage-1 value. Regex (not a
+            # bare digit-strip) so Indian-format noise like "5,475/-" or a "Rs"/"₹"
+            # prefix yields 5475 instead of a float() failure that silently drops the
+            # line. Commas are grouping separators, so strip them before matching.
+            m = re.search(r"-?\d+(?:\.\d+)?", str(value).replace(",", ""))
+            if not m:
+                return 0.0
+            try:
+                return abs(float(m.group()))
+            except (ValueError, TypeError):
+                return 0.0
+
+        # --- Primary: direct sum of the raw discount line items ---------------
+        raw = raw_data or {}
+        line_sum = 0.0
+        found_discount_line = False
+        ncb_counted_in_premiums = False
+        # Stage-1 may capture the same premium table twice (detail + summary block),
+        # so collapse exact-duplicate discount lines by (normalised label, amount) to
+        # avoid double counting a repeated NCB/Others line.
+        seen_discount_lines = set()
+        for prem in raw.get("premiums", []) or []:
+            if not isinstance(prem, dict):
+                continue
+            if not prem.get("is_discount") or prem.get("is_tax_line"):
+                continue
+            label = str(prem.get("label") or "")
+            low = label.lower()
+            if "loading" in low:
+                # Loading is an addition, not a discount, despite the is_discount tag.
+                continue
+            amount = _abs_amount(prem.get("value"))
+            if not amount:
+                # A line that parses to nothing contributes no discount and must not
+                # suppress the fallback derivation below.
+                continue
+            key = (re.sub(r"\s+", " ", low.strip()), round(amount, 2))
+            if key in seen_discount_lines:
+                continue
+            seen_discount_lines.add(key)
+            line_sum += amount
+            found_discount_line = True
+            # Normalise punctuation so "N.C.B." -> "ncb" and "No Claim Discount"/
+            # "No Claim Bonus" both match "noclaim"; otherwise a non-"ncb"-labelled NCB
+            # line with discount_type!="ncb" would let ncb_details add the amount again.
+            norm = re.sub(r"[^a-z0-9]", "", low)
+            if prem.get("discount_type") == "ncb" or "ncb" in norm or "noclaim" in norm:
+                ncb_counted_in_premiums = True
+
+        # NCB discount amount may live in ncb_details[] instead of premiums[]; add it
+        # only when it wasn't already summed above (avoid double counting).
+        if not ncb_counted_in_premiums:
+            for ncb in raw.get("ncb_details", []) or []:
+                if not isinstance(ncb, dict):
+                    continue
+                if ncb.get("ncb_type") != "discount_amount":
+                    continue
+                amount = _abs_amount(ncb.get("value"))
+                if amount:
+                    line_sum += amount
+                    found_discount_line = True
+
+        if found_discount_line:
+            discount = line_sum
+        else:
+            # Fallback: no itemised discount line → previous derivation.
+            net_od_before_addons = _num("od_premium") - _num("totalAddonPremium")
+            discount = max(0.0, _num("basic_od_premium") - net_od_before_addons)
+        total_value = str(round(discount))
+        if isinstance(structured_data.get("finalTotalDiscount"), dict):
+            structured_data["finalTotalDiscount"]["value"] = total_value
+            structured_data["finalTotalDiscount"]["is_extracted"] = "TRUE"
+            structured_data["finalTotalDiscount"]["confidence_score"] = 0.95
+        else:
+            structured_data["finalTotalDiscount"] = {
                 "id": "",
                 "value": total_value,
                 "confidence_score": 0.95,
@@ -2692,6 +2891,13 @@ class MineruGeminiParser:
                 structured_data["od_premium"]["value"] = basic_od
                 structured_data["od_premium"]["is_extracted"] = "TRUE"
 
+        # finalTotalDiscount = direct SUM of the raw OD discount lines (NCB + Others).
+        # Reads raw_data["premiums"]/["ncb_details"]; falls back to the basic_od − (od −
+        # add-ons) derivation only when no itemised discount line exists. Runs AFTER
+        # _apply_total_addon_premium (above) and the basic_od ↔ od_premium fallback so the
+        # fallback branch's operands are clean (see docstring).
+        self._apply_final_total_discount(structured_data, raw_data)
+
         # Fallback: basic_tp_premium ↔ tp_premium when one is missing
         basic_tp = (
             structured_data.get("basic_tp_premium", {}).get("value", "") or ""
@@ -3128,33 +3334,69 @@ class MineruGeminiParser:
         )
         is_new_vehicle = reg_value in ("NEW", "")
 
-        if is_new_vehicle and raw_data:
-            # Extract rto_location from raw data (vehicles array or locations array)
-            rto_location = ""
-            # Check vehicles array first
-            vehicles = raw_data.get("vehicles", [])
-            if vehicles and isinstance(vehicles, list):
-                rto_location = vehicles[0].get("rto_location", "")
-            # Fallback: check locations array for RTO Location context
-            if not rto_location:
-                for loc in raw_data.get("locations", []):
-                    if (
-                        isinstance(loc, dict)
-                        and "RTO" in loc.get("context", "").upper()
-                    ):
-                        rto_location = loc.get("value", "")
-                        break
+        if is_new_vehicle:
+            rto_code = ""
+            # Did the code come from the city/state fallback (path 2)? If so the
+            # city/state were the authoritative lookup INPUT and must not be
+            # re-derived from the matched code's prefix (see below).
+            rto_code_from_fallback = False
 
-            if rto_location:
-                rto_code = self._find_rto_code_from_location(rto_location)
-                if rto_code:
-                    # Set rto_num
-                    if "rto_num" in structured_data and isinstance(
-                        structured_data["rto_num"], dict
-                    ):
-                        structured_data["rto_num"]["value"] = rto_code
-                        structured_data["rto_num"]["is_extracted"] = "TRUE"
-                        structured_data["rto_num"]["confidence_score"] = 0.90
+            # 1) An explicit RTO location string in the raw data, if present.
+            # NOTE: _find_rto_code_from_location is currently inert — it reads
+            # self.rto_reverse_map, built from backend/policy_extract/RTO.csv,
+            # which is not present in the repo, so this path always returns "".
+            # It is retained (rather than removed) so a restored RTO.csv would
+            # light it up again; the working derivation is path 2 below.
+            if raw_data:
+                rto_location = ""
+                # Check vehicles array first
+                vehicles = raw_data.get("vehicles", [])
+                if vehicles and isinstance(vehicles, list):
+                    rto_location = vehicles[0].get("rto_location", "")
+                # Fallback: check locations array for RTO Location context
+                if not rto_location:
+                    for loc in raw_data.get("locations", []):
+                        if (
+                            isinstance(loc, dict)
+                            and "RTO" in loc.get("context", "").upper()
+                        ):
+                            rto_location = loc.get("value", "")
+                            break
+                if rto_location:
+                    rto_code = self._find_rto_code_from_location(rto_location)
+
+            # 2) Fall back to the RTO city/state the model already extracted.
+            # A NEW vehicle usually surfaces these as structured fields rather
+            # than as an rto_location string, so without this the code stays
+            # blank even when "Nagpur"/"Maharashtra" were captured.
+            if not rto_code:
+                _city = structured_data.get("rto_city")
+                _state = structured_data.get("rto_state")
+                rto_code = self._rto_code_from_city_state(
+                    _city.get("value", "") if isinstance(_city, dict) else "",
+                    _state.get("value", "") if isinstance(_state, dict) else "",
+                )
+                rto_code_from_fallback = bool(rto_code)
+
+            if rto_code:
+                # Set rto_num. For the city/state fallback only fill it when it is
+                # currently blank, so a derived guess never overrides an rto_num the
+                # model read straight off the document.
+                rnum = structured_data.get("rto_num")
+                if isinstance(rnum, dict) and (
+                    not rto_code_from_fallback or not (rnum.get("value") or "").strip()
+                ):
+                    rnum["value"] = rto_code
+                    rnum["is_extracted"] = "TRUE"
+                    rnum["confidence_score"] = 0.90
+                # Derive rto_city/rto_state from the code ONLY for the rto_location
+                # path (path 1). In the city/state fallback the state (and city)
+                # WERE the lookup input and are authoritative: re-deriving the state
+                # from the matched code's 2-letter prefix would mislabel the ~21
+                # cross-zone RTOs (NCR ring, Chandigarh, Daman/Diu+DNH) whose
+                # registration prefix differs from the zone state the value names
+                # (e.g. "HR29-Faridabad(Delhi NCR)" would flip state Delhi→Haryana).
+                if not rto_code_from_fallback:
                     # Set rto_city from the looked-up code
                     if "rto_city" in structured_data and isinstance(
                         structured_data["rto_city"], dict
@@ -3176,9 +3418,7 @@ class MineruGeminiParser:
                                 state_match.group(1)
                             ]
                             structured_data["rto_state"]["is_extracted"] = "TRUE"
-                    print(
-                        f"   ✓ New vehicle: derived RTO {rto_code} from location '{rto_location}'"
-                    )
+                print(f"   ✓ New vehicle: derived RTO {rto_code}")
         else:
             # Derive rto_state from reg_num prefix (e.g., RJ10... → RAJASTHAN)
             if "rto_state" in structured_data and isinstance(

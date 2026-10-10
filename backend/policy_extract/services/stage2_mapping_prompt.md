@@ -239,11 +239,18 @@ ncb_percent (No Claim Bonus Percentage):
 ★ Extract ONLY the numeric value (e.g., "20", not "20%")
 ★ Default to "0" if not found
 
-finalTotalDiscount (NCB Discount Amount in rupees):
-★ DISTINCT from ncb_percent — this is the rupee amount deducted
-★ Look in "ncb_details" array for items with ncb_type = "discount_amount"
-★ Also look in "premiums" for entries with is_discount=true AND label containing "NCB"
-★ Extract absolute value (remove negative sign)
+finalTotalDiscount (Total of ALL OD discounts, in rupees):
+★ This is the TOTAL discount applied to the Own Damage premium — NOT the NCB discount alone.
+★ SUM the absolute value of EVERY discount line in the OD section:
+  • NCB Discount
+  • "Others", "Experience Based Discount", "Special Discount", model/loyalty/anti-theft
+    discounts, and any other OD discount line
+★ Sources: "ncb_details" items with ncb_type="discount_amount", PLUS every "premiums"
+  entry with is_discount=true that sits in the OD section (regardless of its label).
+★ DISTINCT from ncb_percent (a rate, not an amount).
+★ Extract absolute values (remove negative signs) and add them together.
+★ SANITY CHECK: the total should equal basic_od_premium − od_premium (OD before discounts
+  minus the post-discount OD total). If a discount line was missed, prefer that difference.
 
 ────────────────────────────────────────
 VEHICLE MAKE/MODEL/VARIANT IDENTIFICATION
@@ -334,7 +341,7 @@ FIELD MAPPING
 
 - Add-on premiums: Look in "premiums" (only entries with addon_name set) or "coverages"
 - ncb_percent: Look in "ncb_details" array for items with ncb_type="percentage" (see NCB section above)
-- finalTotalDiscount: Look in "ncb_details" for ncb_type="discount_amount" OR in "premiums" for negative NCB discount
+- finalTotalDiscount: SUM all OD discount lines — "ncb_details" ncb_type="discount_amount" PLUS every "premiums" entry with is_discount=true in the OD section (NCB + Others + experience/model/etc.), not just NCB. Should equal basic_od_premium − od_premium.
 - IMT values: Look in "endorsements"
 - cust_address, pinCode, rto_num, rto_city, rto_state: Look in "locations"
 - nomineeName, nomineeRelationWithCustomer: Look in "participants" for an entry whose
