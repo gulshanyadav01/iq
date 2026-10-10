@@ -52,6 +52,10 @@ class PolicyExtractionRequest(TimeStampedUUIDModel):
         db_index=True,
     )
     callback_response = models.JSONField(null=True, blank=True)
+    # MinerU output checkpoint for the split pipeline (POLICY_EXTRACT_SPLIT_LLM):
+    # _run_ocr writes it, _run_llm_map reads it, so a redelivery or an LLM-stage
+    # failure never re-burns the GPU work. Empty on the legacy _run_parser path.
+    ocr_markdown = models.TextField(blank=True, default="")
 
     class Meta:
         ordering = ["-created_at"]

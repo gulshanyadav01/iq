@@ -26,6 +26,7 @@ from core.services.mineru import (
     base_form,
     get_session,
 )
+from core.services.mineru_gate import page_gate
 
 try:
     from google import genai
@@ -939,8 +940,12 @@ class MineruGeminiParser:
             },
         }
 
-    def _convert_pdf_to_markdown(self, pdf_path: str) -> str:
-        """Convert PDF to Markdown using Minerva API"""
+    def _convert_pdf_to_markdown(self, pdf_path: str, page_count: int = None) -> str:
+        """Convert PDF to Markdown using Minerva API.
+
+        ``page_count`` (from ``precheck_pdf``) sizes the pages-in-flight gate
+        reservation, which covers the POST alone — never the Gemini stages.
+        """
         print("📄 Converting PDF to Markdown using Minerva API...")
         start_time = time.time()
 
@@ -950,13 +955,15 @@ class MineruGeminiParser:
             data = base_form()
 
             try:
-                response = get_session().post(
-                    self.MINERVA_API_URL,
-                    files=files,
-                    data=data,
-                    headers={"accept": "application/json"},
-                    timeout=MINERU_TIMEOUT_SECONDS,
-                )
+                with page_gate(page_count) as call:
+                    response = get_session().post(
+                        self.MINERVA_API_URL,
+                        files=files,
+                        data=data,
+                        headers={"accept": "application/json"},
+                        timeout=MINERU_TIMEOUT_SECONDS,
+                    )
+                    call.status = response.status_code
                 response.raise_for_status()
 
                 result = response.json()
@@ -3616,8 +3623,12 @@ class MineruGeminiParser:
         ]
         self.total_cost_usd = input_cost + output_cost
 
+    def ocr(self, pdf_path: str, page_count: int = None) -> str:
+        """MinerU stage only: PDF → Markdown, through the pages-in-flight gate."""
+        return self._convert_pdf_to_markdown(pdf_path, page_count=page_count)
+
     def parse_pdf(
-        self, pdf_path: str, save_intermediate: bool = True
+        self, pdf_path: str, save_intermediate: bool = True, page_count: int = None
     ) -> Dict[str, Any]:
         """
         Parse PDF using Minerva API + Gemini two-stage pipeline
@@ -3641,10 +3652,6 @@ class MineruGeminiParser:
         start_time = time.time()
         pdf_name = Path(pdf_path).stem
 
-        # Reset token counters
-        self.total_input_tokens = 0
-        self.total_output_tokens = 0
-
         # Stage 1: Convert PDF to Markdown (Minerva API)
         # Check if markdown file already exists
         md_file = self.intermediate_dir / f"{pdf_name}.md"
@@ -3657,13 +3664,41 @@ class MineruGeminiParser:
             print(f"📂 Loaded from: {md_file}")
         else:
             print("\n📊 STAGE 1: Converting PDF to Markdown (Minerva API)...")
-            markdown_content = self._convert_pdf_to_markdown(pdf_path)
+            markdown_content = self.ocr(pdf_path, page_count=page_count)
 
             # Save intermediate markdown
             if save_intermediate:
                 with open(md_file, "w", encoding="utf-8") as f:
                     f.write(markdown_content)
                 print(f"💾 Markdown saved: {md_file}")
+
+        return self.parse_markdown(
+            markdown_content,
+            pdf_path,
+            save_intermediate=save_intermediate,
+            start_time=start_time,
+        )
+
+    def parse_markdown(
+        self,
+        markdown_content: str,
+        pdf_path: str,
+        save_intermediate: bool = True,
+        start_time: float = None,
+    ) -> Dict[str, Any]:
+        """Gemini stages only: Markdown → raw data → structured result.
+
+        ``pdf_path`` names the document (result metadata and intermediate file
+        names); the file itself is not read. ``start_time`` lets ``parse_pdf``
+        report the whole run's duration including OCR.
+        """
+        if start_time is None:
+            start_time = time.time()
+        pdf_name = Path(pdf_path).stem
+
+        # Reset token counters
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
 
         # Stage 2: Extract raw data from markdown (Gemini)
         print("\n📊 STAGE 2: Extracting raw data (Gemini)...")

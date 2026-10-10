@@ -50,6 +50,30 @@ services:
       # Pre-MinerU PDF precheck caps (policy_extract/tasks.py).
       POLICY_EXTRACT_MAX_PAGES: ${POLICY_EXTRACT_MAX_PAGES:-50}
       POLICY_EXTRACT_MAX_BYTES: ${POLICY_EXTRACT_MAX_BYTES:-26214400}
+      # Pages-in-flight gate, split OCR/LLM pipeline, capacity metrics — see .env.example.
+      POLICY_EXTRACT_PAGE_GATE: ${POLICY_EXTRACT_PAGE_GATE:-false}
+      POLICY_EXTRACT_MAX_PAGES_IN_FLIGHT: ${POLICY_EXTRACT_MAX_PAGES_IN_FLIGHT:-75}
+      POLICY_EXTRACT_GATE_MAX_WAIT: ${POLICY_EXTRACT_GATE_MAX_WAIT:-240}
+      POLICY_EXTRACT_GATE_RESERVE_PAGES: ${POLICY_EXTRACT_GATE_RESERVE_PAGES:-0}
+      POLICY_EXTRACT_GATE_BACKFILL_SECONDS: ${POLICY_EXTRACT_GATE_BACKFILL_SECONDS:-30}
+      POLICY_EXTRACT_SPLIT_LLM: ${POLICY_EXTRACT_SPLIT_LLM:-false}
+      POLICY_EXTRACT_METRICS_ENABLED: ${POLICY_EXTRACT_METRICS_ENABLED:-false}
+      POLICY_EXTRACT_METRICS_REGION: ${POLICY_EXTRACT_METRICS_REGION:-}
+      # In-app MinerU GPU fleet management (capacity sync + autoscaling) — see .env.example.
+      POLICY_EXTRACT_CAPACITY_CYCLE_SECONDS: ${POLICY_EXTRACT_CAPACITY_CYCLE_SECONDS:-60}
+      POLICY_EXTRACT_PAGES_PER_GPU: ${POLICY_EXTRACT_PAGES_PER_GPU:-75}
+      MINERU_TARGET_GROUP_ARN: ${MINERU_TARGET_GROUP_ARN:-}
+      POLICY_EXTRACT_ADAPTIVE_CAPACITY: ${POLICY_EXTRACT_ADAPTIVE_CAPACITY:-false}
+      POLICY_EXTRACT_GPU_AUTOSCALE: ${POLICY_EXTRACT_GPU_AUTOSCALE:-off}
+      MINERU_ASG_NAME: ${MINERU_ASG_NAME:-}
+      POLICY_EXTRACT_GPU_MIN: ${POLICY_EXTRACT_GPU_MIN:-1}
+      POLICY_EXTRACT_GPU_MAX: ${POLICY_EXTRACT_GPU_MAX:-4}
+      POLICY_EXTRACT_SCALE_OUT_LAG_HOURS: ${POLICY_EXTRACT_SCALE_OUT_LAG_HOURS:-1.0}
+      POLICY_EXTRACT_SCALE_OUT_FAST_LAG_HOURS: ${POLICY_EXTRACT_SCALE_OUT_FAST_LAG_HOURS:-3.0}
+      POLICY_EXTRACT_SCALE_IN_LAG_HOURS: ${POLICY_EXTRACT_SCALE_IN_LAG_HOURS:-0.25}
+      POLICY_EXTRACT_SCALE_OUT_SUSTAIN_SECONDS: ${POLICY_EXTRACT_SCALE_OUT_SUSTAIN_SECONDS:-180}
+      POLICY_EXTRACT_SCALE_IN_SUSTAIN_SECONDS: ${POLICY_EXTRACT_SCALE_IN_SUSTAIN_SECONDS:-1800}
+      POLICY_EXTRACT_SCALE_COOLDOWN_SECONDS: ${POLICY_EXTRACT_SCALE_COOLDOWN_SECONDS:-600}
       # MinerU `backend` form field (core/services/mineru.py). Flip to
       # hybrid-http-client only in lockstep with the MinerU server cutover.
       MINERU_BACKEND: ${MINERU_BACKEND:-hybrid-auto-engine}
@@ -117,7 +141,24 @@ services:
       CELERY_AUTORELOAD: "1"
       # Read by entrypoint.sh for --concurrency. Peak memory scales with it —
       # budget ~512MB of host RAM per child. See .env.example.
-      POLICY_EXTRACT_CONCURRENCY: ${POLICY_EXTRACT_CONCURRENCY:-12}
+      POLICY_EXTRACT_CONCURRENCY: ${POLICY_EXTRACT_CONCURRENCY:-10}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+
+  celery_policy_extract_llm:
+    image: insur-iq-backend:latest
+    volumes: *backend-volumes
+    command: ["bash", "./entrypoint.sh", "celery-policy-extract-llm"]
+    # Gemini stages of the split pipeline (POLICY_EXTRACT_SPLIT_LLM). I/O-bound on
+    # Gemini; idle until the flag is on.
+    environment:
+      <<: *backend-env
+      CELERY_AUTORELOAD: "1"
+      POLICY_EXTRACT_LLM_CONCURRENCY: ${POLICY_EXTRACT_LLM_CONCURRENCY:-4}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

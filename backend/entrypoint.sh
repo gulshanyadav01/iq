@@ -30,7 +30,7 @@ elif [ "$1" = "celery-policy-extract" ]; then
   # memory across runs (whole PDFs + LLM payloads sit in RAM); prefetch=1 stops a
   # busy worker hoarding messages it can't start. Concurrency is the peak-memory
   # driver, so keep it modest and env-overridable (raise on a box with headroom).
-  POLICY_EXTRACT_CONCURRENCY="${POLICY_EXTRACT_CONCURRENCY:-12}"
+  POLICY_EXTRACT_CONCURRENCY="${POLICY_EXTRACT_CONCURRENCY:-10}"
   PE_FLAGS="--queues=policy_extract --concurrency=${POLICY_EXTRACT_CONCURRENCY} --prefetch-multiplier=1 --max-tasks-per-child=50 --max-memory-per-child=512000 --loglevel=INFO --hostname=policy-extract@%h"
   echo "📄 Starting Celery policy-extract worker (concurrency=${POLICY_EXTRACT_CONCURRENCY})..."
   if [ "$CELERY_AUTORELOAD" = "1" ]; then
@@ -39,6 +39,19 @@ elif [ "$1" = "celery-policy-extract" ]; then
       celery -A config worker $PE_FLAGS
   else
     exec celery -A config worker $PE_FLAGS
+  fi
+elif [ "$1" = "celery-policy-extract-llm" ]; then
+  # Gemini stages of the split policy_extract pipeline (POLICY_EXTRACT_SPLIT_LLM):
+  # about 23% of a parse's wall time, I/O-bound on Gemini, so a few children suffice.
+  POLICY_EXTRACT_LLM_CONCURRENCY="${POLICY_EXTRACT_LLM_CONCURRENCY:-4}"
+  PEL_FLAGS="--queues=policy_extract_llm --concurrency=${POLICY_EXTRACT_LLM_CONCURRENCY} --prefetch-multiplier=1 --max-tasks-per-child=50 --max-memory-per-child=512000 --loglevel=INFO --hostname=policy-extract-llm@%h"
+  echo "🧠 Starting Celery policy-extract LLM worker (concurrency=${POLICY_EXTRACT_LLM_CONCURRENCY})..."
+  if [ "$CELERY_AUTORELOAD" = "1" ]; then
+    echo "🔁 Auto-reload enabled (watchmedo)"
+    exec watchmedo auto-restart --directory=/app --pattern='*.py' --recursive -- \
+      celery -A config worker $PEL_FLAGS
+  else
+    exec celery -A config worker $PEL_FLAGS
   fi
 elif [ "$1" = "celery-commission-intake" ]; then
   echo "📄 Starting Celery commission-intake worker (concurrency=2)..."
