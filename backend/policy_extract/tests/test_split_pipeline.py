@@ -11,7 +11,7 @@ Run from the backend container:
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
-from celery.exceptions import Ignore, Retry
+from celery.exceptions import Ignore
 from django.test import TestCase, override_settings
 from django.utils.timezone import now
 
@@ -86,18 +86,26 @@ class RunOcrTests(_Base):
         self.assertEqual(self.req.status, PolicyExtractionRequest.Status.FAILED)
         self.assertIn("no text", self.req.error)
 
-    def test_gate_timeout_requeues_the_task(self):
+    def test_gate_timeout_requeues_fresh_without_spending_retries(self):
+        # Workers are sized for the max GPU fleet, so waiting out the gate is
+        # normal with fewer GPUs up; it must never count toward failing the doc.
         with (
             patch("django.core.files.storage.default_storage", self.storage),
             patch(PARSER) as parser_cls,
-            patch.object(tasks._run_ocr, "retry", side_effect=Retry("retry")) as retry,
+            patch.object(tasks._run_ocr, "retry") as retry,
+            patch.object(tasks._run_ocr, "apply_async") as requeue,
         ):
             parser_cls.return_value.ocr.side_effect = GateWaitTimeout("full")
-            with self.assertRaises(Retry):
+            with self.assertRaises(Ignore):
                 tasks._run_ocr(str(self.req.id))
-        retry.assert_called_once()
+        retry.assert_not_called()
+        requeue.assert_called_once()
+        self.assertEqual(requeue.call_args.kwargs["args"], [str(self.req.id)])
+        self.assertEqual(requeue.call_args.kwargs["queue"], "policy_extract")
+        self.assertGreaterEqual(requeue.call_args.kwargs["countdown"], 5)
         self.req.refresh_from_db()
         self.assertEqual(self.req.status, PolicyExtractionRequest.Status.INITIATED)
+        self.assertIsNone(self.req.error)
 
 
 class RunLlmMapTests(_Base):

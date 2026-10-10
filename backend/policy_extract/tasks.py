@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -39,6 +40,10 @@ _STALE_AFTER_SECONDS = int(os.getenv("POLICY_EXTRACT_STALE_AFTER", "1500"))
 _MINERU_MAX_RETRIES = 5
 _MINERU_RETRY_BACKOFF_FACTOR = 2
 _MINERU_RETRY_BACKOFF_MAX = 120
+# A document that timed out of the page gate's wait line goes back on the queue
+# after a short jittered delay; it does not spend the MinerU retry budget.
+_GATE_REQUEUE_MIN_S = 5
+_GATE_REQUEUE_MAX_S = 30
 
 # Local pre-check before the PDF reaches MinerU: an encrypted, corrupt or oversized
 # document would otherwise hold a GPU concurrency slot only to fail.
@@ -280,8 +285,31 @@ def _handle_parse_failure(task, extraction_request_id: str, exc: Exception):
 
     Always raises: ``Retry`` for a transient error, ``Ignore`` otherwise.
     """
-    from core.services.mineru import is_retryable, response_status
+    from core.services.mineru import GateWaitTimeout, is_retryable, response_status
     from policy_extract.models import PolicyExtractionRequest
+
+    if isinstance(exc, GateWaitTimeout):
+        # Waiting for GPU room is not a failure. Workers are sized for the GPU
+        # fleet's max capacity, so with fewer GPUs up a document can legitimately
+        # time out of the gate's wait line several times. A Task.retry would count
+        # each one against the MinerU retry budget and eventually FAIL the
+        # document, so re-enqueue it as a fresh message instead.
+        countdown = random.uniform(_GATE_REQUEUE_MIN_S, _GATE_REQUEUE_MAX_S)
+        logger.info(
+            "%s: %s still waiting for MinerU capacity; re-queued in %.0fs",
+            task.name,
+            extraction_request_id,
+            countdown,
+        )
+        PolicyExtractionRequest.objects.filter(id=extraction_request_id).update(
+            status=PolicyExtractionRequest.Status.INITIATED, updated_at=now()
+        )
+        task.apply_async(
+            args=[extraction_request_id],
+            queue=getattr(task, "queue", None) or POLICY_EXTRACT_QUEUE,
+            countdown=countdown,
+        )
+        raise Ignore()
 
     if is_retryable(exc) and task.request.retries < task.max_retries:
         countdown = get_exponential_backoff_interval(

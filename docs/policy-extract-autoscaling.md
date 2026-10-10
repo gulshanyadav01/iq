@@ -67,6 +67,37 @@ The gate's counters are kept even with the gate off, so the rates can be measure
   - `EstimatedLagHours > 6`.
   - Metrics missing for 5 min.
 
+## Where documents wait: the two queues
+
+More workers than GPU room does not mean more load on MinerU. Each document passes two waiting areas, both in Redis:
+
+| Waiting area                       | Who is in it                                                                  | Cost                                 |
+| ---------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------ |
+| Celery queue `policy_extract`      | Documents no worker has picked up yet                                         | Nothing                              |
+| Gate wait line `mineru:gate:queue` | Documents a worker holds, PDF downloaded and prechecked, waiting for GPU room | One idle worker each: memory, no CPU |
+
+A worker picks up one document (prefetch 1), downloads it, counts its pages, then asks the gate for room. The gate admits it only while `pages in flight + its pages ≤ capacity`; everyone else sleeps in the wait line and re-checks every 0.5–1s. When a MinerU call finishes, its pages are released and the next document in line goes within a second. The Gemini stages run outside the gate.
+
+Example, 48 workers and 1 GPU (75 pages): about 12 documents are at the GPU, about 36 wait in the gate line, the rest stay in the Celery queue. MinerU never sees more than 75 pages. When a second GPU comes up, capacity becomes 150 and the next ~12 in line are admitted immediately.
+
+A document that waits longer than `POLICY_EXTRACT_GATE_MAX_WAIT` (240s) goes back to the Celery queue after a 5–30s delay as a fresh message. That does **not** count against the MinerU retry budget, so waiting for GPU room can never fail a document.
+
+## Sizing workers for the GPU budget
+
+Size OCR workers for the **maximum** GPU count, not the current one. Waiting workers are cheap, and they are what lets new GPU capacity be used the moment it appears.
+
+OCR workers ≈ GPU page capacity ÷ mean pages per document (÷ a further 0.78 with the split off). At 75 pages per GPU and 6.25 pages per document:
+
+| GPUs | Page capacity | OCR workers, split on | OCR workers, split off | RAM, split on (~0.5 GB each) |
+| ---- | ------------- | --------------------- | ---------------------- | ---------------------------- |
+| 1    | 75            | 12                    | 16                     | ~6 GB                        |
+| 2    | 150           | 24                    | 31                     | ~12 GB                       |
+| 4    | 300           | 48                    | 62                     | ~24 GB                       |
+
+**Rule: raise `POLICY_EXTRACT_CONCURRENCY` to the max-fleet value before enabling GPU autoscaling.** Otherwise new GPUs sit idle: at the current default of 10, workers cannot even fill one GPU (10 × 6.25 ≈ 62 pages < 75). Re-check the table when `MeanPagesPerDoc` drifts, since a lighter mix needs more workers for the same pages.
+
+If one host cannot hold the max-fleet count, either add worker hosts in step with GPUs (below), or try Celery's `--autoscale=<max>,<min>` on one host to shed idle workers overnight. The gate still caps MinerU load either way. `--autoscale` is untested with `acks_late` and prefetch 1, so run it on the e2e mock first.
+
 ## Celery workers (docker compose on EC2)
 
 - **OCR workers** (`celery_policy_extract`): a static count, sized for the GPU fleet's _max_ capacity:
@@ -84,11 +115,11 @@ Deploy each step in the 02:00–08:00 India time window. Allow a 5 min ramp, the
 
 1. Reconciler routing and the concurrency default of 10. Low risk.
 2. `POLICY_EXTRACT_METRICS_ENABLED=true` with the gate off. Collect a week of `MeanPagesPerDoc` and `PagesPerHour`.
-3. `POLICY_EXTRACT_PAGE_GATE=true` at 75 pages with one node, and raise `POLICY_EXTRACT_CONCURRENCY` per the formula.
+3. `POLICY_EXTRACT_PAGE_GATE=true` at 75 pages with one node, and raise `POLICY_EXTRACT_CONCURRENCY` per the formula (about 16 for one GPU with the split off).
    - Success: `PagesInFlight` holds near capacity instead of about 78%, and pages/hour rises.
    - Flat pages/hour means the server was already saturated: lower the target.
 4. Start `celery_policy_extract_llm`, then `POLICY_EXTRACT_SPLIT_LLM=true`.
-5. GPU ASG in shadow mode (alarms and dashboards, scaled by hand), then enable the step policies and the scheduled baseline.
+5. Raise `POLICY_EXTRACT_CONCURRENCY` to the max-fleet value from the sizing table, then run the GPU ASG in shadow mode (alarms and dashboards, scaled by hand), then enable the step policies and the scheduled baseline.
 
 Rollback for every step is its flag. With the split off, messages already on `policy_extract_llm` still drain as long as the LLM worker keeps running, so stop that worker only once its queue is empty.
 
