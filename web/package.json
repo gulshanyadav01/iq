@@ -21,7 +21,7 @@
     "@nuxt/test-utils": "3.19.2",
     "@nuxt/ui": "3.3.2",
     "@nuxtjs/google-fonts": "^3.2.0",
-    "@pinia/nuxt": "^0.11.2",
+    "@pinia/nuxt": "^1.0.3",
     "@tailwindcss/forms": "^0.5.10",
     "@tailwindcss/vite": "^4.1.12",
     "@unhead/vue": "^2.0.14",
