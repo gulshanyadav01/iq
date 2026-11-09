@@ -269,7 +269,7 @@ jobs:
                  --image-tag-mutability MUTABLE \
                  --image-scanning-configuration scanOnPush=true >/dev/null
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # build-and-push.sh drives `docker buildx build` directly rather than
       # going through docker/build-push-action, so nothing has exported the
