@@ -73,6 +73,14 @@ class MineruGeminiParser:
             temperature=0.0,
             seed=settings.POLICY_EXTRACT_GEMINI_SEED,
         )
+        # OCR engine for PDF → Markdown: "mineru" (external Minerva server) or
+        # "gemini" (the configured Gemini model reads the PDF natively). Default
+        # "mineru" preserves prod behaviour; flip via POLICY_EXTRACT_OCR_ENGINE.
+        self._ocr_engine = (
+            (getattr(settings, "POLICY_EXTRACT_OCR_ENGINE", "mineru") or "mineru")
+            .strip()
+            .lower()
+        )
         # Stage-2 mapping call: prefer structured output so flash-lite must return
         # EVERY schema field (response_json_schema forces required properties),
         # instead of intermittently dropping fields (dates, etc.) that Stage 1
@@ -941,11 +949,18 @@ class MineruGeminiParser:
         }
 
     def _convert_pdf_to_markdown(self, pdf_path: str, page_count: int = None) -> str:
-        """Convert PDF to Markdown using Minerva API.
+        """Convert PDF to Markdown.
 
-        ``page_count`` (from ``precheck_pdf``) sizes the pages-in-flight gate
-        reservation, which covers the POST alone — never the Gemini stages.
+        Dispatches on ``self._ocr_engine``: ``gemini`` has the configured Gemini
+        model read the PDF directly (no external OCR server, no GPU gate), while
+        ``mineru`` (default) posts the PDF to the Minerva server. ``page_count``
+        (from ``precheck_pdf``) sizes the MinerU pages-in-flight gate reservation,
+        which covers the POST alone — never the Gemini stages — and is unused by
+        the Gemini engine.
         """
+        if self._ocr_engine == "gemini":
+            return self._convert_pdf_to_markdown_gemini(pdf_path)
+
         print("📄 Converting PDF to Markdown using Minerva API...")
         start_time = time.time()
 
@@ -1017,6 +1032,67 @@ class MineruGeminiParser:
                     f"   ✓ Converted in {time.time() - start_time:.1f}s ({len(markdown_content)} chars)"
                 )
                 return markdown_content
+
+    # Prompt for the Gemini OCR engine: a faithful transcription, not a summary.
+    _GEMINI_OCR_PROMPT = (
+        "You are an OCR engine. Transcribe this insurance policy document into clean "
+        "GitHub-Flavored Markdown.\n"
+        "Rules:\n"
+        "- Reproduce ALL text verbatim: every label, value, number, date, code, "
+        "amount and address. Do not summarise, interpret, translate or omit anything.\n"
+        "- Render tables as Markdown tables, preserving every row and column.\n"
+        "- Preserve reading order and section headings.\n"
+        "- Do NOT add commentary, explanations, or code fences around the whole output.\n"
+        "Output only the Markdown transcription."
+    )
+
+    def _convert_pdf_to_markdown_gemini(self, pdf_path: str) -> str:
+        """Convert PDF to Markdown with the configured Gemini model (no OCR server).
+
+        Sends the PDF bytes inline to Gemini (which reads PDFs natively) with a
+        faithful-transcription prompt. No pages-in-flight gate: that gate guards the
+        MinerU GPU fleet, which this path does not touch.
+
+        PII note: the raw PDF reaches the LLM here, so the markdown-level PII masking
+        in ``parse_markdown`` does not shield this first hop — it still protects the
+        Stage 1/Stage 2 extraction calls.
+        """
+        print("📄 Converting PDF to Markdown using Gemini...")
+        start_time = time.time()
+
+        with open(pdf_path, "rb") as f:
+            pdf_bytes = f.read()
+
+        response = self._client.models.generate_content(
+            model=self.model_name,
+            contents=[
+                types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+                self._GEMINI_OCR_PROMPT,
+            ],
+            config=self._gen_config,
+        )
+
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
+            self.total_input_tokens += response.usage_metadata.prompt_token_count or 0
+            self.total_output_tokens += (
+                response.usage_metadata.candidates_token_count or 0
+            )
+
+        # Strip a single wrapping code fence (```markdown / ``` / ```md …) if the
+        # model added one despite the prompt. The shared _strip_markdown_code_blocks
+        # only knows the ```json fence the JSON stages emit, so handle any tag here.
+        import re
+
+        text = (response.text or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-zA-Z0-9]*\s*\n", "", text)
+            text = re.sub(r"\n```\s*$", "", text)
+        markdown_content = text.strip()
+        print(
+            f"   ✓ Converted in {time.time() - start_time:.1f}s "
+            f"({len(markdown_content)} chars)"
+        )
+        return markdown_content
 
     def _get_mapping_prompt(self, raw_data: Dict[str, Any]) -> str:
         """Stage 2 prompt: Map extracted data to target schema"""
@@ -3700,9 +3776,37 @@ class MineruGeminiParser:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
 
+        # PII masking (optional): replace PII in the markdown with reversible tokens
+        # BEFORE any text reaches the LLM. Masking the markdown once protects both
+        # Gemini stages, since Stage 2's input derives from Stage 1's output. The
+        # real values are restored from `pii_token_map` after post-processing.
+        pii_enabled = False
+        pii_engine = "regex"
+        try:
+            from django.conf import settings as _dj_settings
+
+            pii_enabled = bool(
+                getattr(_dj_settings, "POLICY_EXTRACT_PII_MASKING", False)
+            )
+            pii_engine = getattr(_dj_settings, "POLICY_EXTRACT_PII_ENGINE", "regex")
+        except Exception:
+            # Standalone/script use outside Django: masking stays off.
+            pii_enabled = False
+        llm_content = markdown_content
+        pii_token_map: Dict[str, str] = {}
+        pii_summary = {"enabled": False, "masked_count": 0, "types": {}}
+        if pii_enabled:
+            from policy_extract.services.pii_masking import build_summary, mask_markdown
+
+            llm_content, pii_token_map = mask_markdown(
+                markdown_content, engine=pii_engine
+            )
+            pii_summary = build_summary(pii_token_map, pii_enabled)
+            print(f"🔒 PII masking: {len(pii_token_map)} value(s) tokenised before LLM")
+
         # Stage 2: Extract raw data from markdown (Gemini)
         print("\n📊 STAGE 2: Extracting raw data (Gemini)...")
-        raw_data = self._extract_raw_data(markdown_content)
+        raw_data = self._extract_raw_data(llm_content)
 
         # Save intermediate raw data
         if save_intermediate and raw_data:
@@ -3715,13 +3819,22 @@ class MineruGeminiParser:
         print("\n📊 STAGE 3: Mapping to target schema (Gemini)...")
         if raw_data:
             structured_data = self._map_to_schema(raw_data)
-            # Post-process the structured data (pass raw_data for premium validation)
-            structured_data = self._post_process(
-                structured_data, raw_data, markdown_content
-            )
+            # Post-process the structured data (pass raw_data for premium validation).
+            # Use the masked markdown here too so the markdown-reading fallbacks
+            # (_apply_markdown_contact_fallback / _identifier_fallback) only ever see
+            # tokens, never raw PII.
+            structured_data = self._post_process(structured_data, raw_data, llm_content)
         else:
             print("   ⚠ No raw data to map - skipping Stage 3")
             structured_data = {}
+
+        # Restore real PII values, as the last step before building the result, so
+        # any token that rode through the LLM stages (or was recovered by a markdown
+        # fallback) is reversed back to its original value.
+        if pii_enabled and structured_data:
+            from policy_extract.services.pii_masking import unmask_result
+
+            unmask_result(structured_data, pii_token_map)
 
         # Calculate cost
         self._calculate_cost()
@@ -3736,6 +3849,7 @@ class MineruGeminiParser:
             "extracted_fields": structured_data,
             "intermediate_data_saved": save_intermediate,
             "pipeline": "minerva-api-two-stage",
+            "pii_masking": pii_summary,
             "cost_summary": {
                 "total_input_tokens": int(self.total_input_tokens),
                 "total_output_tokens": int(self.total_output_tokens),

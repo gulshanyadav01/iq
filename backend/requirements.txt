@@ -33,3 +33,9 @@ openpyxl>=3.1.0
 python-magic>=0.4.27
 beautifulsoup4>=4.12.0
 Pillow>=12.2.0
+# Optional: PII name/address masking via Presidio (POLICY_EXTRACT_PII_ENGINE=presidio).
+# Left commented so the default image stays light — the regex engine needs none of
+# this. To enable, uncomment and also install a spaCy model in the Dockerfile, e.g.
+# `python -m spacy download en_core_web_sm`.
+# presidio-analyzer>=2.2
+# spacy>=3.7

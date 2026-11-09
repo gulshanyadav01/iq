@@ -18,6 +18,16 @@ class PolicyExtractionRequest(TimeStampedUUIDModel):
         COMPLETED = "completed", "Completed"
         FAILED = "failed", "Failed"
 
+    class ReviewStatus(models.TextChoices):
+        # Set once a row reaches `completed` (null for every non-completed row).
+        # The confidence gate (tasks._compute_review_status) decides between
+        # AUTO_APPROVED and NEEDS_REVIEW; a human sign-off via the `review` action
+        # moves a NEEDS_REVIEW row to APPROVED. "No silent issuance": a low-confidence
+        # extraction is never auto-approved.
+        AUTO_APPROVED = "auto_approved", "Auto-approved"
+        NEEDS_REVIEW = "needs_review", "Needs review"
+        APPROVED = "approved", "Approved"
+
     class ErrorCategory(models.TextChoices):
         # Bucket a failure is classified into (see services/error_classification.py).
         # Null for every non-failed row; set at failure time and on backfill.
@@ -52,6 +62,16 @@ class PolicyExtractionRequest(TimeStampedUUIDModel):
         db_index=True,
     )
     callback_response = models.JSONField(null=True, blank=True)
+    # Human-in-the-loop review gate. Null until the row completes; then set by the
+    # confidence gate and, on human sign-off, advanced to APPROVED (see ReviewStatus).
+    review_status = models.CharField(
+        max_length=20,
+        choices=ReviewStatus.choices,
+        null=True,
+        blank=True,
+        db_index=True,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
     # MinerU output checkpoint for the split pipeline (POLICY_EXTRACT_SPLIT_LLM):
     # _run_ocr writes it, _run_llm_map reads it, so a redelivery or an LLM-stage
     # failure never re-burns the GPU work. Empty on the legacy _run_parser path.

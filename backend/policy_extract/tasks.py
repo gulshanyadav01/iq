@@ -255,11 +255,68 @@ def _mark_processing(req) -> None:
     req.save(update_fields=["status", "updated_at"])
 
 
+def _normalize_confidence(raw) -> float | None:
+    """Coerce a field's confidence_score to a 0–1 float, or None if unusable.
+
+    The schema emits 0–1, but tolerate a 0–100 scale (divide by 100) so a stray
+    percentage can't force every row into review.
+    """
+    try:
+        conf = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if conf > 1.0:
+        conf = conf / 100.0
+    return conf
+
+
+def _compute_review_status(result: dict):
+    """Confidence gate: decide AUTO_APPROVED vs NEEDS_REVIEW for a completed row.
+
+    Returns a ``PolicyExtractionRequest.ReviewStatus`` value, or ``None`` when the
+    gate is disabled. A row needs review when any *extracted* field is below the
+    confidence threshold, or any field is flagged ``do_verification == "TRUE"`` by
+    the master-data resolver. Empty/un-extracted fields (backfilled to confidence
+    0.0) are ignored so a sparse-but-confident document still auto-approves.
+    """
+    from django.conf import settings
+
+    from policy_extract.models import PolicyExtractionRequest
+
+    if not settings.POLICY_EXTRACT_REVIEW_ENABLED:
+        return None
+
+    threshold = settings.POLICY_EXTRACT_REVIEW_CONFIDENCE_THRESHOLD
+    fields = (result or {}).get("extracted_fields") or {}
+    if not isinstance(fields, dict):
+        return PolicyExtractionRequest.ReviewStatus.AUTO_APPROVED
+
+    _EMPTY = {None, "", "0", "NO", "FALSE"}
+    for data in fields.values():
+        if not isinstance(data, dict):
+            continue
+        # The resolver's explicit "a human should check this" signal always routes
+        # to review, regardless of whether the field is otherwise considered set.
+        if str(data.get("do_verification", "")).upper() == "TRUE":
+            return PolicyExtractionRequest.ReviewStatus.NEEDS_REVIEW
+        is_extracted = str(data.get("is_extracted", "")).upper() == "TRUE"
+        value = data.get("value")
+        present = is_extracted or (value not in _EMPTY)
+        if not present:
+            continue
+        conf = _normalize_confidence(data.get("confidence_score"))
+        if conf is not None and conf < threshold:
+            return PolicyExtractionRequest.ReviewStatus.NEEDS_REVIEW
+
+    return PolicyExtractionRequest.ReviewStatus.AUTO_APPROVED
+
+
 def _complete(req, result: dict) -> None:
     from policy_extract.models import PolicyExtractionRequest
 
     req.result = result
-    req.save(update_fields=["result", "updated_at"])
+    req.review_status = _compute_review_status(result)
+    req.save(update_fields=["result", "review_status", "updated_at"])
     # Terminal status is written by the same task that produced the result, before
     # the callback — mirroring the failure path, so a slow or hostile callback
     # receiver can never leave a finished extraction stuck in `processing`.

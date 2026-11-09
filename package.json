@@ -19,6 +19,7 @@
     "db:reset": "docker compose up -d postgres && docker compose exec postgres bash -c \"/scripts/reset-databases.sh\"",
     "nuke": "bash ./scripts/nuke.sh",
     "init": "bash ./scripts/init-db-user.sh",
+    "demo:seed": "docker compose exec backend python manage.py seed_demo_policy_extract",
     "dev:build": "bash ./scripts/dev-build.sh",
     "prod:build": "bash ./scripts/prod-build.sh",
     "dev": "pnpm i && pnpm run dev:up --pull always",

@@ -47,6 +47,19 @@ env = environ.Env(
     POLICY_EXTRACT_GEMINI_MODEL=(str, "gemini-2.5-flash-lite"),
     POLICY_EXTRACT_GEMINI_SEED=(int, 42),
     POLICY_EXTRACT_STAGE2_RESPONSE_SCHEMA=(bool, True),
+    # OCR engine for PDF → Markdown. Default `gemini`: the configured Gemini model
+    # converts the PDF directly, so there is no external OCR server to run or keep
+    # reachable. Set to `mineru` to roll back to posting the PDF to the MinerU/Minerva
+    # server. See MineruGeminiParser._convert_pdf_to_markdown.
+    POLICY_EXTRACT_OCR_ENGINE=(str, "gemini"),
+    # Human-in-the-loop review gate (see tasks._compute_review_status).
+    POLICY_EXTRACT_REVIEW_ENABLED=(bool, True),
+    POLICY_EXTRACT_REVIEW_CONFIDENCE_THRESHOLD=(float, 0.7),
+    # PII masking before the LLM (see services/pii_masking.py). Default off = safe
+    # rollback; `regex` is offline and needs no model download, `presidio` adds
+    # name/address coverage but pulls in presidio-analyzer + a spaCy model.
+    POLICY_EXTRACT_PII_MASKING=(bool, False),
+    POLICY_EXTRACT_PII_ENGINE=(str, "regex"),
     POLICY_EXTRACT_PAGE_GATE=(bool, False),
     POLICY_EXTRACT_MAX_PAGES_IN_FLIGHT=(int, 75),
     POLICY_EXTRACT_GATE_MAX_WAIT=(int, 240),
@@ -99,6 +112,23 @@ POLICY_EXTRACT_CALLBACK_URL = env("POLICY_EXTRACT_CALLBACK_URL")
 
 POLICY_EXTRACT_GEMINI_MODEL = env("POLICY_EXTRACT_GEMINI_MODEL")
 POLICY_EXTRACT_GEMINI_SEED = env("POLICY_EXTRACT_GEMINI_SEED")
+
+# PDF → Markdown OCR engine: "mineru" (external Minerva server) or "gemini"
+# (the configured Gemini model reads the PDF natively, no OCR server needed).
+POLICY_EXTRACT_OCR_ENGINE = env("POLICY_EXTRACT_OCR_ENGINE").strip().lower()
+
+# Review gate: completed extractions whose fields are all at/above the confidence
+# threshold (and none flagged do_verification) auto-approve; the rest route to a
+# human. Disable to leave review_status unset.
+POLICY_EXTRACT_REVIEW_ENABLED = env("POLICY_EXTRACT_REVIEW_ENABLED")
+POLICY_EXTRACT_REVIEW_CONFIDENCE_THRESHOLD = env(
+    "POLICY_EXTRACT_REVIEW_CONFIDENCE_THRESHOLD"
+)
+
+# PII masking: when on, PII in the OCR markdown is replaced with reversible tokens
+# before any text reaches the LLM, then restored from the token map afterwards.
+POLICY_EXTRACT_PII_MASKING = env("POLICY_EXTRACT_PII_MASKING")
+POLICY_EXTRACT_PII_ENGINE = env("POLICY_EXTRACT_PII_ENGINE").strip().lower()
 
 # Force Gemini structured output (response_json_schema) on the Stage-2 mapping call
 # so flash-lite must return every schema field, instead of intermittently dropping

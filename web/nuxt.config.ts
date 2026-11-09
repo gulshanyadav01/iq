@@ -4,7 +4,12 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineNuxtConfig({
 
   compatibilityDate: '2025-07-15',
-  devtools: { enabled: true },
+  // SPA in dev (SSR in prod). This box's disk is slow enough that vite-node's
+  // server-side module fetch exceeds its 10s timeout and wedges the dev server
+  // ("Request timeout ... for type: module"). Skipping dev SSR avoids that path
+  // entirely; the app is an auth-gated client-rendered dashboard, so no SSR loss.
+  ssr: process.env.NODE_ENV === 'production',
+  devtools: { enabled: false },
   css: ['~/assets/css/main.css'],
   vite: {
     plugins: [

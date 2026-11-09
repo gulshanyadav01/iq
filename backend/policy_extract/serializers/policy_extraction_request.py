@@ -114,6 +114,8 @@ class PolicyExtractionRequestSerializer(serializers.ModelSerializer):
             "error",
             "error_category",
             "callback_response",
+            "review_status",
+            "reviewed_at",
             "created_at",
             "updated_at",
         ]
@@ -128,6 +130,8 @@ class PolicyExtractionRequestSerializer(serializers.ModelSerializer):
             "error",
             "error_category",
             "callback_response",
+            "review_status",
+            "reviewed_at",
             "created_at",
             "updated_at",
         ]

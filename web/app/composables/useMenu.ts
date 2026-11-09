@@ -3,20 +3,18 @@ import { useUserStore } from '~/stores/user'
 import { useRoute } from 'vue-router'
 import type { MenuItem, MenuSection, MenuConfig, UserRole } from '~/types/menu'
 import {
-  Home,
   Layout,
   Settings,
   FileText,
   Bot,
   Zap,
-  Upload,
-  FileStack
+  Upload
 } from 'lucide-vue-next'
 
 export const useMenu = () => {
   const userStore = useUserStore()
   const route = useRoute()
-  
+
   // Mock user roles and permissions - replace with actual role management
   const userRoles = ref<UserRole[]>([
     { id: 'admin', name: 'Administrator', permissions: ['*'] },
@@ -26,7 +24,7 @@ export const useMenu = () => {
 
   // Current user role (mock - replace with actual user role from store/API)
   const currentUserRole = ref<string>('admin')
-  
+
   // Default menu configuration
   const defaultMenuConfig = ref<MenuConfig>({
     sections: [
@@ -35,26 +33,10 @@ export const useMenu = () => {
         label: 'Main',
         items: [
           {
-            id: 'home',
-            label: 'Home',
-            path: '/home',
-            icon: Home,
-            requiresAuth: true,
-            roles: ['admin', 'user']
-          },
-          {
             id: 'policy-extract',
-            label: 'Policy Extract',
+            label: 'Policy Intake',
             path: '/policy-extract',
             icon: Upload,
-            requiresAuth: true,
-            roles: ['admin', 'user']
-          },
-          {
-            id: 'commission-intake',
-            label: 'Commission Intake',
-            path: '/commission-intake',
-            icon: FileStack,
             requiresAuth: true,
             roles: ['admin', 'user']
           }
@@ -125,15 +107,15 @@ export const useMenu = () => {
   // Check if user has required permission
   const hasPermission = (requiredPermissions?: string[]): boolean => {
     if (!requiredPermissions || requiredPermissions.length === 0) return true
-    
+
     const userRole = userRoles.value.find(role => role.id === currentUserRole.value)
     if (!userRole) return false
-    
+
     // Check for wildcard permission
     if (userRole.permissions.includes('*')) return true
-    
+
     // Check specific permissions
-    return requiredPermissions.some(permission => 
+    return requiredPermissions.some(permission =>
       userRole.permissions.includes(permission)
     )
   }
@@ -211,14 +193,14 @@ export const useMenu = () => {
   // Check if current route matches menu item
   const isActiveMenuItem = (item: MenuItem): boolean => {
     if (!item.path) return false
-    
+
     if (item.path === route.path) return true
-    
+
     // Check if current route starts with menu item path (for nested routes)
     if (route.path.startsWith(item.path) && item.path !== '/') {
       return true
     }
-    
+
     return false
   }
 
@@ -260,7 +242,7 @@ export const useMenu = () => {
     activeMenuItem,
     currentUserRole,
     userRoles,
-    
+
     // Methods
     isMenuItemVisible,
     isSectionVisible,

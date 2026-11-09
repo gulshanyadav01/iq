@@ -144,6 +144,15 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
                 "scoped by this filter, so every bucket stays switchable.",
             ),
             OpenApiParameter(
+                name="review_status",
+                type=str,
+                enum=["auto_approved", "needs_review", "approved"],
+                description="Drill-down filter by review state (only completed "
+                "requests carry a review_status). Unknown values are ignored. The "
+                "`counts.needs_review` breakdown is NOT scoped by this filter, so the "
+                "card stays switchable.",
+            ),
+            OpenApiParameter(
                 name="ordering",
                 type=str,
                 description="Sort field: one of created_at, updated_at, "
@@ -219,6 +228,17 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
             completed=Count("id", filter=Q(status="completed")),
             failed=Count("id", filter=Q(status="failed")),
             in_progress=Count("id", filter=Q(status__in=IN_PROGRESS_STATUSES)),
+            # Completed rows the confidence gate routed to a human and that nobody
+            # has signed off yet — the review queue's size. Scoped like the other
+            # counts (search + date range, not the status/review selection) so the
+            # card stays switchable.
+            needs_review=Count("id", filter=Q(review_status="needs_review")),
+            # Straight-through processing: completed with every field confident
+            # enough that no human was needed. Powers the "processed automatically"
+            # efficiency metric.
+            auto_approved=Count("id", filter=Q(review_status="auto_approved")),
+            # Completed rows a human has signed off.
+            approved=Count("id", filter=Q(review_status="approved")),
         )
         # Failure-reason breakdown for the "failure buckets" UI. Scoped like
         # `counts` — search + date range but NOT the status/category selection —
@@ -258,6 +278,12 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
         category_param = request.query_params.get("error_category", "").strip().lower()
         if category_param in PolicyExtractionRequest.ErrorCategory.values:
             queryset = queryset.filter(error_category=category_param)
+        # Drill-down by review state (auto_approved/needs_review/approved). Only
+        # completed rows carry a review_status. Unknown values are ignored, and the
+        # `counts` breakdown is not scoped by it, so the card stays switchable.
+        review_param = request.query_params.get("review_status", "").strip().lower()
+        if review_param in PolicyExtractionRequest.ReviewStatus.values:
+            queryset = queryset.filter(review_status=review_param)
         # Whitelisted ordering; append -created_at, id as a stable tiebreaker so
         # pagination is deterministic when sorting by a field with many ties
         # (status/original_filename).
@@ -331,6 +357,10 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
         instance.error_category = None
         instance.result = None
         instance.callback_response = None
+        # The re-run produces a fresh result, so any prior review verdict/sign-off
+        # is stale; clear it (the gate reassigns review_status on completion).
+        instance.review_status = None
+        instance.reviewed_at = None
         # A retry is a full re-run: drop the split pipeline's OCR checkpoint too.
         instance.ocr_markdown = ""
         instance.save(
@@ -340,11 +370,76 @@ class PolicyExtractionRequestViewSet(viewsets.GenericViewSet):
                 "error_category",
                 "result",
                 "callback_response",
+                "review_status",
+                "reviewed_at",
                 "ocr_markdown",
                 "updated_at",
             ]
         )
         enqueue_processing_chain(str(instance.id))
+        return Response(PolicyExtractionRequestSerializer(instance).data)
+
+    @extend_schema(
+        summary="Review a completed extraction (edit fields and/or approve)",
+        description="Human-in-the-loop sign-off for a completed extraction. Accepts "
+        '`{ "fields": { "<field>": <new_value> }, "approve": true }`. Each edited '
+        "field's value is overwritten in result.extracted_fields, its do_verification "
+        "flag is cleared, and the original value is preserved under original_value with "
+        "edited=true. When `approve` is true the request moves to review_status=approved "
+        "and reviewed_at is stamped. Only valid on completed requests.",
+        tags=["Policy Extract"],
+        responses={200: PolicyExtractionRequestSerializer},
+    )
+    @action(detail=True, methods=["post"], url_path="review")
+    def review(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.status != PolicyExtractionRequest.Status.COMPLETED:
+            return Response(
+                {"detail": "Only a completed extraction can be reviewed."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        result = instance.result if isinstance(instance.result, dict) else {}
+        fields = result.get("extracted_fields")
+        if not isinstance(fields, dict):
+            fields = {}
+            result["extracted_fields"] = fields
+
+        edits = request.data.get("fields") or {}
+        if not isinstance(edits, dict):
+            return Response(
+                {"detail": "`fields` must be an object of {field: value}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        applied = 0
+        for field_name, new_value in edits.items():
+            data = fields.get(field_name)
+            # Only touch fields that already exist in the schema output; a human
+            # correction shouldn't invent new field ids.
+            if not isinstance(data, dict):
+                continue
+            if data.get("value") != new_value:
+                data.setdefault("original_value", data.get("value"))
+                data["value"] = new_value
+            # A human has confirmed/corrected this field, so clear the "please
+            # check" flag and mark it human-edited.
+            data["do_verification"] = "FALSE"
+            data["edited"] = True
+            applied += 1
+
+        update_fields = ["updated_at"]
+        if applied:
+            instance.result = result
+            update_fields.append("result")
+
+        approve = str(request.data.get("approve", "")).lower() in ("true", "1", "yes")
+        if approve:
+            instance.review_status = PolicyExtractionRequest.ReviewStatus.APPROVED
+            instance.reviewed_at = timezone.now()
+            update_fields += ["review_status", "reviewed_at"]
+
+        instance.save(update_fields=update_fields)
         return Response(PolicyExtractionRequestSerializer(instance).data)
 
     @extend_schema(
