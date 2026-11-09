@@ -58,7 +58,7 @@ jobs:
           grep -q '^backend/' /tmp/changed.txt && echo "backend=true" >> "$GITHUB_OUTPUT" || echo "backend=false" >> "$GITHUB_OUTPUT"
           grep -qE '^web/.*\.(vue|ts|js|mjs|cjs)$' /tmp/changed.txt && echo "web=true" >> "$GITHUB_OUTPUT" || echo "web=false" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -141,7 +141,7 @@ jobs:
       CELERY_BROKER_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           # Restores pip's HTTP cache keyed on requirements.txt, so wheels are
