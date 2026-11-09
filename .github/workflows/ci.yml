@@ -282,7 +282,7 @@ jobs:
       # Azure Front Door HTML page parsed as "failed to parse error response
       # 400". With only ACTIONS_RESULTS_URL present BuildKit uses the v2 API.
       - name: Export Actions cache runtime for BuildKit (CACHE_TYPE=gha)
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             for (const key of ['ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RESULTS_URL']) {
