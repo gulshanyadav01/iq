@@ -34,7 +34,7 @@
     "nuxt": "^4.0.3",
     "pdfjs-dist": "^4.7.76",
     "pinia": "^3.0.3",
-    "serve": "14.2.4",
+    "serve": "14.2.6",
     "std-env": "^3.9.0",
     "tailwindcss": "^4.1.12",
     "typescript": "^5.9.2",
