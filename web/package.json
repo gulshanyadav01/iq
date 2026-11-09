@@ -35,7 +35,7 @@
     "pdfjs-dist": "^4.7.76",
     "pinia": "^3.0.3",
     "serve": "14.2.4",
-    "std-env": "^3.9.0",
+    "std-env": "^4.3.0",
     "tailwindcss": "^4.1.12",
     "typescript": "^5.9.2",
     "vue": "^3.5.18",
