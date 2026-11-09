@@ -22,7 +22,7 @@ cryptography==45.0.6
 google-genai==2.7.0
 openai==2.32.0
 anthropic==0.97.0
-gunicorn==23.0.0
+gunicorn==26.2.0
 uvicorn==0.35.0
 whitenoise==6.9.0
 langfuse>=4.3.1
